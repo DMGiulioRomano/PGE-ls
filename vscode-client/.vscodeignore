@@ -1,0 +1,20 @@
+# File esclusi dal pacchetto .vsix
+
+# Dipendenze di sviluppo
+node_modules/**
+.vscode/**
+
+# Cache Python
+granular_ls/__pycache__/**
+granular_ls/**/__pycache__/**
+**/*.pyc
+**/*.pyo
+
+# Test (non servono nell'estensione)
+# I test restano nella repo ma non nel .vsix
+
+# File di sviluppo
+.git/**
+.gitignore
+*.test.js
+*.spec.js
