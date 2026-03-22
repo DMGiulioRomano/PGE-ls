@@ -18,6 +18,7 @@
     "audio"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onLanguage:yaml",
     "workspaceContains:**/PGE_*.yaml",
     "workspaceContains:**/PGE_*.yml"

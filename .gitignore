@@ -8,34 +8,28 @@ __pycache__/
 dist/
 build/
 .eggs/
-
 # Test e coverage
 .pytest_cache/
 .coverage
 htmlcov/
 *.xml
-
 # Ambienti virtuali
 .venv/
 venv/
 env/
 ENV/
-
 # VSCode extension - build artifacts
 vscode-client/node_modules/
 vscode-client/*.vsix
 vscode-client/.vscode/
-
 # macOS
 .DS_Store
 .AppleDouble
 .LSOverride
-
 # Editor
 .idea/
 *.swp
 *.swo
 *~
-
 # Snapshot generati (opzionale: commentalo se vuoi versionarli)
 schema_snapshot.json

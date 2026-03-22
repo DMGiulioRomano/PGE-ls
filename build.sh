@@ -24,7 +24,7 @@ cd "$CLIENT"
 npm install --silent
 
 echo "==> Pacchettizzando..."
-npx @vscode/vsce package --no-dependencies
+npx @vscode/vsce package 
 
 VSIX=$(ls "$CLIENT"/*.vsix | sort -V | tail -1)
 echo "==> Creato: $VSIX"

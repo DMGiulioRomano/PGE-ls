@@ -1,7 +1,6 @@
 #!/bin/bash
 # setup.sh - Setup automatico di pge-ls
 # Uso: bash setup.sh
-# Eseguire dalla cartella Downloads DOPO aver estratto lo zip.
 
 set -e  # esci subito se un comando fallisce
 
