@@ -19,9 +19,9 @@ venv/
 env/
 ENV/
 # VSCode extension - build artifacts
-vscode-client/node_modules/
-vscode-client/*.vsix
-vscode-client/.vscode/
+clients/vscode/node_modules/
+clients/vscode/*.vsix
+clients/vscode/.vscode/
 # macOS
 .DS_Store
 .AppleDouble
