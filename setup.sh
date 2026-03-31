@@ -34,11 +34,18 @@ fi
 
 echo "    Python trovato: $PYTHON ($($PYTHON --version))"
 
-# Installa le dipendenze Python se mancano
-$PYTHON -c "import pygls" 2>/dev/null || {
-    echo "    Installazione dipendenze Python..."
-    $PYTHON -m pip install "pygls==1.3.1" lsprotocol pytest --quiet
-}
+# Crea il virtual environment se non esiste
+VENV_DIR="$PROJECT_DIR/.venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "    Creazione virtual environment in .venv/ ..."
+    $PYTHON -m venv "$VENV_DIR"
+fi
+
+# Usa il Python del venv da qui in poi
+PYTHON="$VENV_DIR/bin/python"
+
+echo "    Installazione dipendenze da requirements.txt..."
+"$VENV_DIR/bin/pip" install --quiet -r "$PROJECT_DIR/requirements.txt"
 echo "    Dipendenze Python OK"
 
 # -----------------------------------------------------------------------
@@ -105,7 +112,7 @@ echo "  1. Apri VSCode sulla cartella vscode-client:"
 echo "     code $CLIENT_DIR"
 echo ""
 echo "  2. In VSCode verifica settings.json (Cmd+Shift+P -> Open User Settings JSON):"
-echo "     \"pgeLs.pythonPath\": \"$PYTHON\","
+echo "     \"pgeLs.pythonPath\": \"$VENV_DIR/bin/python\","
 echo "     \"pgeLs.granularSrcPath\": \"/path/al/tuo/progetto/src\""
 echo ""
 echo "  3. Premi F5 per avviare l'Extension Development Host."

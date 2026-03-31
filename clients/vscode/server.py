@@ -87,12 +87,18 @@ server = LanguageServer(
 _completion_provider: Optional[CompletionProvider] = None
 _hover_provider: Optional[HoverProvider] = None
 _diagnostic_provider: Optional[DiagnosticProvider] = None
+_src_path: Optional[str] = None
 
 
 def _init_providers(bridge: SchemaBridge) -> None:
     """Inizializza i provider con il bridge fornito."""
     global _completion_provider, _hover_provider, _diagnostic_provider
-    _completion_provider = CompletionProvider(bridge)
+    refs_dir = None
+    if _src_path:
+        candidate = (Path(_src_path) / '..' / 'refs').resolve()
+        if candidate.is_dir():
+            refs_dir = candidate
+    _completion_provider = CompletionProvider(bridge, refs_dir=refs_dir)
     _hover_provider = HoverProvider(bridge)
     _diagnostic_provider = DiagnosticProvider(bridge)
     logger.info(

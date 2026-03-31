@@ -22,6 +22,7 @@ ENV/
 clients/vscode/node_modules/
 clients/vscode/*.vsix
 clients/vscode/.vscode/
+clients/vscode/granular_ls/granular_ls/
 # macOS
 .DS_Store
 .AppleDouble

@@ -23,6 +23,7 @@ DENTRO DEPHASE (parent_path=['dephase']):
 """
 
 import re
+from pathlib import Path
 from typing import List, Optional, Set
 
 from lsprotocol.types import (
@@ -104,9 +105,10 @@ _STREAM_CONTEXT_DOCS = {
 
 class CompletionProvider:
 
-    def __init__(self, bridge: SchemaBridge):
+    def __init__(self, bridge: SchemaBridge, refs_dir: Optional[Path] = None):
         self._bridge = bridge
         self._envelope_provider = EnvelopeSnippetProvider(bridge)
+        self._refs_dir = refs_dir
 
     def get_completions(self, context: YamlContext,
                         document_text: str) -> List[CompletionItem]:
@@ -121,6 +123,10 @@ class CompletionProvider:
         # STREAM START: riga con '- ', ha priorita' su tutto il resto
         if context.context_type == 'stream_start':
             return self._get_stream_context_completions(context.current_text, document_text)
+
+        # Contesto 'value' su chiave 'sample': mostra i file disponibili in refs/
+        if context.context_type == 'value' and context.current_key == 'sample':
+            return self._get_sample_completions(context.current_text)
 
         # Contesto 'value': suggerisce snippet envelope se il parametro
         # e' numerico (is_smart=True, non-interno).
@@ -522,6 +528,40 @@ class CompletionProvider:
         if stream_ctx['time_mode'] == 'normalized':
             return 1.0
         return stream_ctx['duration']
+
+    # -------------------------------------------------------------------------
+    # SAMPLE FILE COMPLETIONS
+    # -------------------------------------------------------------------------
+
+    def _get_sample_completions(self, current_text: str) -> List[CompletionItem]:
+        """
+        Elenca i file presenti in refs/ come CompletionItem per la chiave 'sample'.
+
+        Mostra tutti i file (non le sottodirectory) presenti in refs/.
+        Filtra per prefisso se l'utente ha gia' digitato parte del nome.
+        """
+        if self._refs_dir is None or not self._refs_dir.is_dir():
+            return []
+
+        prefix = current_text.strip().strip('"\'').lower()
+        items = []
+        for path in sorted(self._refs_dir.iterdir()):
+            if not path.is_file():
+                continue
+            filename = path.name
+            if prefix and not filename.lower().startswith(prefix):
+                continue
+            items.append(CompletionItem(
+                label=filename,
+                insert_text=f'"{filename}"',
+                kind=CompletionItemKind.File,
+                detail=path.suffix.lstrip('.').upper() if path.suffix else 'file',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'**{filename}**\n\nFile audio in `refs/`.',
+                ),
+            ))
+        return items
 
     # -------------------------------------------------------------------------
     # HELPERS
