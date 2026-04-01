@@ -89,6 +89,13 @@ class SchemaBridge:
             raw_data.get('stream_context_keys') or _STATIC_STREAM_CONTEXT_KEYS
         )
 
+        # Modalita' di distribuzione disponibili.
+        # Lette da DistributionFactory in from_python_path; fallback statico.
+        _STATIC_DISTRIBUTION_MODES = ['uniform', 'gaussian']
+        self._distribution_modes: List[str] = (
+            raw_data.get('distribution_modes') or _STATIC_DISTRIBUTION_MODES
+        )
+
 
         # Conserviamo gli spec raw per get_dephase_keys()
         self._raw_specs = specs
@@ -287,6 +294,10 @@ class SchemaBridge:
                 keys.append(dk)
         return keys
 
+    def get_distribution_modes(self) -> List[str]:
+        """Lista delle modalita' di distribuzione disponibili (es. uniform, gaussian)."""
+        return list(self._distribution_modes)
+
     def get_documentation(self, param: ParameterInfo) -> str:
         """
         Stringa di documentazione leggibile per il provider Hover.
@@ -329,7 +340,8 @@ class SchemaBridge:
         json.dumps gestisce None come null, e' compatibile.
         """
         data = {
-            'parameters': [asdict(p) for p in self._params.values()]
+            'parameters': [asdict(p) for p in self._params.values()],
+            'distribution_modes': self._distribution_modes,
         }
         return json.dumps(data, indent=2)
 
@@ -493,6 +505,13 @@ class SchemaBridge:
             if stream_context_keys:
                 raw_data['stream_context_keys'] = stream_context_keys
 
+            # Carica le modalita' di distribuzione da DistributionFactory
+            try:
+                from parameters.distribution_factory import DistributionFactory
+                raw_data['distribution_modes'] = list(DistributionFactory._registry.keys())
+            except Exception:
+                pass  # Usa il fallback statico nel costruttore
+
             return cls(raw_data)
 
         finally:
@@ -544,4 +563,7 @@ class SchemaBridge:
                     'variation_mode': p['variation_mode'],
                 }
 
-        return cls({'specs': specs, 'bounds': bounds})
+        raw = {'specs': specs, 'bounds': bounds}
+        if 'distribution_modes' in data:
+            raw['distribution_modes'] = data['distribution_modes']
+        return cls(raw)

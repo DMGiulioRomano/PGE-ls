@@ -23,6 +23,7 @@ DENTRO DEPHASE (parent_path=['dephase']):
 """
 
 import re
+from pathlib import Path
 from typing import List, Optional, Set
 
 from lsprotocol.types import (
@@ -62,6 +63,12 @@ from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.envelope_snippets import EnvelopeSnippetProvider
 from granular_ls.yaml_analyzer import YamlContext
 
+# Chiavi flag: presenti senza valore, non accettano envelope
+_FLAG_KEYS = {'mute', 'solo', 'range_always_active'}
+
+# Chiavi con completions sul valore: aprono il menu automaticamente dopo ': '
+_VALUE_TRIGGER_KEYS = {'sample', 'distribution_mode', 'time_mode', 'loop_unit'}
+
 # Documentazione statica per le stream context keys
 _STREAM_CONTEXT_DOCS = {
     'stream_id':           'Identificatore univoco dello stream (stringa).',
@@ -71,7 +78,7 @@ _STREAM_CONTEXT_DOCS = {
     'time_mode':           "Modalita tempo: 'absolute' (default) | 'normalized'.",
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
     'range_always_active': 'Se True, il range si applica anche senza dephase.',
-    'distribution_mode':   "Distribuzione grani: 'uniform' (default).",
+    'distribution_mode':   None,  # generata dinamicamente
     'dephase':             "Randomizzazione inter-grano. Bool, float, envelope o dict.",
     'solo': (
         "Flag: quando presente, SOLO gli stream con 'solo' vengono renderizzati. "
@@ -104,9 +111,10 @@ _STREAM_CONTEXT_DOCS = {
 
 class CompletionProvider:
 
-    def __init__(self, bridge: SchemaBridge):
+    def __init__(self, bridge: SchemaBridge, refs_dir: Optional[Path] = None):
         self._bridge = bridge
         self._envelope_provider = EnvelopeSnippetProvider(bridge)
+        self._refs_dir = refs_dir
 
     def get_completions(self, context: YamlContext,
                         document_text: str) -> List[CompletionItem]:
@@ -121,6 +129,18 @@ class CompletionProvider:
         # STREAM START: riga con '- ', ha priorita' su tutto il resto
         if context.context_type == 'stream_start':
             return self._get_stream_context_completions(context.current_text, document_text)
+
+        # Contesto 'value' su chiave 'sample': mostra i file disponibili in refs/
+        if context.context_type == 'value' and context.current_key == 'sample':
+            return self._get_sample_completions(context.current_text)
+
+        # Contesto 'value' su chiave 'distribution_mode': mostra le modalita' disponibili
+        if context.context_type == 'value' and context.current_key == 'distribution_mode':
+            return self._get_distribution_mode_completions(context.current_text)
+
+        # Contesto 'value' su chiave 'time_mode': mostra i valori disponibili
+        if context.context_type == 'value' and context.current_key == 'time_mode':
+            return self._get_time_mode_completions(context.current_text)
 
         # Contesto 'value': suggerisce snippet envelope se il parametro
         # e' numerico (is_smart=True, non-interno).
@@ -145,7 +165,25 @@ class CompletionProvider:
 
         # DENTRO UN BLOCCO (grain, pointer, pitch, ...)
         if context.parent_path:
-            return self._get_block_param_completions(context, document_text)
+            # Verifica che il blocco abbia effettivamente parametri nel bridge.
+            # Se non ne ha (es. mute:, solo: trattati come blocchi dall'analizzatore
+            # per via dell'auto-indent dopo ':'), si fa fallback al livello stream.
+            prefix_path = '.'.join(context.parent_path) + '.'
+            has_params = any(
+                not p.is_internal and p.yaml_path.startswith(prefix_path)
+                for p in self._bridge.get_all_parameters()
+            )
+            if has_params:
+                return self._get_block_param_completions(context, document_text)
+            # Fallback solo per flag keys (mute, solo): l'auto-indent di VSCode
+            # dopo ':' porta il cursore un livello piu' in profondo, ma questi
+            # non hanno figli. Tutti gli altri casi (envelope, blocchi sconosciuti)
+            # devono restituire vuoto.
+            if (len(context.parent_path) == 1
+                    and context.parent_path[0] in _FLAG_KEYS
+                    and context.in_stream_element):
+                return self._get_stream_level_completions_fallback(context, document_text)
+            return []
 
         # STREAM ELEMENT LEVEL (in_stream_element=True, parent_path=[])
         if context.in_stream_element:
@@ -206,7 +244,7 @@ class CompletionProvider:
         - indent 2: parametri diretti dello stream  <- SOLO QUI
         - indent 3+: parametri di blocchi annidati (grain, pointer, pitch)
         """
-        if context.indent_level != 2:
+        if context.leading_spaces != 4:
             return []
 
         already_present = self._extract_present_keys(document_text, context)
@@ -219,17 +257,42 @@ class CompletionProvider:
                 continue
             if key in already_present:
                 continue
-            doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
-            items.append(CompletionItem(
-                label=key,
-                insert_text=key + ': ',
-                kind=CompletionItemKind.Field,
-                detail='stream context',
-                documentation=MarkupContent(
-                    kind=MarkupKind.Markdown,
-                    value=f'**{key}**\n\n{doc}',
-                ),
-            ))
+            if key == 'distribution_mode':
+                modes = self._bridge.get_distribution_modes()
+                doc = (
+                    "Variazione stocastica dei parametri: controlla la distribuzione "
+                    "applicata quando un parametro ha `mod_range`.\n\n"
+                    "Modalita' disponibili: " + ', '.join(f'`{m}`' for m in modes) +
+                    "\n\nDefault: `uniform`"
+                )
+            else:
+                doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
+            if key in _FLAG_KEYS:
+                # Flag senza valore: inserisce solo il nome, va a capo e apre il menu
+                items.append(CompletionItem(
+                    label=key,
+                    insert_text=key + ':\n$0',
+                    insert_text_format=InsertTextFormat.Snippet,
+                    kind=CompletionItemKind.Field,
+                    detail='flag (no value)',
+                    documentation=MarkupContent(
+                        kind=MarkupKind.Markdown,
+                        value=f'**{key}**\n\n{doc}',
+                    ),
+                    command=TRIGGER_SUGGEST,
+                ))
+            else:
+                items.append(CompletionItem(
+                    label=key,
+                    insert_text=key + ': ',
+                    kind=CompletionItemKind.Field,
+                    detail='stream context',
+                    documentation=MarkupContent(
+                        kind=MarkupKind.Markdown,
+                        value=f'**{key}**\n\n{doc}',
+                    ),
+                    command=TRIGGER_SUGGEST if key in _VALUE_TRIGGER_KEYS else None,
+                ))
 
         # Tieni traccia delle label gia' inserite: aggiornato a ogni sezione
         # per evitare duplicati tra stream context keys, parametri e block keys.
@@ -283,6 +346,18 @@ class CompletionProvider:
     # -------------------------------------------------------------------------
     # STREAM CONTEXT (su riga '- ')
     # -------------------------------------------------------------------------
+
+    def _get_stream_level_completions_fallback(self, context: YamlContext,
+                                                document_text: str) -> List[CompletionItem]:
+        """
+        Fallback per quando il parent_path punta a un 'blocco' senza parametri
+        (es. mute:, solo: che l'analizzatore scambia per blocchi per via
+        dell'auto-indent VSCode dopo i ':').
+        Ricicla _get_stream_level_completions ignorando il gate indent_level.
+        """
+        from dataclasses import replace
+        fallback_ctx = replace(context, parent_path=[], indent_level=2, leading_spaces=4)
+        return self._get_stream_level_completions(fallback_ctx, document_text)
 
     def _get_new_stream_snippet(self,
                                 document_text: str = '') -> List[CompletionItem]:
@@ -371,17 +446,41 @@ class CompletionProvider:
             # Salta i campi gia' coperti dallo snippet obbligatorio
             if key in ('stream_id', 'onset', 'duration', 'sample'):
                 continue
-            doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
-            items.append(CompletionItem(
-                label=key,
-                insert_text=key + ': ',
-                kind=CompletionItemKind.Field,
-                detail='stream context',
-                documentation=MarkupContent(
-                    kind=MarkupKind.Markdown,
-                    value=f'**{key}**\n\n{doc}',
-                ),
-            ))
+            if key == 'distribution_mode':
+                modes = self._bridge.get_distribution_modes()
+                doc = (
+                    "Variazione stocastica dei parametri: controlla la distribuzione "
+                    "applicata quando un parametro ha `mod_range`.\n\n"
+                    "Modalita' disponibili: " + ', '.join(f'`{m}`' for m in modes) +
+                    "\n\nDefault: `uniform`"
+                )
+            else:
+                doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
+            if key in _FLAG_KEYS:
+                items.append(CompletionItem(
+                    label=key,
+                    insert_text=key + ':\n$0',
+                    insert_text_format=InsertTextFormat.Snippet,
+                    kind=CompletionItemKind.Field,
+                    detail='flag (no value)',
+                    documentation=MarkupContent(
+                        kind=MarkupKind.Markdown,
+                        value=f'**{key}**\n\n{doc}',
+                    ),
+                    command=TRIGGER_SUGGEST,
+                ))
+            else:
+                items.append(CompletionItem(
+                    label=key,
+                    insert_text=key + ': ',
+                    kind=CompletionItemKind.Field,
+                    detail='stream context',
+                    documentation=MarkupContent(
+                        kind=MarkupKind.Markdown,
+                        value=f'**{key}**\n\n{doc}',
+                    ),
+                    command=TRIGGER_SUGGEST if key in _VALUE_TRIGGER_KEYS else None,
+                ))
         return items
 
     # -------------------------------------------------------------------------
@@ -522,6 +621,111 @@ class CompletionProvider:
         if stream_ctx['time_mode'] == 'normalized':
             return 1.0
         return stream_ctx['duration']
+
+    # -------------------------------------------------------------------------
+    # DISTRIBUTION MODE COMPLETIONS
+    # -------------------------------------------------------------------------
+
+    def _get_distribution_mode_completions(self, current_text: str) -> List[CompletionItem]:
+        """
+        Elenca le modalita' di distribuzione disponibili per distribution_mode.
+        Lette dinamicamente dal bridge (DistributionFactory o fallback statico).
+        """
+        modes = self._bridge.get_distribution_modes()
+        prefix = current_text.strip().strip('"\'').lower()
+        items = []
+        _MODE_DOCS = {
+            'uniform': (
+                'Distribuzione **uniforme**: la variazione stocastica e` applicata '
+                'estraendo valori con probabilita` uniforme nel range `[v - mod_range, v + mod_range]`.'
+            ),
+            'gaussian': (
+                'Distribuzione **gaussiana**: la variazione stocastica segue una '
+                'curva a campana centrata sul valore nominale. '
+                'I valori estremi sono meno probabili rispetto a `uniform`.'
+            ),
+        }
+        for mode in modes:
+            if prefix and not mode.lower().startswith(prefix):
+                continue
+            items.append(CompletionItem(
+                label=mode,
+                insert_text=f'"{mode}"',
+                kind=CompletionItemKind.EnumMember,
+                detail='distribution mode',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=_MODE_DOCS.get(mode, f'Modalita` di distribuzione: `{mode}`.'),
+                ),
+            ))
+        return items
+
+    def _get_time_mode_completions(self, current_text: str) -> List[CompletionItem]:
+        """Valori disponibili per time_mode: absolute (default) | normalized."""
+        _MODES = {
+            'absolute': (
+                'Tempi degli envelope in **secondi assoluti** (default).\n\n'
+                'I breakpoints `[t, v]` usano `t` in secondi reali.'
+            ),
+            'normalized': (
+                'Tempi degli envelope **normalizzati** in `[0.0, 1.0]`.\n\n'
+                'I breakpoints `[t, v]` usano `t` come frazione della durata dello stream.'
+            ),
+        }
+        prefix = current_text.strip().strip('"\'').lower()
+        return [
+            CompletionItem(
+                label=mode,
+                insert_text=f'"{mode}"\n$0',
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.EnumMember,
+                detail='time mode',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'`{mode}`\n\n{doc}',
+                ),
+                command=TRIGGER_SUGGEST,
+            )
+            for mode, doc in _MODES.items()
+            if not prefix or mode.startswith(prefix)
+        ]
+
+    # -------------------------------------------------------------------------
+    # SAMPLE FILE COMPLETIONS
+    # -------------------------------------------------------------------------
+
+    def _get_sample_completions(self, current_text: str) -> List[CompletionItem]:
+        """
+        Elenca i file presenti in refs/ come CompletionItem per la chiave 'sample'.
+
+        Mostra tutti i file (non le sottodirectory) presenti in refs/.
+        Filtra per prefisso se l'utente ha gia' digitato parte del nome.
+        """
+        if self._refs_dir is None or not self._refs_dir.is_dir():
+            return []
+
+        prefix = current_text.strip().strip('"\'').lower()
+        items = []
+        EXCLUDED = {'.DS_Store', '.gitkeep'}
+        for path in sorted(self._refs_dir.iterdir()):
+            if not path.is_file():
+                continue
+            filename = path.name
+            if filename in EXCLUDED:
+                continue
+            if prefix and not filename.lower().startswith(prefix):
+                continue
+            items.append(CompletionItem(
+                label=filename,
+                insert_text=f'"{filename}"',
+                kind=CompletionItemKind.File,
+                detail=path.suffix.lstrip('.').upper() if path.suffix else 'file',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'**{filename}**\n\nFile audio in `refs/`.',
+                ),
+            ))
+        return items
 
     # -------------------------------------------------------------------------
     # HELPERS

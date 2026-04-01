@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Tuple
 from lsprotocol.types import (
     Diagnostic,
     DiagnosticSeverity,
+    DiagnosticTag,
     Position,
     Range,
 )
@@ -90,6 +91,10 @@ class DiagnosticProvider:
 
         # Fase 3: controllo campi obbligatori per ogni stream.
         diagnostics.extend(self._check_mandatory_stream_fields(document_text))
+
+        # Fase 3b: sbiadisce stream muted e stream non-solo.
+        diagnostics.extend(self._check_muted_streams(document_text))
+        diagnostics.extend(self._check_solo_streams(document_text))
 
         # Fase 3: controllo exclusive_group.
         diagnostics.extend(self._check_exclusive_groups(parsed))
@@ -630,6 +635,95 @@ class DiagnosticProvider:
                     source=SOURCE,
                 ))
 
+        return diagnostics
+
+    # -------------------------------------------------------------------------
+    # MUTED / SOLO
+    # -------------------------------------------------------------------------
+
+    def _find_stream_blocks(
+        self, lines: List[str]
+    ) -> List[Tuple[int, int, dict]]:
+        """
+        Ritorna lista di (start_line, end_line, keys) per ogni stream.
+        keys e' un dict {chiave: valore} delle chiavi dirette dello stream.
+        """
+        stream_starts = []
+        for n, line in enumerate(lines):
+            stripped = line.strip()
+            leading = len(line) - len(line.lstrip())
+            if (stripped.startswith('- ') or stripped == '-') and leading == 2:
+                stream_starts.append(n)
+
+        streams = []
+        for idx, start in enumerate(stream_starts):
+            end = (stream_starts[idx + 1] - 1
+                   if idx + 1 < len(stream_starts)
+                   else len(lines) - 1)
+            keys: dict = {}
+            for n in range(start, end + 1):
+                raw = lines[n]
+                stripped = raw.strip()
+                if stripped.startswith('- '):
+                    stripped = stripped[2:].strip()
+                if ':' in stripped:
+                    key = stripped[:stripped.index(':')].strip()
+                    value = stripped[stripped.index(':') + 1:].strip()
+                    if key and all(c.isalnum() or c == '_' for c in key):
+                        keys[key] = value
+            streams.append((start, end, keys))
+        return streams
+
+    def _check_muted_streams(self, document_text: str) -> List[Diagnostic]:
+        """
+        Sbiadisce (DiagnosticTag.Unnecessary) ogni stream con muted: true.
+        """
+        diagnostics = []
+        lines = document_text.split('\n')
+        for start, end, keys in self._find_stream_blocks(lines):
+            if 'mute' in keys:
+                end_char = len(lines[end]) if end < len(lines) else 0
+                diagnostics.append(Diagnostic(
+                    range=Range(
+                        start=Position(line=start, character=0),
+                        end=Position(line=end, character=end_char),
+                    ),
+                    message="Stream muted: questo stream non verra' riprodotto.",
+                    severity=DiagnosticSeverity.Hint,
+                    source=SOURCE,
+                    tags=[DiagnosticTag.Unnecessary],
+                ))
+        return diagnostics
+
+    def _check_solo_streams(self, document_text: str) -> List[Diagnostic]:
+        """
+        Se almeno uno stream ha solo: true, sbiadisce tutti gli altri
+        (che non hanno a loro volta solo: true).
+        """
+        diagnostics = []
+        lines = document_text.split('\n')
+        streams = self._find_stream_blocks(lines)
+
+        solo_set = {
+            i for i, (_, _, keys) in enumerate(streams)
+            if 'solo' in keys
+        }
+        if not solo_set:
+            return []
+
+        for i, (start, end, _) in enumerate(streams):
+            if i not in solo_set:
+                end_char = len(lines[end]) if end < len(lines) else 0
+                diagnostics.append(Diagnostic(
+                    range=Range(
+                        start=Position(line=start, character=0),
+                        end=Position(line=end, character=end_char),
+                    ),
+                    message="Stream non attivo: un altro stream ha 'solo: true'.",
+                    severity=DiagnosticSeverity.Hint,
+                    source=SOURCE,
+                    tags=[DiagnosticTag.Unnecessary],
+                ))
         return diagnostics
 
     # -------------------------------------------------------------------------
