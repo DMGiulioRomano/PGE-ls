@@ -148,8 +148,9 @@ class TestYamlContext:
             ctx.context_type = 'value'
 
     def test_campi_attesi(self):
-        expected = {'context_type', 'current_text', 'parent_path', 
-                    'indent_level', 'in_stream_element', 'current_key', 'cursor_line'}
+        expected = {'context_type', 'current_text', 'parent_path',
+                    'indent_level', 'in_stream_element', 'current_key', 'cursor_line',
+                    'leading_spaces'}
         actual = {f.name for f in fields(YamlContext)}
         assert expected == actual
 

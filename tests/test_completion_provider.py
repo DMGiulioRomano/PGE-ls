@@ -110,7 +110,8 @@ def bridge():
 
 def make_context(context_type='key', current_text='',
                  parent_path=None, indent_level=2,
-                 in_stream_element=True, current_key=''):
+                 in_stream_element=True, current_key='',
+                 leading_spaces=None):
     return YamlContext(
         context_type=context_type,
         current_text=current_text,
@@ -118,6 +119,7 @@ def make_context(context_type='key', current_text='',
         indent_level=indent_level,
         in_stream_element=in_stream_element,
         current_key=current_key,
+        leading_spaces=leading_spaces if leading_spaces is not None else indent_level * 2,
     )
 
 
@@ -308,12 +310,24 @@ class TestGetCompletionsFiltroParentPath:
         assert 'grain.duration' not in labels
 
     def test_parent_path_sconosciuto_ritorna_vuoto(self, bridge):
-        """Un blocco non noto al bridge non ha parametri noti."""
+        """Un blocco non noto al bridge (es. dentro envelope) ritorna vuoto."""
         provider = CompletionProvider(bridge)
         ctx = make_context(context_type='key', current_text='',
-                           parent_path=['unknown_block'], indent_level=1)
-        result = provider.get_completions(ctx, document_text="unknown_block:\n  ")
+                           parent_path=['unknown_block'], indent_level=3,
+                           in_stream_element=True)
+        result = provider.get_completions(ctx, document_text="streams:\n  - stream_id: x\n    unknown_block:\n      ")
         assert result == []
+
+    def test_flag_key_in_stream_fallback_stream_level(self, bridge):
+        """mute/solo come parent fanno fallback al livello stream (auto-indent VSCode)."""
+        from granular_ls.providers.completion_provider import CompletionProvider
+        provider = CompletionProvider(bridge)
+        for flag in ('mute', 'solo'):
+            ctx = make_context(context_type='key', current_text='',
+                               parent_path=[flag], indent_level=3,
+                               in_stream_element=True)
+            result = provider.get_completions(ctx, document_text=f"streams:\n  - stream_id: x\n    {flag}:\n      ")
+            assert len(result) > 0, f"Fallback non attivo per flag '{flag}'"
 
     def test_label_nel_blocco_annidato_e_yaml_path_completo(self, bridge):
         """

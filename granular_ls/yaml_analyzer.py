@@ -89,6 +89,8 @@ class YamlContext:
     # Vuoto per context_type 'key', 'stream_start', 'unknown'.
     cursor_line: int = 0
     # Numero di riga del cursore (0-indexed).
+    leading_spaces: int = 0
+    # Numero esatto di spazi iniziali sulla riga corrente.
 
 
 # =============================================================================
@@ -342,6 +344,7 @@ class YamlAnalyzer:
             in_stream_element=in_stream_element,
             current_key=current_key,
             cursor_line=line,
+            leading_spaces=leading_spaces,
         )
 
     @staticmethod
@@ -362,10 +365,14 @@ class YamlAnalyzer:
 
             line_leading = len(line) - len(line.lstrip())
 
-            # Marcatore lista a indentazione inferiore: siamo in uno stream
+            # Marcatore lista a indentazione inferiore: siamo in uno stream.
+            # Esclude i breakpoints envelope ('- [' o '- {') che non sono stream markers.
             if (line_stripped.startswith('- ') or line_stripped == '-') \
                     and line_leading < current_leading:
-                return True
+                after_dash = line_stripped[2:].strip() if line_stripped.startswith('- ') else ''
+                is_breakpoint = after_dash.startswith('[') or after_dash.startswith('{')
+                if not is_breakpoint:
+                    return True
 
             # Root level senza lista: non siamo in uno stream
             if line_leading == 0 and not line_stripped.startswith('-'):
@@ -435,11 +442,13 @@ class YamlAnalyzer:
 
             # Marcatore lista: fermiamo solo se e' a indent 1 (marcatore stream).
             # I '- ' profondi sono breakpoints envelope, non stream markers.
+            # Distinguiamo stream markers ('- chiave: ...') da breakpoints ('- [' o '- {').
             if stripped.startswith('- ') or stripped == '-':
-                if line_leading == 2:
+                after_dash = stripped[2:].strip() if stripped.startswith('- ') else ''
+                is_breakpoint = after_dash.startswith('[') or after_dash.startswith('{')
+                if line_leading == 2 and not is_breakpoint:
                     break
-                else:
-                    continue
+                continue
 
             if line_indent == target_indent:
                 line_clean = stripped.split('#')[0].rstrip()

@@ -35,7 +35,7 @@ _STREAM_CONTEXT_DOCS = {
     'time_mode':           "Modalita tempo degli envelope: absolute (default) | normalized.",
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
     'range_always_active': 'Se True, il range si applica anche senza dephase (default: False).',
-    'distribution_mode':   "Distribuzione grani nel tempo: uniform (default) | altri.",
+    'distribution_mode':   None,  # generata dinamicamente da get_distribution_modes()
     'dephase':             "Randomizzazione inter-grano. Bool, float, envelope o dict per-parametro.",
     'solo':                (
         "Modalita ascolto esclusivo: quando presente su uno stream, SOLO gli stream "
@@ -166,6 +166,22 @@ class HoverProvider:
         Hover per le stream context keys non in GRANULAR_PARAMETERS.
         Usa la documentazione statica da _STREAM_CONTEXT_DOCS.
         """
+        if key_name == 'distribution_mode':
+            modes = self._bridge.get_distribution_modes()
+            modes_list = '\n'.join(f'- `{m}`' for m in modes)
+            doc = (
+                "Controlla come viene applicata la variazione stocastica quando un "
+                "parametro ha un `mod_range` (spread). Si applica a tutti i parametri "
+                "dello stream che hanno una variazione definita.\n\n"
+                f"**Modalita' disponibili:**\n{modes_list}\n\n"
+                "Default: `uniform`\n\n"
+                "> Il sistema e' estensibile via `DistributionFactory.register()`: "
+                "le modalita' mostrate qui vengono lette dinamicamente."
+            )
+            return Hover(
+                contents=MarkupContent(kind=MarkupKind.Markdown, value=f'**{key_name}**\n\n{doc}')
+            )
+
         doc = _STREAM_CONTEXT_DOCS.get(key_name)
         if doc is None:
             return None

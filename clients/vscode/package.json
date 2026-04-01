@@ -2,7 +2,7 @@
   "name": "pge-ls",
   "displayName": "PGE Language Server",
   "description": "Autocompletion, hover e diagnostica per file PGE_*.yaml del Python Granular Engine.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "hksolid",
   "engines": {
     "vscode": "^1.75.0"
