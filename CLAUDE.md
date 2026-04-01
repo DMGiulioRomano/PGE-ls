@@ -64,3 +64,14 @@ Three stateless providers (each request receives full document text):
 ### Sync requirement
 
 `clients/vscode/` contains a **bundled copy** of `server.py` and `granular_ls/`. `build.sh` handles the sync. Do not edit files under `clients/vscode/granular_ls/` or `clients/vscode/server.py` directly.
+
+## Git Workflow
+
+**No direct commits to `main`.** Every change must go through a branch and pull request:
+
+1. Create a feature branch: `git checkout -b feat/my-feature`
+2. Make changes and commit on the branch
+3. Push and open a PR: `gh pr create`
+4. Merge via PR only — never `git push` directly to `main`
+
+This applies to all changes including documentation, tests, and version bumps.
