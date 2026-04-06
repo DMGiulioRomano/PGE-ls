@@ -36,6 +36,7 @@ from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
     VOICE_DIMENSIONS,
+    VOICE_ENVELOPE_PARAMS,
     get_strategy_spec,
 )
 
@@ -838,6 +839,37 @@ class DiagnosticProvider:
                 m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', stripped)
                 if m:
                     voices_keys[m.group(1)] = n
+
+            # Valida num_voices e scatter (scalari con bounds noti)
+            for param_name, bounds in VOICE_ENVELOPE_PARAMS.items():
+                if param_name not in voices_keys:
+                    continue
+                param_line = voices_keys[param_name]
+                raw = lines[param_line]
+                stripped = raw.strip()
+                m = re.match(r'^[a-zA-Z_]\w*\s*:\s*(.+)', stripped)
+                if not m:
+                    continue
+                val_str = m.group(1).strip()
+                # Salta envelope (iniziano con '[') — non validiamo i breakpoints qui
+                if val_str.startswith('['):
+                    continue
+                try:
+                    val = float(val_str)
+                except ValueError:
+                    continue
+                min_v = bounds['min_val']
+                max_v = bounds['max_val']
+                if val < min_v or val > max_v:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(param_line),
+                        message=(
+                            f"`voices.{param_name}` = {val} fuori range "
+                            f"[{min_v}, {max_v}]."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
 
             # Valida ogni dimensione presente
             for dim in VOICE_DIMENSIONS:

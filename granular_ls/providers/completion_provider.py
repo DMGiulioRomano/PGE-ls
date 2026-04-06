@@ -66,6 +66,7 @@ from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
     VOICE_DIMENSIONS,
     VOICE_TOP_LEVEL_KEYS,
+    VOICE_ENVELOPE_PARAMS,
     VOICES_BLOCK_DOC,
     get_strategies_for_dimension,
     get_strategy_spec,
@@ -151,6 +152,18 @@ class CompletionProvider:
         # Contesto 'value' su chiave 'time_mode': mostra i valori disponibili
         if context.context_type == 'value' and context.current_key == 'time_mode':
             return self._get_time_mode_completions(context.current_text)
+
+        # Contesto 'value' su num_voices o scatter dentro voices: (envelope-capable)
+        if (context.context_type == 'value'
+                and context.parent_path == ['voices']
+                and context.current_key in VOICE_ENVELOPE_PARAMS):
+            bounds = VOICE_ENVELOPE_PARAMS[context.current_key]
+            end_time = self._get_end_time_from_context(context, document_text)
+            return self._envelope_provider.get_snippets_with_bounds_and_end_time(
+                y_min=bounds['min_val'],
+                y_max=bounds['max_val'],
+                end_time=end_time,
+            )
 
         # Contesto 'value' su 'strategy' dentro un blocco dimension di voices
         if (context.context_type == 'value'
@@ -877,15 +890,19 @@ class CompletionProvider:
         prefix = context.current_text.lower()
         items = []
 
-        # num_voices: valore scalare intero
-        key = 'num_voices'
-        if key not in already_present and (not prefix or key.startswith(prefix)):
-            doc = get_top_level_doc(key) or f'**{key}**\n\nNumero di voci.'
+        # num_voices e scatter: envelope-capable, bounds da VOICE_ENVELOPE_PARAMS
+        for key, bounds in VOICE_ENVELOPE_PARAMS.items():
+            if key in already_present:
+                continue
+            if prefix and not key.startswith(prefix):
+                continue
+            doc = get_top_level_doc(key) or f'**{key}**'
+            detail = f'[{bounds["min_val"]}, {bounds["max_val"]}]'
             items.append(CompletionItem(
                 label=key,
                 insert_text=key + ': ',
                 kind=CompletionItemKind.Field,
-                detail='int > 0',
+                detail=detail,
                 documentation=MarkupContent(kind=MarkupKind.Markdown, value=doc),
                 command=TRIGGER_SUGGEST,
             ))

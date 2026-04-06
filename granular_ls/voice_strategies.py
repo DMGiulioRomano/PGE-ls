@@ -355,15 +355,33 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
 VOICE_DIMENSIONS: List[str] = ['pitch', 'onset_offset', 'pointer', 'pan']
 
 # Chiavi di primo livello dentro il blocco voices:
-VOICE_TOP_LEVEL_KEYS: List[str] = ['num_voices'] + VOICE_DIMENSIONS
+VOICE_TOP_LEVEL_KEYS: List[str] = ['num_voices', 'scatter'] + VOICE_DIMENSIONS
+
+# Parametri envelope-capable dentro voices (non sono in ParameterSpec/SchemaBridge
+# perché vengono parsati direttamente in _init_voice_manager di stream.py).
+# bounds da parameter_definitions.py del motore granulare.
+VOICE_ENVELOPE_PARAMS: Dict[str, Dict[str, float]] = {
+    'num_voices': {'min_val': 1.0, 'max_val': 64.0},
+    'scatter':    {'min_val': 0.0, 'max_val': 1.0},
+}
 
 # Documentazione per le chiavi top-level di voices
 _VOICE_TOP_LEVEL_DOCS: Dict[str, str] = {
     'num_voices': (
         "**num_voices** — Numero di voci attive per questo stream.\n\n"
-        "Valore intero > 0. Ogni voce è una copia indipendente del generatore granulare "
-        "con offset configurabili su pitch, onset, pointer e pan.\n\n"
-        "Accetta anche un envelope per variare il numero di voci nel tempo."
+        "Range: `[1, 64]` · Variazione: `quantized` (intera)\n\n"
+        "Accetta envelope per variare il numero di voci nel tempo:\n"
+        "```yaml\nnum_voices: [[0.0, 1], [4.0, 8], [8.0, 1]]\n```\n\n"
+        "Ogni voce è una copia indipendente del generatore granulare "
+        "con offset configurabili su pitch, onset, pointer e pan."
+    ),
+    'scatter': (
+        "**scatter** — Controllo della sincronizzazione inter-voce nel tempo.\n\n"
+        "Range: `[0.0, 1.0]` · Variazione: `additive`\n\n"
+        "- `scatter: 0.0` → tutte le voci condividono lo stesso timing inter-onset\n"
+        "- `scatter: 1.0` → ogni voce diverge con intervalli inter-onset stocastici\n\n"
+        "Accetta envelope per variare la dispersione nel tempo:\n"
+        "```yaml\nscatter: [[0.0, 0.0], [4.0, 0.8]]\n```"
     ),
     'pitch': (
         "**pitch** — Strategy di offset in semitoni per voce.\n\n"
