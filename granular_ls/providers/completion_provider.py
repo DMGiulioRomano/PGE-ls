@@ -66,7 +66,7 @@ from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
     VOICE_DIMENSIONS,
     VOICE_TOP_LEVEL_KEYS,
-    VOICE_ENVELOPE_PARAMS,
+    VOICE_ENVELOPE_KEYS,
     VOICES_BLOCK_DOC,
     get_strategies_for_dimension,
     get_strategy_spec,
@@ -156,14 +156,15 @@ class CompletionProvider:
         # Contesto 'value' su num_voices o scatter dentro voices: (envelope-capable)
         if (context.context_type == 'value'
                 and context.parent_path == ['voices']
-                and context.current_key in VOICE_ENVELOPE_PARAMS):
-            bounds = VOICE_ENVELOPE_PARAMS[context.current_key]
-            end_time = self._get_end_time_from_context(context, document_text)
-            return self._envelope_provider.get_snippets_with_bounds_and_end_time(
-                y_min=bounds['min_val'],
-                y_max=bounds['max_val'],
-                end_time=end_time,
-            )
+                and context.current_key in VOICE_ENVELOPE_KEYS):
+            raw = self._bridge.get_raw_bounds(context.current_key)
+            if raw:
+                end_time = self._get_end_time_from_context(context, document_text)
+                return self._envelope_provider.get_snippets_with_bounds_and_end_time(
+                    y_min=raw['min_val'],
+                    y_max=raw['max_val'],
+                    end_time=end_time,
+                )
 
         # Contesto 'value' su 'strategy' dentro un blocco dimension di voices
         if (context.context_type == 'value'
@@ -890,14 +891,16 @@ class CompletionProvider:
         prefix = context.current_text.lower()
         items = []
 
-        # num_voices e scatter: envelope-capable, bounds da VOICE_ENVELOPE_PARAMS
-        for key, bounds in VOICE_ENVELOPE_PARAMS.items():
+        # num_voices e scatter: envelope-capable, bounds letti dal bridge
+        for key in VOICE_ENVELOPE_KEYS:
             if key in already_present:
                 continue
             if prefix and not key.startswith(prefix):
                 continue
             doc = get_top_level_doc(key) or f'**{key}**'
-            detail = f'[{bounds["min_val"]}, {bounds["max_val"]}]'
+            raw = self._bridge.get_raw_bounds(key)
+            detail = (f'[{raw["min_val"]}, {raw["max_val"]}]'
+                      if raw else 'envelope-capable')
             items.append(CompletionItem(
                 label=key,
                 insert_text=key + ': ',

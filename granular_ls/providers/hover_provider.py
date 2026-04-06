@@ -79,7 +79,7 @@ from granular_ls.yaml_analyzer import YamlContext
 from granular_ls.voice_strategies import (
     VOICE_DIMENSIONS,
     VOICE_TOP_LEVEL_KEYS,
-    VOICE_ENVELOPE_PARAMS,
+    VOICE_ENVELOPE_KEYS,
     VOICES_BLOCK_DOC,
     get_strategy_spec,
     get_strategies_for_dimension,

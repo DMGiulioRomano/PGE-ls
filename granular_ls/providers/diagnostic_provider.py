@@ -36,7 +36,7 @@ from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
     VOICE_DIMENSIONS,
-    VOICE_ENVELOPE_PARAMS,
+    VOICE_ENVELOPE_KEYS,
     get_strategy_spec,
 )
 
@@ -840,9 +840,12 @@ class DiagnosticProvider:
                 if m:
                     voices_keys[m.group(1)] = n
 
-            # Valida num_voices e scatter (scalari con bounds noti)
-            for param_name, bounds in VOICE_ENVELOPE_PARAMS.items():
+            # Valida num_voices e scatter (scalari con bounds dal bridge)
+            for param_name in VOICE_ENVELOPE_KEYS:
                 if param_name not in voices_keys:
+                    continue
+                raw_bounds = self._bridge.get_raw_bounds(param_name)
+                if not raw_bounds:
                     continue
                 param_line = voices_keys[param_name]
                 raw = lines[param_line]
@@ -858,8 +861,8 @@ class DiagnosticProvider:
                     val = float(val_str)
                 except ValueError:
                     continue
-                min_v = bounds['min_val']
-                max_v = bounds['max_val']
+                min_v = raw_bounds['min_val']
+                max_v = raw_bounds['max_val']
                 if val < min_v or val > max_v:
                     diagnostics.append(Diagnostic(
                         range=self._line_range(param_line),

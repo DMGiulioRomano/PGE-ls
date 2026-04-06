@@ -354,16 +354,14 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
 # Dimensioni disponibili, nell'ordine consigliato per il completamento
 VOICE_DIMENSIONS: List[str] = ['pitch', 'onset_offset', 'pointer', 'pan']
 
-# Chiavi di primo livello dentro il blocco voices:
-VOICE_TOP_LEVEL_KEYS: List[str] = ['num_voices', 'scatter'] + VOICE_DIMENSIONS
+# Chiavi envelope-capable di primo livello dentro voices:.
+# Hanno bounds in GRANULAR_PARAMETERS del motore ma nessun ParameterSpec in
+# ALL_SCHEMAS (vengono parsati direttamente in _init_voice_manager di stream.py).
+# I bounds vengono letti dinamicamente dal bridge via get_raw_bounds().
+VOICE_ENVELOPE_KEYS: List[str] = ['num_voices', 'scatter']
 
-# Parametri envelope-capable dentro voices (non sono in ParameterSpec/SchemaBridge
-# perché vengono parsati direttamente in _init_voice_manager di stream.py).
-# bounds da parameter_definitions.py del motore granulare.
-VOICE_ENVELOPE_PARAMS: Dict[str, Dict[str, float]] = {
-    'num_voices': {'min_val': 1.0, 'max_val': 64.0},
-    'scatter':    {'min_val': 0.0, 'max_val': 1.0},
-}
+# Chiavi di primo livello dentro il blocco voices:
+VOICE_TOP_LEVEL_KEYS: List[str] = VOICE_ENVELOPE_KEYS + VOICE_DIMENSIONS
 
 # Documentazione per le chiavi top-level di voices
 _VOICE_TOP_LEVEL_DOCS: Dict[str, str] = {
