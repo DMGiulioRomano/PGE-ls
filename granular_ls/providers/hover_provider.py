@@ -76,6 +76,15 @@ _STREAM_CONTEXT_DOCS = {
 
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.yaml_analyzer import YamlContext
+from granular_ls.voice_strategies import (
+    VOICE_DIMENSIONS,
+    VOICE_TOP_LEVEL_KEYS,
+    VOICES_BLOCK_DOC,
+    get_strategy_spec,
+    get_strategies_for_dimension,
+    find_kwarg_in_dimension,
+    get_top_level_doc,
+)
 
 
 class HoverProvider:
@@ -113,6 +122,21 @@ class HoverProvider:
         # Contesto dephase: hover sulla dephase key
         if context.parent_path == ['dephase']:
             return self._build_dephase_key_hover(context.current_text)
+
+        # Contesto voices: hover sulle chiavi del blocco voices
+        if context.parent_path and context.parent_path[0] == 'voices':
+            voice_hover = self._build_voice_hover(context)
+            if voice_hover is not None:
+                return voice_hover
+
+        # Hover su 'voices' come chiave al livello stream
+        if context.current_text == 'voices' and not context.parent_path:
+            return Hover(
+                contents=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=VOICES_BLOCK_DOC,
+                )
+            )
 
         # Usa la parola COMPLETA alla posizione cursore, non solo il prefisso.
         # Necessario perche' YamlAnalyzer taglia a line_up_to_cursor,
@@ -221,6 +245,87 @@ class HoverProvider:
             if param.yaml_path == yaml_path:
                 return param
         return None
+
+    # -------------------------------------------------------------------------
+    # VOICES HOVER
+    # -------------------------------------------------------------------------
+
+    def _build_voice_hover(self, context: YamlContext) -> 'Optional[Hover]':
+        """
+        Hover per chiavi dentro il blocco voices.
+
+        Casi gestiti:
+          parent_path=['voices']:        chiave top-level (num_voices, pitch, ...)
+          parent_path=['voices', dim]:   strategy o kwarg di una dimensione
+        """
+        word = context.current_text
+        parent = context.parent_path
+
+        if len(parent) == 1:
+            # Dentro voices: - hover su num_voices o su una dimensione
+            return self._build_voice_top_key_hover(word)
+
+        if len(parent) == 2 and parent[1] in VOICE_DIMENSIONS:
+            dim = parent[1]
+            # 'strategy' come chiave
+            if word == 'strategy':
+                return self._build_voice_strategy_key_hover(dim)
+            # Kwarg di una strategy
+            return self._build_voice_kwarg_hover(dim, word)
+
+        return None
+
+    def _build_voice_top_key_hover(self, key: str) -> 'Optional[Hover]':
+        """Hover per chiavi di primo livello dentro voices: (num_voices, pitch, ...)."""
+        doc = get_top_level_doc(key)
+        if doc:
+            return Hover(
+                contents=MarkupContent(kind=MarkupKind.Markdown, value=doc)
+            )
+        return None
+
+    def _build_voice_strategy_key_hover(self, dim: str) -> 'Optional[Hover]':
+        """Hover sulla chiave 'strategy' dentro un blocco dimensione."""
+        strategies = get_strategies_for_dimension(dim)
+        lines = [f'**strategy** — Tipo di strategy per la dimensione `{dim}`.\n']
+        for name in strategies:
+            spec = get_strategy_spec(dim, name)
+            kwargs_str = ', '.join(f'`{k}`' for k in spec.kwargs) if spec else ''
+            desc_first_line = spec.description.split('\n')[0] if spec else ''
+            lines.append(f'- **`{name}`** — {desc_first_line}')
+            if kwargs_str:
+                lines.append(f'  kwargs: {kwargs_str}')
+        return Hover(
+            contents=MarkupContent(
+                kind=MarkupKind.Markdown,
+                value='\n'.join(lines),
+            )
+        )
+
+    def _build_voice_kwarg_hover(self, dim: str,
+                                  kwarg_name: str) -> 'Optional[Hover]':
+        """Hover su un kwarg di voice strategy."""
+        kwarg_spec = find_kwarg_in_dimension(dim, kwarg_name)
+        if kwarg_spec is None:
+            return None
+
+        header = f'**{kwarg_name}** (`{dim}` strategy kwarg)\n\n'
+        meta = []
+        meta.append(f'Tipo: `{kwarg_spec.type}`')
+        if kwarg_spec.required:
+            meta.append('Richiesto: `true`')
+        if kwarg_spec.min_val is not None:
+            meta.append(f'Min: `{kwarg_spec.min_val}`')
+        if kwarg_spec.max_val is not None:
+            meta.append(f'Max: `{kwarg_spec.max_val}`')
+        if kwarg_spec.enum_values:
+            meta.append('Valori: ' + ', '.join(f'`{v}`' for v in kwarg_spec.enum_values))
+
+        meta_str = ' · '.join(meta)
+        full = header + meta_str + '\n\n' + kwarg_spec.description
+        return Hover(
+            contents=MarkupContent(kind=MarkupKind.Markdown, value=full)
+        )
 
     # -------------------------------------------------------------------------
     # COSTRUZIONE Hover

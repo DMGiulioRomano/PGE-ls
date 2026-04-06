@@ -62,6 +62,16 @@ TRIGGER_SUGGEST = Command(
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.envelope_snippets import EnvelopeSnippetProvider
 from granular_ls.yaml_analyzer import YamlContext
+from granular_ls.voice_strategies import (
+    VOICE_STRATEGY_REGISTRY,
+    VOICE_DIMENSIONS,
+    VOICE_TOP_LEVEL_KEYS,
+    VOICES_BLOCK_DOC,
+    get_strategies_for_dimension,
+    get_strategy_spec,
+    find_kwarg_in_dimension,
+    get_top_level_doc,
+)
 
 # Chiavi flag: presenti senza valore, non accettano envelope
 _FLAG_KEYS = {'mute', 'solo', 'range_always_active'}
@@ -142,6 +152,22 @@ class CompletionProvider:
         if context.context_type == 'value' and context.current_key == 'time_mode':
             return self._get_time_mode_completions(context.current_text)
 
+        # Contesto 'value' su 'strategy' dentro un blocco dimension di voices
+        if (context.context_type == 'value'
+                and context.current_key == 'strategy'
+                and len(context.parent_path) >= 2
+                and context.parent_path[0] == 'voices'
+                and context.parent_path[1] in VOICE_DIMENSIONS):
+            return self._get_voice_strategy_name_completions(context)
+
+        # Contesto 'value' su kwarg enum di una voice strategy (es. chord: )
+        if (context.context_type == 'value'
+                and len(context.parent_path) >= 2
+                and context.parent_path[0] == 'voices'):
+            enum_items = self._get_voice_kwarg_enum_completions(context)
+            if enum_items is not None:
+                return enum_items
+
         # Contesto 'value': suggerisce snippet envelope se il parametro
         # e' numerico (is_smart=True, non-interno).
         # DEVE stare prima del gate root level altrimenti viene bloccato
@@ -162,6 +188,10 @@ class CompletionProvider:
         # DENTRO DEPHASE
         if context.parent_path == ['dephase']:
             return self._get_dephase_completions(context.current_text, context, document_text)
+
+        # DENTRO IL BLOCCO VOICES (parent_path inizia con 'voices')
+        if context.parent_path and context.parent_path[0] == 'voices':
+            return self._get_voice_completions(context, document_text)
 
         # DENTRO UN BLOCCO (grain, pointer, pitch, ...)
         if context.parent_path:
@@ -314,10 +344,12 @@ class CompletionProvider:
             items.append(self._build_item_local(p))  # gia' ha TRIGGER_SUGGEST
             inserted_labels.add(p.yaml_path.split('.')[-1])
 
-        # 3. Block keys (grain, pointer, pitch, dephase)
+        # 3. Block keys (grain, pointer, pitch, dephase, voices)
         block_keys = list(self._bridge.get_block_keys())
         if 'dephase' not in block_keys and self._bridge.get_dephase_keys():
             block_keys.append('dephase')
+        if 'voices' not in block_keys:
+            block_keys.append('voices')
 
         inserted_labels = {item.label for item in items}
 
@@ -328,6 +360,10 @@ class CompletionProvider:
                 continue
             if key in inserted_labels:
                 continue
+            if key == 'voices':
+                block_doc = VOICES_BLOCK_DOC
+            else:
+                block_doc = f'**{key}**\n\nBlocco di parametri annidati.'
             items.append(CompletionItem(
                 label=key,
                 insert_text=key + ':\n  $0',
@@ -336,7 +372,7 @@ class CompletionProvider:
                 detail='block',
                 documentation=MarkupContent(
                     kind=MarkupKind.Markdown,
-                    value=f'**{key}**\n\nBlocco di parametri annidati.',
+                    value=block_doc,
                 ),
                 command=TRIGGER_SUGGEST,
             ))
@@ -811,6 +847,337 @@ class CompletionProvider:
             ),
             command=TRIGGER_SUGGEST,
         )
+
+    # -------------------------------------------------------------------------
+    # VOICES: autocompletamento per il blocco voices e le sue strategy
+    # -------------------------------------------------------------------------
+
+    def _get_voice_completions(self, context: YamlContext,
+                                document_text: str) -> List[CompletionItem]:
+        """
+        Dispatcher per il contesto voices.
+        parent_path[0] e' garantito == 'voices' dal chiamante.
+        """
+        if len(context.parent_path) == 1:
+            # Dentro voices: - suggerisce num_voices + dimensioni
+            return self._get_voice_top_level_completions(context, document_text)
+        if (len(context.parent_path) == 2
+                and context.parent_path[1] in VOICE_DIMENSIONS):
+            # Dentro una dimensione (es. voices.pitch) - suggerisce strategy + kwargs
+            return self._get_voice_dimension_completions(context, document_text)
+        return []
+
+    def _get_voice_top_level_completions(self, context: YamlContext,
+                                          document_text: str) -> List[CompletionItem]:
+        """
+        Completamenti al primo livello dentro voices:
+        num_voices, pitch, onset_offset, pointer, pan.
+        """
+        already_present = self._extract_present_keys(document_text, context)
+        prefix = context.current_text.lower()
+        items = []
+
+        # num_voices: valore scalare intero
+        key = 'num_voices'
+        if key not in already_present and (not prefix or key.startswith(prefix)):
+            doc = get_top_level_doc(key) or f'**{key}**\n\nNumero di voci.'
+            items.append(CompletionItem(
+                label=key,
+                insert_text=key + ': ',
+                kind=CompletionItemKind.Field,
+                detail='int > 0',
+                documentation=MarkupContent(kind=MarkupKind.Markdown, value=doc),
+                command=TRIGGER_SUGGEST,
+            ))
+
+        # Dimensioni (pitch, onset_offset, pointer, pan)
+        for dim in VOICE_DIMENSIONS:
+            if dim in already_present:
+                continue
+            if prefix and not dim.startswith(prefix):
+                continue
+            doc = get_top_level_doc(dim) or f'**{dim}**\n\nDimensione voce.'
+            strategies = get_strategies_for_dimension(dim)
+            items.append(CompletionItem(
+                label=dim,
+                insert_text=dim + ':\n  strategy: ',
+                insert_text_format=InsertTextFormat.PlainText,
+                kind=CompletionItemKind.Module,
+                detail=f'voice dim — {", ".join(strategies)}',
+                documentation=MarkupContent(kind=MarkupKind.Markdown, value=doc),
+                command=TRIGGER_SUGGEST,
+            ))
+
+        return items
+
+    def _get_voice_dimension_completions(self, context: YamlContext,
+                                          document_text: str) -> List[CompletionItem]:
+        """
+        Completamenti dentro un blocco dimensione (es. voices.pitch).
+        Suggerisce 'strategy:' e i kwargs della strategy attiva.
+        """
+        dim = context.parent_path[1]
+        already_present = self._extract_present_keys_in_voice_block(
+            document_text, context
+        )
+        prefix = context.current_text.lower()
+        items: List[CompletionItem] = []
+
+        # 'strategy:' se non ancora presente
+        if 'strategy' not in already_present:
+            if not prefix or 'strategy'.startswith(prefix):
+                strategies = get_strategies_for_dimension(dim)
+                doc = (
+                    f"**strategy**\n\nStrategy di voce per la dimensione `{dim}`.\n\n"
+                    f"Valori disponibili: {', '.join(f'`{s}`' for s in strategies)}"
+                )
+                items.append(CompletionItem(
+                    label='strategy',
+                    insert_text='strategy: ',
+                    kind=CompletionItemKind.Field,
+                    detail=f'voice {dim} strategy',
+                    documentation=MarkupContent(kind=MarkupKind.Markdown, value=doc),
+                    command=TRIGGER_SUGGEST,
+                ))
+
+        # Kwargs della strategy attiva (se 'strategy' e' gia' scritta nel blocco)
+        current_strategy = self._get_strategy_for_voice_block(document_text, context)
+        if current_strategy:
+            spec = get_strategy_spec(dim, current_strategy)
+            if spec:
+                for kwarg_name, kwarg_spec in spec.kwargs.items():
+                    if kwarg_name in already_present:
+                        continue
+                    if prefix and not kwarg_name.startswith(prefix):
+                        continue
+                    items.append(self._build_voice_kwarg_item(kwarg_spec))
+
+        return items
+
+    def _get_voice_strategy_name_completions(
+        self, context: YamlContext
+    ) -> List[CompletionItem]:
+        """
+        Valori per 'strategy:' dentro un blocco dimensione voices.
+        Restituisce i nomi delle strategy disponibili per la dimensione.
+        """
+        dim = context.parent_path[1]
+        prefix = context.current_text.lower().strip().strip('"\'')
+        items = []
+        for strategy_name in get_strategies_for_dimension(dim):
+            if prefix and not strategy_name.startswith(prefix):
+                continue
+            spec = get_strategy_spec(dim, strategy_name)
+            kwargs_list = ', '.join(spec.kwargs.keys()) if spec else ''
+            doc = spec.description if spec else ''
+            items.append(CompletionItem(
+                label=strategy_name,
+                insert_text=strategy_name,
+                kind=CompletionItemKind.EnumMember,
+                detail=f'kwargs: {kwargs_list}' if kwargs_list else 'strategy',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'**{strategy_name}**\n\n{doc}',
+                ),
+            ))
+        return items
+
+    def _get_voice_kwarg_enum_completions(
+        self, context: YamlContext
+    ) -> Optional[List[CompletionItem]]:
+        """
+        Valori enum per i kwargs di tipo 'enum' (es. chord: ).
+        Restituisce una lista se il kwarg e' di tipo enum, None altrimenti.
+        """
+        if len(context.parent_path) < 2 or context.parent_path[1] not in VOICE_DIMENSIONS:
+            return None
+        dim = context.parent_path[1]
+        kwarg_spec = find_kwarg_in_dimension(dim, context.current_key)
+        if kwarg_spec is None or kwarg_spec.type != 'enum':
+            return None
+        if kwarg_spec.enum_values is None:
+            return None
+
+        prefix = context.current_text.lower().strip().strip('"\'')
+        items = []
+        for val in kwarg_spec.enum_values:
+            if prefix and not val.startswith(prefix):
+                continue
+            items.append(CompletionItem(
+                label=val,
+                insert_text=val,
+                kind=CompletionItemKind.EnumMember,
+                detail=kwarg_spec.type,
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'`{val}`',
+                ),
+            ))
+        return items
+
+    def _build_voice_kwarg_item(self,
+                                 kwarg_spec) -> CompletionItem:
+        """CompletionItem per un kwarg di voice strategy."""
+        detail = kwarg_spec.type
+        if kwarg_spec.min_val is not None:
+            detail += f' ≥ {kwarg_spec.min_val}'
+        if kwarg_spec.type == 'enum' and kwarg_spec.enum_values:
+            detail = ' | '.join(kwarg_spec.enum_values[:5])
+            if len(kwarg_spec.enum_values) > 5:
+                detail += ' …'
+        trigger = TRIGGER_SUGGEST if kwarg_spec.type == 'enum' else None
+        return CompletionItem(
+            label=kwarg_spec.name,
+            insert_text=kwarg_spec.name + ': ',
+            kind=CompletionItemKind.Field,
+            detail=detail,
+            documentation=MarkupContent(
+                kind=MarkupKind.Markdown,
+                value=f'**{kwarg_spec.name}**\n\n{kwarg_spec.description}',
+            ),
+            command=trigger,
+        )
+
+    def _get_strategy_for_voice_block(self, document_text: str,
+                                       context: YamlContext) -> Optional[str]:
+        """
+        Legge il valore di 'strategy:' nel blocco dimensione corrente.
+        Usato per sapere quali kwargs suggerire.
+        """
+        if not document_text or len(context.parent_path) < 2:
+            return None
+
+        dim_name = context.parent_path[1]
+        lines = document_text.splitlines()
+        cursor = context.cursor_line
+
+        # Indentazione del blocco dimensione (es. pitch: a 6 spazi)
+        dim_header_leading = (context.indent_level - 1) * 2
+
+        # Trova l'header del blocco dimensione risalendo dal cursore
+        dim_start = None
+        for i in range(cursor, -1, -1):
+            if i >= len(lines):
+                continue
+            raw = lines[i]
+            stripped = raw.strip()
+            leading = len(raw) - len(raw.lstrip())
+            if leading == 2 and (stripped.startswith('- ') or stripped == '-'):
+                break  # usciti dallo stream
+            if leading == dim_header_leading and stripped.startswith(dim_name + ':'):
+                dim_start = i
+                break
+
+        if dim_start is None:
+            return None
+
+        # Scansiona in avanti nel blocco cercando 'strategy:'
+        strategy_leading = context.indent_level * 2
+        for i in range(dim_start + 1, len(lines)):
+            raw = lines[i]
+            stripped = raw.strip()
+            leading = len(raw) - len(raw.lstrip())
+            if stripped and leading <= dim_header_leading:
+                break  # usciti dal blocco
+            if leading == strategy_leading:
+                m = re.match(r'^strategy\s*:\s*(.+)', stripped)
+                if m:
+                    return m.group(1).strip().strip('"\'')
+
+        return None
+
+    def _extract_present_keys_in_voice_block(self, document_text: str,
+                                               context: YamlContext) -> Set[str]:
+        """
+        Estrae le chiavi presenti nel blocco voice corrente con scope corretto.
+
+        A differenza di _extract_present_keys, gestisce la gerarchia a due livelli
+        (voices -> dimension) senza includere chiavi di blocchi fratelli.
+
+        Per parent_path=['voices']: chiavi dentro voices: (indent 3, 6 spazi).
+        Per parent_path=['voices','pitch']: chiavi dentro pitch: (indent 4, 8 spazi).
+        """
+        if not document_text or not context.parent_path:
+            return set()
+
+        lines = document_text.splitlines()
+        cursor = context.cursor_line
+
+        # Il blocco corrente e' l'ultimo elemento di parent_path
+        block_name = context.parent_path[-1]
+        # Indentazione dell'header del blocco (es. 'voices:' a 4 spazi, 'pitch:' a 6)
+        header_leading = (len(context.parent_path)) * 2   # 2 per voices, 6 per pitch
+        # Indentazione delle chiavi dentro il blocco
+        keys_leading = (len(context.parent_path) + 1) * 2  # 6 per voices, 8 per pitch
+
+        # 1. Trova l'inizio dello stream
+        stream_start = None
+        for i in range(cursor, -1, -1):
+            if i >= len(lines):
+                continue
+            raw = lines[i]
+            stripped = raw.strip()
+            leading = len(raw) - len(raw.lstrip())
+            if (stripped.startswith('- ') or stripped == '-') and leading == 2:
+                stream_start = i
+                break
+        if stream_start is None:
+            return set()
+
+        # 2. Trova la fine dello stream
+        stream_end = len(lines)
+        for i in range(stream_start + 1, len(lines)):
+            raw = lines[i]
+            stripped = raw.strip()
+            leading = len(raw) - len(raw.lstrip())
+            if (stripped.startswith('- ') or stripped == '-') and leading == 2:
+                stream_end = i
+                break
+
+        # 3. Trova l'header del blocco corrente risalendo dal cursore
+        block_start = None
+        for i in range(cursor, stream_start - 1, -1):
+            if i >= len(lines):
+                continue
+            raw = lines[i]
+            stripped = raw.strip()
+            leading = len(raw) - len(raw.lstrip())
+            if leading == header_leading and (
+                stripped == block_name + ':'
+                or stripped.startswith(block_name + ':')
+            ):
+                block_start = i + 1
+                break
+        if block_start is None:
+            return set()
+
+        # 4. Trova la fine del blocco
+        block_end = stream_end
+        for i in range(block_start, stream_end):
+            if i >= len(lines):
+                break
+            raw = lines[i]
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            leading = len(raw) - len(raw.lstrip())
+            if leading <= header_leading:
+                block_end = i
+                break
+
+        # 5. Raccoglie chiavi a keys_leading spazi
+        present: Set[str] = set()
+        for line in lines[block_start:block_end]:
+            raw_leading = len(line) - len(line.lstrip())
+            if raw_leading != keys_leading:
+                continue
+            stripped = line.strip()
+            if stripped.startswith('#') or not stripped:
+                continue
+            m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', stripped)
+            if m:
+                present.add(m.group(1))
+        return present
 
     def _extract_present_keys(self, document_text: Optional[str],
                                context=None) -> Set[str]:

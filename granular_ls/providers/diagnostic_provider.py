@@ -33,6 +33,11 @@ from lsprotocol.types import (
 )
 
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
+from granular_ls.voice_strategies import (
+    VOICE_STRATEGY_REGISTRY,
+    VOICE_DIMENSIONS,
+    get_strategy_spec,
+)
 
 # Identificatore del nostro Language Server nei diagnostici.
 # VSCode lo mostra accanto al messaggio per indicare la fonte.
@@ -104,6 +109,9 @@ class DiagnosticProvider:
 
         # Fase 5: controllo bounds nei valori envelope (breakpoints Y).
         diagnostics.extend(self._check_envelope_bounds(document_text))
+
+        # Fase 6: validazione del blocco voices (strategy, kwargs, enum).
+        diagnostics.extend(self._check_voice_strategies(document_text))
 
         return diagnostics
 
@@ -761,3 +769,172 @@ class DiagnosticProvider:
             start=Position(line=n_riga, character=0),
             end=Position(line=n_riga, character=999),
         )
+
+    # -------------------------------------------------------------------------
+    # CONTROLLO VOICES
+    # -------------------------------------------------------------------------
+
+    def _check_voice_strategies(self, document_text: str) -> List[Diagnostic]:
+        """
+        Valida il blocco voices: di ogni stream.
+
+        Controlli:
+          1. Per ogni dimensione (pitch, onset_offset, pointer, pan): se present,
+             la chiave 'strategy' deve essere valida per quella dimensione.
+          2. I kwargs richiesti dalla strategy devono essere presenti.
+          3. I kwargs di tipo enum devono avere un valore nel set consentito.
+        """
+        diagnostics: List[Diagnostic] = []
+        if not document_text:
+            return diagnostics
+
+        lines = document_text.split('\n')
+        n_lines = len(lines)
+
+        # Trova tutti gli stream (marcatore '- ' a 2 spazi)
+        stream_starts: List[int] = []
+        for n, line in enumerate(lines):
+            stripped = line.strip()
+            leading = len(line) - len(line.lstrip())
+            if (stripped.startswith('- ') or stripped == '-') and leading == 2:
+                stream_starts.append(n)
+
+        for idx, stream_start in enumerate(stream_starts):
+            stream_end = (stream_starts[idx + 1] if idx + 1 < len(stream_starts)
+                          else n_lines)
+
+            # Cerca il blocco voices: nello stream (a 4 spazi)
+            voices_start = None
+            for n in range(stream_start, stream_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                leading = len(raw) - len(raw.lstrip())
+                if leading == 4 and stripped == 'voices:':
+                    voices_start = n
+                    break
+
+            if voices_start is None:
+                continue
+
+            # Determina la fine del blocco voices
+            voices_end = stream_end
+            for n in range(voices_start + 1, stream_end):
+                raw = lines[n]
+                if not raw.strip():
+                    continue
+                leading = len(raw) - len(raw.lstrip())
+                if leading <= 4:
+                    voices_end = n
+                    break
+
+            # Raccoglie le chiavi di primo livello dentro voices (a 6 spazi)
+            voices_keys: Dict[str, int] = {}  # key_name -> line_number
+            for n in range(voices_start + 1, voices_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                leading = len(raw) - len(raw.lstrip())
+                if leading != 6 or not stripped or stripped.startswith('#'):
+                    continue
+                m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', stripped)
+                if m:
+                    voices_keys[m.group(1)] = n
+
+            # Valida ogni dimensione presente
+            for dim in VOICE_DIMENSIONS:
+                if dim not in voices_keys:
+                    continue
+                dim_line = voices_keys[dim]
+
+                # Trova la fine del blocco dimensione
+                dim_end = voices_end
+                for n in range(dim_line + 1, voices_end):
+                    raw = lines[n]
+                    if not raw.strip():
+                        continue
+                    leading = len(raw) - len(raw.lstrip())
+                    if leading <= 6:
+                        dim_end = n
+                        break
+
+                # Raccoglie chiave/valore del blocco dimensione (a 8 spazi)
+                dim_keys: Dict[str, Tuple[str, int]] = {}  # key -> (value, line_no)
+                for n in range(dim_line + 1, dim_end):
+                    raw = lines[n]
+                    stripped = raw.strip()
+                    leading = len(raw) - len(raw.lstrip())
+                    if leading != 8 or not stripped or stripped.startswith('#'):
+                        continue
+                    m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)', stripped)
+                    if m:
+                        dim_keys[m.group(1)] = (m.group(2).strip().strip('"\''), n)
+
+                # 1. Controlla che 'strategy' sia presente
+                if 'strategy' not in dim_keys:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(dim_line),
+                        message=(
+                            f"Il blocco `{dim}` in `voices` richiede la chiave `strategy`. "
+                            f"Strategy disponibili: "
+                            f"{', '.join(VOICE_STRATEGY_REGISTRY.get(dim, {}).keys())}."
+                        ),
+                        severity=DiagnosticSeverity.Warning,
+                        source=SOURCE,
+                    ))
+                    continue
+
+                strategy_val, strategy_line = dim_keys['strategy']
+
+                # 2. Controlla che il nome strategy sia valido
+                valid_strategies = list(VOICE_STRATEGY_REGISTRY.get(dim, {}).keys())
+                if strategy_val not in valid_strategies:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(strategy_line),
+                        message=(
+                            f"Strategy `{strategy_val}` non valida per `voices.{dim}`. "
+                            f"Valori consentiti: {', '.join(f'`{s}`' for s in valid_strategies)}."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+                    continue
+
+                spec = get_strategy_spec(dim, strategy_val)
+                if spec is None:
+                    continue
+
+                # 3. Controlla i kwargs richiesti e i valori enum
+                for kwarg_name, kwarg_spec in spec.kwargs.items():
+                    if kwarg_name not in dim_keys:
+                        if kwarg_spec.required:
+                            diagnostics.append(Diagnostic(
+                                range=self._line_range(dim_line),
+                                message=(
+                                    f"La strategy `{strategy_val}` in `voices.{dim}` "
+                                    f"richiede il kwarg `{kwarg_name}`."
+                                ),
+                                severity=DiagnosticSeverity.Warning,
+                                source=SOURCE,
+                            ))
+                        continue
+
+                    kwarg_val_str, kwarg_line = dim_keys[kwarg_name]
+
+                    # Controlla valori enum
+                    if (kwarg_spec.type == 'enum'
+                            and kwarg_spec.enum_values is not None
+                            and kwarg_val_str not in kwarg_spec.enum_values):
+                        valid_vals = ', '.join(
+                            f'`{v}`' for v in kwarg_spec.enum_values
+                        )
+                        diagnostics.append(Diagnostic(
+                            range=self._line_range(kwarg_line),
+                            message=(
+                                f"Valore `{kwarg_val_str}` non valido per "
+                                f"`voices.{dim}.{strategy_val}.{kwarg_name}`. "
+                                f"Valori consentiti: {valid_vals}."
+                            ),
+                            severity=DiagnosticSeverity.Error,
+                            source=SOURCE,
+                        ))
+
+        return diagnostics
