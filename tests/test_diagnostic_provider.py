@@ -977,3 +977,357 @@ class TestGetDiagnosticsDuplicateKeys:
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if 'duplicat' in d.message.lower()]
         assert all(d.severity == DiagnosticSeverity.Error for d in errors)
+
+
+# =============================================================================
+# TestCheckMissingValues
+# =============================================================================
+
+class TestCheckMissingValues:
+    """
+    Parametri numerici (con bounds) scritti come 'chiave:' senza valore
+    devono produrre un Error. Parametri flag (solo, mute) e chiavi di
+    contesto stream (range_always_active, ecc.) non devono essere toccati.
+    """
+
+    def _missing_errors(self, result):
+        return [d for d in result if 'richiede un valore' in d.message]
+
+    def test_parametro_con_valore_scalare_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    density: 100\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert self._missing_errors(result) == []
+
+    def test_parametro_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    density:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert len(errors) == 1
+        assert 'density' in errors[0].message
+
+    def test_parametro_con_envelope_lista_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    density:\n"
+            "      - [0, 100]\n"
+            "      - [1, 200]\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert self._missing_errors(result) == []
+
+    def test_parametro_con_envelope_dict_nessun_errore(self, bridge):
+        # Formato dict envelope: type + points → non deve essere segnalato
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    distribution:\n"
+            "      type: compact\n"
+            "      points:\n"
+            "        - [0, 0.5]\n"
+            "        - [1, 0.8]\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert self._missing_errors(result) == []
+
+    def test_parametro_annidato_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    grain:\n"
+            "      duration:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert len(errors) == 1
+        assert 'grain.duration' in errors[0].message
+
+    def test_parametro_annidato_con_envelope_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    grain:\n"
+            "      duration:\n"
+            "        - [0, 0.05]\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert self._missing_errors(result) == []
+
+    def test_severity_e_error(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    density:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert errors[0].severity == DiagnosticSeverity.Error
+
+    def test_errore_punta_alla_riga_del_parametro(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    density:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert errors[0].range.start.line == 5  # riga 'density:' (0-based)
+
+    def test_chiave_omonima_dentro_voices_non_da_errore(self, bridge):
+        # 'distribution' dentro voices è un sub-blocco dimension, non il parametro
+        # numerico 'distribution' dello stream → non deve essere segnalato
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pitch:\n"
+            "        strategy: step\n"
+            "        step: 3.0\n"
+            "      distribution:\n"        # omonimo ma è voices.distribution (sub-blocco)
+            "        strategy: linear\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert errors == []
+
+    def test_time_mode_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    time_mode:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if 'time_mode' in d.message]
+        assert len(errors) == 1
+        assert errors[0].severity == DiagnosticSeverity.Error
+
+    def test_time_mode_con_valore_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    time_mode: normalized\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if 'time_mode' in d.message]
+        assert errors == []
+
+    # --- Campi obbligatori stream ---
+
+    def test_duration_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration:\n"
+            "    sample: f.wav\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if "'duration'" in d.message and 'richiede' in d.message]
+        assert len(errors) == 1
+        assert errors[0].severity == DiagnosticSeverity.Error
+
+    def test_onset_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset:\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if "'onset'" in d.message and 'richiede' in d.message]
+        assert len(errors) == 1
+        assert errors[0].severity == DiagnosticSeverity.Error
+
+    def test_sample_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if "'sample'" in d.message and 'richiede' in d.message]
+        assert len(errors) == 1
+        assert errors[0].severity == DiagnosticSeverity.Error
+
+    # --- voices.num_voices e voices.scatter ---
+
+    def test_num_voices_senza_valore_produce_errore(self, bridge):
+        # Richiede bridge con raw_bounds per num_voices
+        raw = {
+            'specs': [],
+            'bounds': {},
+            'extra_bounds': {'num_voices': {'min_val': 1.0, 'max_val': 64.0,
+                                            'min_range': 0.0, 'max_range': 0.0,
+                                            'default_jitter': 0.0, 'variation_mode': 'additive'}},
+        }
+        from granular_ls.schema_bridge import SchemaBridge
+        b = SchemaBridge({'specs': [], 'bounds': {'num_voices': {
+            'min_val': 1.0, 'max_val': 64.0, 'min_range': 0.0,
+            'max_range': 0.0, 'default_jitter': 0.0, 'variation_mode': 'additive'}}})
+        provider = DiagnosticProvider(b)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert len(errors) == 1
+        assert 'voices.num_voices' in errors[0].message
+
+    # --- Voice kwargs ---
+
+    def test_voice_kwarg_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pitch:\n"
+            "        strategy: step\n"
+            "        step:\n"          # kwarg senza valore
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert len(errors) == 1
+        assert 'voices.pitch.step' in errors[0].message
+        assert errors[0].severity == DiagnosticSeverity.Error
+
+    def test_voice_strategy_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pitch:\n"
+            "        strategy:\n"     # strategy senza valore
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert len(errors) == 1
+        assert 'voices.pitch.strategy' in errors[0].message
+
+    def test_voice_strategy_senza_valore_no_double_error(self, bridge):
+        # Non deve esserci anche l'errore "Strategy `` non valida" da _check_voice_strategies
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pitch:\n"
+            "        strategy:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        # Non deve comparire "Strategy `` non valida"
+        bogus = [d for d in result if 'non valida' in d.message and 'strategy' in d.message.lower()]
+        assert bogus == []
+
+    def test_voice_inline_dict_nessun_errore(self, bridge):
+        # pan: {strategy: additive, spread: 0} non deve produrre warning "richiede strategy"
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pan: {strategy: additive, spread: 0}\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        strategy_warnings = [d for d in result if 'richiede la chiave `strategy`' in d.message]
+        assert strategy_warnings == []
+
+    def test_voice_kwarg_con_valore_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pitch:\n"
+            "        strategy: step\n"
+            "        step: 3.0\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert errors == []

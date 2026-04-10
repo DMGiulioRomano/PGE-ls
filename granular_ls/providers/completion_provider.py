@@ -33,6 +33,9 @@ from lsprotocol.types import (
     InsertTextFormat,
     MarkupContent,
     MarkupKind,
+    Position,
+    Range,
+    TextEdit,
 )
 
 # Comando VSCode che apre automaticamente il menu di completion.
@@ -73,6 +76,87 @@ from granular_ls.voice_strategies import (
     find_kwarg_in_dimension,
     get_top_level_doc,
 )
+
+def _build_gui_editor_item(context) -> CompletionItem:
+    """
+    Item speciale nel menu envelope: apre la GUI grafica envelope_gui.py.
+    Usa lo stesso pattern di _build_n_points_item (textEdit vuoto + command).
+    """
+    line = context.cursor_line
+    col_start = context.leading_spaces + len(context.current_key) + 2
+    col_end = col_start + len(context.current_text)
+    replace_range = Range(
+        start=Position(line=line, character=col_start),
+        end=Position(line=line, character=col_end),
+    )
+    return CompletionItem(
+        label='envelope editor grafico...',
+        filter_text=context.current_text or 'envelope',
+        text_edit=TextEdit(range=replace_range, new_text=''),
+        kind=CompletionItemKind.Value,
+        detail='apre GUI con canvas interattivo',
+        sort_text='zzz_gui_editor',
+        documentation=MarkupContent(
+            kind=MarkupKind.Markdown,
+            value=(
+                '**Editor envelope grafico**\n\n'
+                'Apre una finestra con un canvas interattivo per disegnare la curva.\n\n'
+                '- **Click** sul canvas: aggiungi un breakpoint\n'
+                '- **Drag**: sposta un breakpoint\n'
+                '- **Click destro**: elimina un breakpoint\n\n'
+                'Formati supportati: breakpoints, compact loop, dict cubic/step.'
+            ),
+        ),
+        command=Command(
+            title='Apri editor envelope grafico',
+            command='pge-ls.openEnvelopeEditor',
+        ),
+    )
+
+
+def _build_n_points_item(context) -> CompletionItem:
+    """
+    Item speciale nel menu envelope: apre un input box VSCode per scegliere
+    quanti breakpoints inserire, equidistanziati nel tempo.
+
+    Usa textEdit con newText='' per garantire che NESSUN testo venga inserito
+    prima che il command gestisca l'inserimento. insert_text='' e' falsy in JS
+    e VSCode fallback al label; textEdit ha sempre precedenza e non puo' essere
+    ignorato dalla spec LSP.
+
+    Il range copre esattamente il current_text gia' digitato dopo ': ',
+    calcolato dalla posizione del cursore nel context.
+    """
+    line = context.cursor_line
+    # Colonna di inizio del current_text: spazi + key + ': '
+    col_start = context.leading_spaces + len(context.current_key) + 2
+    col_end = col_start + len(context.current_text)
+    replace_range = Range(
+        start=Position(line=line, character=col_start),
+        end=Position(line=line, character=col_end),
+    )
+    return CompletionItem(
+        label='envelope N punti...',
+        filter_text=context.current_text or 'envelope',
+        text_edit=TextEdit(range=replace_range, new_text=''),
+        kind=CompletionItemKind.Value,
+        detail='apre input box per scegliere N',
+        sort_text='zzz_n_points',
+        documentation=MarkupContent(
+            kind=MarkupKind.Markdown,
+            value=(
+                '**Envelope N punti equidistanziati**\n\n'
+                'Apre un input box dove inserisci il numero di breakpoints.\n'
+                'I tempi vengono distribuiti uniformemente tra `0` e `duration` dello stream.\n'
+                'I valori seguono una rampa lineare da `y_min` a `y_max` del parametro.'
+            ),
+        ),
+        command=Command(
+            title='Inserisci envelope N punti',
+            command='pge-ls.insertEnvelope',
+        ),
+    )
+
 
 # Chiavi flag: presenti senza valore, non accettano envelope
 _FLAG_KEYS = {'mute', 'solo', 'range_always_active'}
@@ -153,6 +237,22 @@ class CompletionProvider:
         if context.context_type == 'value' and context.current_key == 'time_mode':
             return self._get_time_mode_completions(context.current_text)
 
+        # Contesto inline dict: 'dim: {strategy: <prefix>'
+        # Rilevato quando la riga corrente matcha '<dim>: {strategy: <word>$'
+        if (context.context_type == 'value'
+                and context.parent_path == ['voices']
+                and context.current_key in VOICE_DIMENSIONS):
+            doc_lines = document_text.split('\n') if document_text else []
+            if context.cursor_line < len(doc_lines):
+                cur_line = doc_lines[context.cursor_line]
+                m = re.match(
+                    r'^\s*(\w+):\s*\{strategy:\s*(\w*)$', cur_line
+                )
+                if m and m.group(1) == context.current_key:
+                    return self._get_voice_strategy_inline_completions(
+                        m.group(1), m.group(2)
+                    )
+
         # Contesto 'value' su num_voices o scatter dentro voices: (envelope-capable)
         if (context.context_type == 'value'
                 and context.parent_path == ['voices']
@@ -164,7 +264,7 @@ class CompletionProvider:
                     y_min=raw['min_val'],
                     y_max=raw['max_val'],
                     end_time=end_time,
-                )
+                ) + [_build_n_points_item(context), _build_gui_editor_item(context)]
 
         # Contesto 'value' su 'strategy' dentro un blocco dimension di voices
         if (context.context_type == 'value'
@@ -181,6 +281,12 @@ class CompletionProvider:
             enum_items = self._get_voice_kwarg_enum_completions(context)
             if enum_items is not None:
                 return enum_items
+
+        # Contesto 'value' su 'envelope' dentro grain: -> finestrature del grano
+        if (context.context_type == 'value'
+                and context.current_key == 'envelope'
+                and context.parent_path == ['grain']):
+            return self._get_grain_envelope_completions(context)
 
         # Contesto 'value': suggerisce snippet envelope se il parametro
         # e' numerico (is_smart=True, non-interno).
@@ -619,6 +725,15 @@ class CompletionProvider:
         if not context.current_key:
             return []
 
+        # Parametri booleani/flag che non accettano envelope
+        _NO_ENVELOPE_PATHS = {'grain.reverse'}
+        full_key = (
+            '.'.join(context.parent_path) + '.' + context.current_key
+            if context.parent_path else context.current_key
+        )
+        if full_key in _NO_ENVELOPE_PATHS:
+            return []
+
         # Calcola end_time dal contesto dello stream corrente
         end_time = self._get_end_time_from_context(context, document_text)
 
@@ -633,7 +748,7 @@ class CompletionProvider:
         if is_dephase_direct or is_dephase_sub:
             return self._envelope_provider.get_snippets_with_bounds_and_end_time(
                 y_min=0.0, y_max=100.0, end_time=end_time
-            )
+            ) + [_build_n_points_item(context), _build_gui_editor_item(context)]
 
         yaml_path_candidates = []
         yaml_path_candidates.append(context.current_key)
@@ -648,9 +763,95 @@ class CompletionProvider:
                 candidate, end_time
             )
             if items:
-                return items
+                return items + [_build_n_points_item(context), _build_gui_editor_item(context)]
 
         return []
+
+    def _get_grain_envelope_completions(self, context) -> List[CompletionItem]:
+        """
+        Completamenti per grain.envelope: finestrature del grano.
+
+        Due modalità:
+          - Valore singolo (prefix vuoto o testo): nomi + 'all' + '[' per iniziare lista
+          - Modalità lista (prefix inizia con '['): nomi filtrati per l'elemento corrente
+        """
+        raw_text = context.current_text or ''
+        names = self._bridge.get_grain_envelope_names()
+
+        _FAMILY = {
+            'hamming':         'GEN20 — finestra Hamming',
+            'hanning':         'GEN20 — finestra Hanning (von Hann)',
+            'bartlett':        'GEN20 — finestra Bartlett (triangolare)',
+            'blackman':        'GEN20 — finestra Blackman',
+            'blackman_harris': 'GEN20 — finestra Blackman-Harris',
+            'gaussian':        'GEN20 — finestra Gaussiana',
+            'kaiser':          'GEN20 — finestra Kaiser-Bessel',
+            'rectangle':       'GEN20 — finestra rettangolare',
+            'sinc':            'GEN20 — finestra Sinc',
+            'half_sine':       'GEN09 — mezzo-seno',
+            'expodec':         'GEN16 — decadimento esponenziale',
+            'expodec_strong':  'GEN16 — decadimento esponenziale forte',
+            'exporise':        'GEN16 — salita esponenziale',
+            'exporise_strong': 'GEN16 — salita esponenziale forte',
+            'rexpodec':        'GEN16 — decadimento esponenziale inverso',
+            'rexporise':       'GEN16 — salita esponenziale inversa',
+        }
+
+        def _name_items(search: str) -> List[CompletionItem]:
+            result = []
+            for name in names:
+                if search and not name.startswith(search):
+                    continue
+                result.append(CompletionItem(
+                    label=name,
+                    insert_text=name,
+                    insert_text_format=InsertTextFormat.PlainText,
+                    kind=CompletionItemKind.EnumMember,
+                    detail=_FAMILY.get(name, 'finestratura grano'),
+                    documentation=MarkupContent(
+                        kind=MarkupKind.Markdown,
+                        value=f'**{name}** — {_FAMILY.get(name, "")}',
+                    ),
+                ))
+            return result
+
+        # Modalità lista: utente ha già digitato '[' → siamo dentro una lista
+        if raw_text.startswith('['):
+            inner = raw_text[1:]  # tutto dopo '['
+            parts = inner.split(',')
+            search = parts[-1].strip()  # token corrente da completare
+            return _name_items(search)
+
+        # Modalità singola
+        prefix = raw_text.lower()
+        items = _name_items(prefix)
+
+        # Valore speciale 'all'
+        if not prefix or 'all'.startswith(prefix):
+            items.append(CompletionItem(
+                label='all',
+                insert_text='all',
+                insert_text_format=InsertTextFormat.PlainText,
+                kind=CompletionItemKind.Value,
+                detail='tutte le finestrature disponibili',
+            ))
+
+        # Avvia una lista: inserisce '[' e riapre il menu
+        if not prefix:
+            items.append(CompletionItem(
+                label='lista...',
+                insert_text='[',
+                insert_text_format=InsertTextFormat.PlainText,
+                kind=CompletionItemKind.Snippet,
+                detail='lista di finestrature — es. [hanning, hamming]',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value='Inserisce `[` e apre il menu per scegliere le finestrature una alla volta.',
+                ),
+                command=TRIGGER_SUGGEST,
+            ))
+
+        return items
 
     def _get_end_time_from_context(self, context,
                                     document_text: str) -> float:
@@ -910,7 +1111,8 @@ class CompletionProvider:
                 command=TRIGGER_SUGGEST,
             ))
 
-        # Dimensioni (pitch, onset_offset, pointer, pan)
+        # Dimensioni: un item per dimension, inserisce 'dim: {strategy: '
+        # e apre subito il menu per completare il nome della strategy.
         for dim in VOICE_DIMENSIONS:
             if dim in already_present:
                 continue
@@ -920,7 +1122,7 @@ class CompletionProvider:
             strategies = get_strategies_for_dimension(dim)
             items.append(CompletionItem(
                 label=dim,
-                insert_text=dim + ':\n  strategy: ',
+                insert_text=dim + ': {strategy: ',
                 insert_text_format=InsertTextFormat.PlainText,
                 kind=CompletionItemKind.Module,
                 detail=f'voice dim — {", ".join(strategies)}',
@@ -974,12 +1176,65 @@ class CompletionProvider:
 
         return items
 
+    def _get_voice_strategy_inline_completions(
+        self, dim: str, prefix: str
+    ) -> List[CompletionItem]:
+        """
+        Completamenti per il nome strategy nella posizione inline dict.
+
+        Contesto: riga che matcha '<dim>: {strategy: <prefix>'
+        Il cursore è posizionato dopo 'strategy: ', pronto a ricevere il nome.
+
+        Ogni item inserisce 'strategy_name, kwarg1: ${1:0}, kwarg2: ${2|...|}}',
+        completando il dizionario inline chiuso con '}'.
+
+        Se la strategy non ha kwargs inserisce solo 'strategy_name}'.
+        """
+        items = []
+        for strategy_name in get_strategies_for_dimension(dim):
+            if prefix and not strategy_name.startswith(prefix):
+                continue
+            spec = get_strategy_spec(dim, strategy_name)
+            kwargs_parts = []
+            for tab_idx, (kwarg_name, kwarg_spec) in enumerate(
+                spec.kwargs.items() if spec else [], start=1
+            ):
+                if kwarg_spec.type == 'enum' and kwarg_spec.enum_values:
+                    choices = ','.join(kwarg_spec.enum_values)
+                    placeholder = f'${{{tab_idx}|{choices}|}}'
+                elif kwarg_spec.type == 'bool':
+                    placeholder = f'${{{tab_idx}|true,false|}}'
+                else:
+                    placeholder = f'${{{tab_idx}:0}}'
+                kwargs_parts.append(f'{kwarg_name}: {placeholder}')
+
+            if kwargs_parts:
+                insert_text = strategy_name + ', ' + ', '.join(kwargs_parts) + '}'
+            else:
+                insert_text = strategy_name + '}'
+
+            kwargs_list = ', '.join(spec.kwargs.keys()) if spec and spec.kwargs else ''
+            doc = spec.description if spec else ''
+            items.append(CompletionItem(
+                label=strategy_name,
+                insert_text=insert_text,
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.EnumMember,
+                detail=f'kwargs: {kwargs_list}' if kwargs_list else 'strategy',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'**{strategy_name}**\n\n{doc}',
+                ),
+            ))
+        return items
+
     def _get_voice_strategy_name_completions(
         self, context: YamlContext
     ) -> List[CompletionItem]:
         """
-        Valori per 'strategy:' dentro un blocco dimensione voices.
-        Restituisce i nomi delle strategy disponibili per la dimensione.
+        Valori per 'strategy:' dentro un blocco dimensione voices (block style).
+        Inserisce solo il nome della strategy; i kwargs vengono suggeriti
+        separatamente da _get_voice_dimension_completions.
         """
         dim = context.parent_path[1]
         prefix = context.current_text.lower().strip().strip('"\'')
@@ -1279,8 +1534,13 @@ class CompletionProvider:
         if context is not None and context.parent_path:
             # Dentro un blocco (grain, pointer, pitch): accetta solo indent == indent blocco+1
             max_leading = (context.indent_level) * 2  # indent_level e' gia' al livello del param
+        elif context is not None and context.in_stream_element:
+            # Stream level diretto (parent_path=[]): accetta solo le chiavi a 4 spazi.
+            # Evita di raccogliere chiavi di blocchi annidati (voices.pitch, grain.duration, ...)
+            # che hanno lo stesso nome di block keys a stream level ma sono scope diversi.
+            max_leading = context.leading_spaces
         else:
-            max_leading = None  # nessun limite
+            max_leading = None  # nessun limite (root level)
 
         present = set()
         for line in lines[start_line:end_line]:

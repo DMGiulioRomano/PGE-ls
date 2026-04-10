@@ -1,0 +1,12 @@
+{
+    "editor.semanticTokenColorCustomizations": {
+        "rules": {
+            "pge-normalized": {
+                "foreground": "#4ec9b0"
+            },
+            "pge-block-key": {
+                "foreground": "#c586c0"
+            }
+        }
+    }
+}

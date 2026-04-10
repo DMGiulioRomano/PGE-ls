@@ -21,7 +21,8 @@ Risoluzione del nome chiave:
     Se nessuna strategia trova il parametro, ritorna None.
 """
 
-from typing import Optional
+import re
+from typing import Optional, Tuple
 
 from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
@@ -74,6 +75,242 @@ _STREAM_CONTEXT_DOCS = {
     ),
 }
 
+# Parametri del blocco pointer che dipendono da loop_unit / time_mode
+_POINTER_UNIT_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
+
+# Documentazione per le chiavi blocco di primo livello (pointer, pitch, grain, dephase, voices)
+_BLOCK_KEY_DOCS = {
+    'pointer': (
+        "**pointer** — Testa di lettura nel sample\n\n"
+        "Controlla come il motore naviga nel file audio sorgente durante la sintesi granulare.\n\n"
+        "**Parametri:**\n"
+        "- `start` — Posizione iniziale di lettura (default: `0.0`)\n"
+        "- `speed_ratio` — Velocità di scorrimento della testa (default: `1.0`)\n"
+        "- `loop_start` — Inizio del loop\n"
+        "- `loop_end` — Fine del loop *(esclusivo con `loop_dur`)*\n"
+        "- `loop_dur` — Durata del loop — ha priorità su `loop_end`\n"
+        "- `loop_unit` — Unità dei parametri loop: `absolute` \\| `normalized`\n\n"
+        "> Tutti i parametri accettano envelope `[[t, v], ...]` tranne\n"
+        "> `loop_unit` (meta-parametro) e `start` (valore raw)."
+    ),
+    'pitch': (
+        "**pitch** — Intonazione dei grani\n\n"
+        "Controlla l'altezza percepita dei grani sintetizzati.\n\n"
+        "**Parametri (mutuamente esclusivi):**\n"
+        "- `ratio` — Rapporto di pitch (1.0 = originale, 2.0 = ottava sopra)\n"
+        "- `semitones` — Trasposizione in semitoni\n\n"
+        "**Variazione stocastica:**\n"
+        "- `range` — Ampiezza della deviazione casuale (condivisa tra `ratio` e `semitones`)"
+    ),
+    'grain': (
+        "**grain** — Parametri dei grani\n\n"
+        "Controlla le caratteristiche dei singoli grani audio generati.\n\n"
+        "**Parametri:**\n"
+        "- `duration` — Durata del grano in secondi (default: `0.05`)\n"
+        "- `envelope` — Forma dell'inviluppo del grano (default: `hanning`)\n"
+        "- `reverse` — Probabilità di inversione del grano (0.0–1.0)"
+    ),
+    'dephase': (
+        "**dephase** — Randomizzazione inter-grano\n\n"
+        "Aggiunge dispersione casuale a parametri individuali tra i grani.\n\n"
+        "**Valori accettati:**\n"
+        "- `false` — nessuna randomizzazione\n"
+        "- `true` — randomizzazione globale con valori di default\n"
+        "- `float` — probabilità uniforme per tutti i parametri (0.0–1.0)\n"
+        "- `envelope [[t, v], ...]` — modulazione nel tempo\n"
+        "- `dict` — controllo per-parametro (chiave = nome parametro)\n\n"
+        "**Esempio dict:**\n"
+        "```yaml\n"
+        "dephase:\n"
+        "  duration: 0.3\n"
+        "  pitch: 0.1\n"
+        "  volume: 0.5\n"
+        "```\n\n"
+        "Le chiavi accettate nel dict corrispondono ai `dephase_key` dei parametri sintetizzabili."
+    ),
+}
+
+
+def _get_effective_unit_mode(document_text: str,
+                              cursor_line: int) -> Tuple[str, str]:
+    """
+    Determina l'unita' di misura effettiva per i parametri del blocco pointer.
+
+    Logica (speculare al motore):
+        loop_unit = params.get('loop_unit') or config.time_mode
+
+    1. Cerca 'loop_unit' nel blocco pointer: dello stesso stream.
+    2. Se assente, cerca 'time_mode' nello stream padre.
+    3. Se nessuno dei due e' presente, default 'absolute'.
+
+    Returns:
+        (mode, source) dove:
+            mode   : 'normalized' | 'absolute'
+            source : 'loop_unit' | 'time_mode' | 'default'
+    """
+    if not document_text:
+        return ('absolute', 'default')
+
+    lines = document_text.split('\n')
+
+    # --- Trova i confini dello stream corrente ---
+    stream_start = None
+    stream_end = len(lines)
+    for i in range(cursor_line, -1, -1):
+        raw = lines[i] if i < len(lines) else ''
+        stripped = raw.strip()
+        leading = len(raw) - len(raw.lstrip())
+        if (stripped.startswith('- ') or stripped == '-') and leading == 2:
+            stream_start = i
+            break
+    if stream_start is None:
+        return ('absolute', 'default')
+    for i in range(stream_start + 1, len(lines)):
+        raw = lines[i]
+        stripped = raw.strip()
+        leading = len(raw) - len(raw.lstrip())
+        if (stripped.startswith('- ') or stripped == '-') and leading == 2:
+            stream_end = i
+            break
+
+    # --- Cerca loop_unit dentro il blocco pointer: (a 6 spazi) ---
+    pointer_start = None
+    for i in range(stream_start, stream_end):
+        raw = lines[i]
+        stripped = raw.strip()
+        leading = len(raw) - len(raw.lstrip())
+        if leading == 4 and (stripped == 'pointer:' or stripped.startswith('pointer:')):
+            pointer_start = i
+            break
+
+    if pointer_start is not None:
+        pointer_end = stream_end
+        for i in range(pointer_start + 1, stream_end):
+            raw = lines[i]
+            if not raw.strip():
+                continue
+            if (len(raw) - len(raw.lstrip())) <= 4:
+                pointer_end = i
+                break
+        for i in range(pointer_start + 1, pointer_end):
+            raw = lines[i]
+            stripped = raw.strip()
+            if len(raw) - len(raw.lstrip()) != 6:
+                continue
+            m = re.match(r'^loop_unit\s*:\s*(.+)', stripped)
+            if m:
+                val = m.group(1).strip().strip('"\'')
+                mode = 'normalized' if val == 'normalized' else 'absolute'
+                return (mode, 'loop_unit')
+
+    # --- Fallback: cerca time_mode nello stream ---
+    for i in range(stream_start, stream_end):
+        raw = lines[i]
+        stripped = raw.strip()
+        if stripped.startswith('- '):
+            stripped = stripped[2:].strip()
+        leading = len(raw) - len(raw.lstrip())
+        if leading > 4:
+            continue
+        m = re.match(r'^time_mode\s*:\s*(.+)', stripped)
+        if m:
+            val = m.group(1).strip().strip('"\'')
+            mode = 'normalized' if val == 'normalized' else 'absolute'
+            return (mode, 'time_mode')
+
+    return ('absolute', 'default')
+
+
+def _get_stream_duration(document_text: str, cursor_line: int) -> Optional[float]:
+    """
+    Estrae il valore di 'duration' dello stream corrente dal documento.
+
+    Usa la stessa logica di boundary detection di _get_effective_unit_mode.
+    Restituisce None se 'duration' non e' presente o non e' un numero valido.
+    """
+    if not document_text:
+        return None
+
+    lines = document_text.split('\n')
+
+    # Trova i confini dello stream corrente
+    stream_start = None
+    stream_end = len(lines)
+    for i in range(cursor_line, -1, -1):
+        raw = lines[i] if i < len(lines) else ''
+        stripped = raw.strip()
+        leading = len(raw) - len(raw.lstrip())
+        if (stripped.startswith('- ') or stripped == '-') and leading == 2:
+            stream_start = i
+            break
+    if stream_start is None:
+        return None
+    for i in range(stream_start + 1, len(lines)):
+        raw = lines[i]
+        stripped = raw.strip()
+        leading = len(raw) - len(raw.lstrip())
+        if (stripped.startswith('- ') or stripped == '-') and leading == 2:
+            stream_end = i
+            break
+
+    # Cerca 'duration' a indentazione 4 (o inline dopo '- ')
+    for i in range(stream_start, stream_end):
+        raw = lines[i]
+        stripped = raw.strip()
+        if stripped.startswith('- '):
+            stripped = stripped[2:].strip()
+        leading = len(raw) - len(raw.lstrip())
+        if leading > 4:
+            continue
+        m = re.match(r'^duration\s*:\s*([0-9]*\.?[0-9]+)', stripped)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return None
+
+    return None
+
+
+def _unit_mode_note(mode: str, source: str, duration: Optional[float] = None) -> str:
+    """Costruisce la nota Markdown sull'unita' effettiva da appendere all'hover."""
+    if mode == 'normalized':
+        source_label = {
+            'loop_unit': '`loop_unit: normalized`',
+            'time_mode': '`time_mode: normalized` (fallback)',
+        }.get(source, 'modalita\' normalized')
+        note = (
+            '\n\n---\n'
+            f'**Unità effettiva: `normalized`** — da {source_label}\n\n'
+            '> Il valore è in \\[0.0, 1.0\\] e viene scalato per la durata '
+            'del sample sorgente (`sample_dur_sec`).'
+        )
+        if duration is not None:
+            note += (
+                f'\n\n**Limite dinamico:** `[0.0, 1.0]` '
+                f'→ `[0.0 s, {duration} s]` '
+                f'(da `duration: {duration}` dello stream)'
+            )
+        return note
+    else:
+        source_label = {
+            'loop_unit': '`loop_unit: absolute`',
+            'time_mode': '`time_mode: absolute`',
+            'default':   'default (nessun `loop_unit` o `time_mode` specificato)',
+        }.get(source, 'modalita\' absolute')
+        note = (
+            '\n\n---\n'
+            f'**Unità effettiva: `absolute`** — {source_label}\n\n'
+            '> Il valore è in **secondi assoluti**.'
+        )
+        if duration is not None:
+            note += (
+                f'\n\n**Limite dinamico:** `[0.0 s, {duration} s]` '
+                f'(da `duration: {duration}` dello stream)'
+            )
+        return note
+
+
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.yaml_analyzer import YamlContext
 from granular_ls.voice_strategies import (
@@ -103,7 +340,8 @@ class HoverProvider:
     def __init__(self, bridge: SchemaBridge):
         self._bridge = bridge
 
-    def get_hover(self, context: YamlContext) -> Optional[Hover]:
+    def get_hover(self, context: YamlContext,
+                  document_text: str = '') -> Optional[Hover]:
         """
         Produce un Hover per la chiave sotto il cursore.
 
@@ -126,7 +364,7 @@ class HoverProvider:
 
         # Contesto voices: hover sulle chiavi del blocco voices
         if context.parent_path and context.parent_path[0] == 'voices':
-            voice_hover = self._build_voice_hover(context)
+            voice_hover = self._build_voice_hover(context, document_text)
             if voice_hover is not None:
                 return voice_hover
 
@@ -139,21 +377,50 @@ class HoverProvider:
                 )
             )
 
+        # Hover su chiavi blocco (pointer, pitch, grain, dephase) al livello stream
+        if not context.parent_path and context.current_text in _BLOCK_KEY_DOCS:
+            return Hover(
+                contents=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=_BLOCK_KEY_DOCS[context.current_text],
+                )
+            )
+
+        # Hover su grain.envelope (chiave o valore-finestratura)
+        if context.parent_path == ['grain']:
+            grain_hover = self._build_grain_envelope_hover(context.current_text)
+            if grain_hover is not None:
+                return grain_hover
+
         # Usa la parola COMPLETA alla posizione cursore, non solo il prefisso.
         # Necessario perche' YamlAnalyzer taglia a line_up_to_cursor,
         # quindi se il cursore e' a meta' di 'density' current_text='den'.
         # Per hover vogliamo la parola intera.
         full_word = context.current_text  # fallback al prefisso
 
+        # Determina se siamo su un parametro pointer sensibile all'unità
+        is_pointer_param = (
+            context.parent_path == ['pointer']
+            and full_word in _POINTER_UNIT_PARAMS
+        )
+
         # Prova prima come parametro del bridge
         param = self._resolve_parameter(context)
         if param is not None:
             if param.is_internal:
                 return None
-            return self._build_hover(param)
+            hover = self._build_hover(param)
+            if is_pointer_param:
+                hover = self._append_unit_note(hover, document_text,
+                                               context.cursor_line)
+            return hover
 
         # Prova come stream context key
-        return self._build_stream_context_hover(full_word)
+        hover = self._build_stream_context_hover(full_word)
+        if hover is not None and is_pointer_param:
+            hover = self._append_unit_note(hover, document_text,
+                                           context.cursor_line)
+        return hover
 
     # -------------------------------------------------------------------------
     # RISOLUZIONE PARAMETRO
@@ -240,6 +507,59 @@ class HoverProvider:
             )
         )
 
+    def _build_grain_envelope_hover(self, word: str) -> 'Optional[Hover]':
+        """
+        Hover per grain.envelope: chiave o nome di finestratura.
+
+        - 'envelope' → lista di tutte le finestrature disponibili
+        - nome valido (es. 'hanning') → descrizione della finestratura
+        """
+        _ENVELOPE_DOC = {
+            'hamming':         ('GEN20', 'Finestra Hamming. Buona soppressione dei lobi laterali, leggero effetto di arrotondamento.'),
+            'hanning':         ('GEN20', 'Finestra Hanning (von Hann). Ottimo compromesso tra risoluzione e soppressione spettrale.'),
+            'bartlett':        ('GEN20', 'Finestra Bartlett (triangolare). Forma semplice, roll-off morbido.'),
+            'blackman':        ('GEN20', 'Finestra Blackman. Alta soppressione dei lobi laterali, minor risoluzione.'),
+            'blackman_harris': ('GEN20', 'Finestra Blackman-Harris. Soppressione molto alta, indicata per analisi spettrale.'),
+            'gaussian':        ('GEN20', 'Finestra Gaussiana. Forma a campana, buona sia nel dominio del tempo che della frequenza.'),
+            'kaiser':          ('GEN20', 'Finestra Kaiser-Bessel. Parametro β=6, bilanciamento tra mainlobe e sidelobe.'),
+            'rectangle':       ('GEN20', 'Finestra rettangolare (Dirichlet). Nessun windowing: grano con attacco e rilascio netti.'),
+            'sinc':            ('GEN20', 'Finestra Sinc. Risposta impulsiva di un filtro passa-basso ideale.'),
+            'half_sine':       ('GEN09', 'Mezzo seno. Attacco e rilascio a coseno, forma morbida e naturale.'),
+            'expodec':         ('GEN16', 'Decadimento esponenziale. Attacco rapido, coda lunga — simile a una percussione.'),
+            'expodec_strong':  ('GEN16', 'Decadimento esponenziale forte (strength=10). Coda più ripida di expodec.'),
+            'exporise':        ('GEN16', 'Salita esponenziale. Attacco morbido, corpo pieno — effetto swell.'),
+            'exporise_strong': ('GEN16', 'Salita esponenziale forte (strength=10). Salita più rapida di exporise.'),
+            'rexpodec':        ('GEN16', 'Decadimento esponenziale inverso. Variante speculare di expodec.'),
+            'rexporise':       ('GEN16', 'Salita esponenziale inversa. Variante speculare di exporise.'),
+        }
+
+        valid_names = self._bridge.get_grain_envelope_names()
+
+        if word == 'envelope':
+            families = {
+                'GEN20 (simmetrico)': ['hamming', 'hanning', 'bartlett', 'blackman',
+                                        'blackman_harris', 'gaussian', 'kaiser',
+                                        'rectangle', 'sinc'],
+                'GEN09': ['half_sine'],
+                'GEN16 (asimmetrico)': ['expodec', 'expodec_strong', 'exporise',
+                                         'exporise_strong', 'rexpodec', 'rexporise'],
+            }
+            lines = ['**envelope** — Finestratura del grano (windowing function).\n']
+            lines.append('Accetta un nome singolo, una lista `[a, b, ...]`, o `all`.\n')
+            for family, members in families.items():
+                available = [m for m in members if m in valid_names]
+                if available:
+                    lines.append(f'**{family}:** ' + ', '.join(f'`{m}`' for m in available))
+            return Hover(contents=MarkupContent(kind=MarkupKind.Markdown,
+                                                value='\n'.join(lines)))
+
+        if word in valid_names and word in _ENVELOPE_DOC:
+            gen, desc = _ENVELOPE_DOC[word]
+            text = f'**{word}** (`{gen}`)\n\n{desc}'
+            return Hover(contents=MarkupContent(kind=MarkupKind.Markdown, value=text))
+
+        return None
+
     def _find_by_yaml_path(self, yaml_path: str) -> Optional[ParameterInfo]:
         """Cerca un parametro per yaml_path, non per name Python."""
         for param in self._bridge.get_all_parameters():
@@ -251,26 +571,36 @@ class HoverProvider:
     # VOICES HOVER
     # -------------------------------------------------------------------------
 
-    def _build_voice_hover(self, context: YamlContext) -> 'Optional[Hover]':
+    def _build_voice_hover(self, context: YamlContext,
+                            document_text: str = '') -> 'Optional[Hover]':
         """
         Hover per chiavi dentro il blocco voices.
 
         Casi gestiti:
           parent_path=['voices']:        chiave top-level (num_voices, pitch, ...)
-          parent_path=['voices', dim]:   strategy o kwarg di una dimensione
+                                         oppure parola dentro un inline dict dimension
+          parent_path=['voices', dim]:   strategy o kwarg di una dimensione (block style)
         """
         word = context.current_text
         parent = context.parent_path
 
         if len(parent) == 1:
-            # Dentro voices: - hover su num_voices o su una dimensione
-            return self._build_voice_top_key_hover(word)
+            # Primo tentativo: parola è una chiave top-level di voices
+            hover = self._build_voice_top_key_hover(word)
+            if hover is not None:
+                return hover
+            # Fallback: potrebbe essere dentro un inline dict, es. "pan: {strategy: additive}"
+            return self._build_voice_inline_dict_hover(word, document_text,
+                                                       context.cursor_line)
 
         if len(parent) == 2 and parent[1] in VOICE_DIMENSIONS:
             dim = parent[1]
             # 'strategy' come chiave
             if word == 'strategy':
                 return self._build_voice_strategy_key_hover(dim)
+            # Nome di strategy valido
+            if word in get_strategies_for_dimension(dim):
+                return self._build_voice_strategy_value_hover(dim, word)
             # Kwarg di una strategy
             return self._build_voice_kwarg_hover(dim, word)
 
@@ -328,9 +658,78 @@ class HoverProvider:
             contents=MarkupContent(kind=MarkupKind.Markdown, value=full)
         )
 
+    def _build_voice_strategy_value_hover(self, dim: str,
+                                           strategy_name: str) -> 'Optional[Hover]':
+        """Hover sul valore di strategy (es. 'additive' in 'strategy: additive')."""
+        spec = get_strategy_spec(dim, strategy_name)
+        if spec is None:
+            return None
+        kwargs_lines = []
+        for kwarg_name, kwarg_spec in spec.kwargs.items():
+            meta = f'`{kwarg_spec.type}`'
+            if kwarg_spec.required:
+                meta += ' · richiesto'
+            if kwarg_spec.enum_values:
+                meta += ' · valori: ' + ', '.join(f'`{v}`' for v in kwarg_spec.enum_values)
+            elif kwarg_spec.min_val is not None or kwarg_spec.max_val is not None:
+                bounds = f'[{kwarg_spec.min_val}, {kwarg_spec.max_val}]'
+                meta += f' · range: `{bounds}`'
+            kwargs_lines.append(f'- **`{kwarg_name}`** ({meta}) — {kwarg_spec.description}')
+        header = f'**{strategy_name}** (strategy `{dim}`)\n\n{spec.description}'
+        if kwargs_lines:
+            header += '\n\n**kwargs:**\n' + '\n'.join(kwargs_lines)
+        return Hover(
+            contents=MarkupContent(kind=MarkupKind.Markdown, value=header)
+        )
+
+    def _build_voice_inline_dict_hover(self, word: str, document_text: str,
+                                        cursor_line: int) -> 'Optional[Hover]':
+        """
+        Hover per parole dentro un inline dict voices, es.:
+          pan: {strategy: additive, spread: 0}
+        YamlAnalyzer non parsifica gli inline dict, quindi usiamo
+        il testo della riga per ricostruire il contesto.
+        """
+        lines = document_text.split('\n')
+        if cursor_line >= len(lines):
+            return None
+        raw_line = lines[cursor_line]
+        m = re.match(r'^\s*([a-zA-Z_]\w*)\s*:\s*\{(.+)', raw_line)
+        if not m:
+            return None
+        dim = m.group(1)
+        if dim not in VOICE_DIMENSIONS:
+            return None
+        # Parola è il nome della dimensione stessa
+        if word == dim:
+            return self._build_voice_top_key_hover(dim)
+        # Parola è 'strategy' (la chiave)
+        if word == 'strategy':
+            return self._build_voice_strategy_key_hover(dim)
+        # Parola è un nome di strategy valido
+        valid_strategies = get_strategies_for_dimension(dim)
+        if word in valid_strategies:
+            return self._build_voice_strategy_value_hover(dim, word)
+        # Parola è un kwarg
+        return self._build_voice_kwarg_hover(dim, word)
+
     # -------------------------------------------------------------------------
     # COSTRUZIONE Hover
     # -------------------------------------------------------------------------
+
+    def _append_unit_note(self, hover: Hover, document_text: str,
+                          cursor_line: int) -> Hover:
+        """Aggiunge la nota sull'unità effettiva a un Hover esistente."""
+        mode, source = _get_effective_unit_mode(document_text, cursor_line)
+        duration = _get_stream_duration(document_text, cursor_line)
+        note = _unit_mode_note(mode, source, duration)
+        old_value = hover.contents.value if hover.contents else ''
+        return Hover(
+            contents=MarkupContent(
+                kind=MarkupKind.Markdown,
+                value=old_value + note,
+            )
+        )
 
     def _build_hover(self, param: ParameterInfo) -> Hover:
         """

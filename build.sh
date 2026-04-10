@@ -15,6 +15,7 @@ sync_python_files() {
   local dest="$1"
   echo "==> Sincronizzo file Python in $dest..."
   cp "$ROOT/server.py" "$dest/server.py"
+  cp "$ROOT/envelope_gui.py" "$dest/envelope_gui.py"
   rm -rf "$dest/granular_ls"
   cp -r "$ROOT/granular_ls" "$dest/granular_ls"
   find "$dest/granular_ls" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true

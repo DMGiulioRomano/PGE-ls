@@ -58,9 +58,8 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [${"{1:0.0}"}, ${"{2:" + ymin + "}"}]\n'
-                f'  - [${"{3:" + et + "}"}, ${"{4:" + ymax + "}"}]'
+                f' [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
+                f' [${"{3:" + et + "}"}, ${"{4:" + ymax + "}"}]]'
             ),
         },
 
@@ -74,10 +73,9 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [${"{1:0.0}"}, ${"{2:" + ymin + "}"}]\n'
-                f'  - [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}]\n'
-                f'  - [${"{5:" + et + "}"}, ${"{6:" + ymin + "}"}]'
+                f' [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}],'
+                f' [${"{5:" + et + "}"}, ${"{6:" + ymin + "}"}]]'
             ),
         },
 
@@ -91,12 +89,9 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  type: cubic\n'
-                f'  points:\n'
-                f'    - [${"{1:0.0}"}, ${"{2:" + ymin + "}"}]\n'
-                f'    - [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}]\n'
-                f'    - [${"{5:" + et + "}"}, ${"{6:" + ymin + "}"}]'
+                f' {{type: cubic, points: [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}],'
+                f' [${"{5:" + et + "}"}, ${"{6:" + ymin + "}"}]]}}'
             ),
         },
 
@@ -110,16 +105,13 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  type: step\n'
-                f'  points:\n'
-                f'    - [${"{1:0.0}"}, ${"{2:" + ymin + "}"}]\n'
-                f'    - [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}]\n'
-                f'    - [${"{5:" + et + "}"}, ${"{6:" + ymin + "}"}]'
+                f' {{type: step, points: [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}],'
+                f' [${"{5:" + et + "}"}, ${"{6:" + ymin + "}"}]]}}'
             ),
         },
 
-        # 5. Compact loop base
+        # 5. Compact loop base (formato diretto)
         {
             'label': 'envelope loop (compact base)',
             'detail': '[[[0,v],[100,v]], end_time, n_reps]',
@@ -131,13 +123,12 @@ def _build_snippets(
                 '- n_reps: numero di ripetizioni'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
+                f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
                 f' ${"{3:" + et + "}"}, ${"{4:4}"}]'
             ),
         },
 
-        # 6. Compact cubic
+        # 6. Compact cubic (formato diretto)
         {
             'label': 'envelope loop cubic (compact)',
             'detail': '[pattern, end_time, n_reps, "cubic"]',
@@ -146,14 +137,13 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [[[0, ${"{1:" + ymin + "}"}], [50, ${"{2:" + ymax + "}"}],'
+                f' [[[0, ${"{1:" + ymin + "}"}], [50, ${"{2:" + ymax + "}"}],'
                 f' [100, ${"{3:" + ymin + "}"}]],'
                 f' ${"{4:" + et + "}"}, ${"{5:4}"}, "${{6:cubic}}"]'
             ),
         },
 
-        # 7. Compact exponential (accelerando)
+        # 7. Compact exponential (accelerando, formato diretto)
         {
             'label': 'envelope loop accelerando (exponential)',
             'detail': '[pattern, end_time, n_reps, interp, "exponential"]',
@@ -162,13 +152,12 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
+                f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
                 f' ${"{3:" + et + "}"}, ${"{4:6}"}, "${{5:linear}}", "exponential"]'
             ),
         },
 
-        # 8. Compact logarithmic (ritardando)
+        # 8. Compact logarithmic (ritardando, formato diretto)
         {
             'label': 'envelope loop ritardando (logarithmic)',
             'detail': '[pattern, end_time, n_reps, interp, "logarithmic"]',
@@ -177,13 +166,12 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
+                f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
                 f' ${"{3:" + et + "}"}, ${"{4:6}"}, "${{5:linear}}", "logarithmic"]'
             ),
         },
 
-        # 9. Compact geometric
+        # 9. Compact geometric (formato diretto)
         {
             'label': 'envelope loop geometric (ratio)',
             'detail': '[pattern, end_time, n_reps, interp, {geometric,ratio}]',
@@ -192,14 +180,13 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],\n'
-                f'     ${"{3:" + et + "}"}, ${"{4:5}"}, "${{5:linear}}",\n'
-                f'     {{type: geometric, ratio: ${"{6:1.5}"}}}]'
+                f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
+                f' ${"{3:" + et + "}"}, ${"{4:5}"}, "${{5:linear}}",'
+                f' {{type: geometric, ratio: ${"{6:1.5}"}}}]'
             ),
         },
 
-        # 10. Compact power
+        # 10. Compact power (formato diretto)
         {
             'label': 'envelope loop power law (exponent)',
             'detail': '[pattern, end_time, n_reps, interp, {power,exponent}]',
@@ -208,10 +195,9 @@ def _build_snippets(
                 f'Range parametro: [{ymin}, {ymax}]'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],\n'
-                f'     ${"{3:" + et + "}"}, ${"{4:5}"}, "${{5:linear}}",\n'
-                f'     {{type: power, exponent: ${"{6:2.0}"}}}]'
+                f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
+                f' ${"{3:" + et + "}"}, ${"{4:5}"}, "${{5:linear}}",'
+                f' {{type: power, exponent: ${"{6:2.0}"}}}]'
             ),
         },
 
@@ -226,14 +212,68 @@ def _build_snippets(
                 f'poi il loop fino a t={et}.'
             ),
             'insert_text': (
-                f'\n'
-                f'  - [${"{1:0.0}"}, ${"{2:" + ymin + "}"}]\n'
-                f'  - [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}]\n'
-                f'  - [[[0, ${"{5:" + ymin + "}"}], [100, ${"{6:" + ymax + "}"}]],'
-                f' ${"{7:" + et + "}"}, ${"{8:4}"}]'
+                f' [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}],'
+                f' [[[0, ${"{5:" + ymin + "}"}], [100, ${"{6:" + ymax + "}"}]],'
+                f' ${"{7:" + et + "}"}, ${"{8:4}"}]]'
+            ),
+        },
+
+        # 12. Loop → breakpoints standard
+        {
+            'label': 'envelope loop → breakpoints',
+            'detail': '[[compact], [t,v], [t,v]]',
+            'doc': (
+                '**Envelope loop poi breakpoints standard**\n\n'
+                f'Loop fino a t={mid}, poi rampa lineare fino a t={et}.\n\n'
+                f'Range parametro: [{ymin}, {ymax}]'
+            ),
+            'insert_text': (
+                f' [[[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
+                f' ${"{3:" + mid + "}"}, ${"{4:3}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{5:" + ymax + "}"}],'
+                f' [${"{6:" + et + "}"}, ${"{7:" + ymin + "}"}]]'
+            ),
+        },
+
+        # 13. Loop multipli in sequenza
+        {
+            'label': 'envelope loop multipli',
+            'detail': '[[compact1], [compact2]]',
+            'doc': (
+                '**Envelope con due loop in sequenza**\n\n'
+                f'Primo loop fino a t={mid}, secondo fino a t={et}.\n\n'
+                f'Range parametro: [{ymin}, {ymax}]\n\n'
+                'Il secondo loop parte automaticamente dal punto finale del primo\n'
+                '(offset automatico calcolato dal motore).'
+            ),
+            'insert_text': (
+                f' [[[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
+                f' ${"{3:" + mid + "}"}, ${"{4:3}"}],'
+                f' [[[0, ${"{5:" + ymax + "}"}], [100, ${"{6:" + ymin + "}"}]],'
+                f' ${"{7:" + et + "}"}, ${"{8:3}"}]]'
             ),
         },
     ]
+
+
+def build_envelope_n_points(y_min: float, y_max: float, end_time: float, n_points: int) -> str:
+    """
+    Genera N breakpoints equidistanziati nel tempo da y_min a y_max.
+    Formato inline: [[t0, v0], [t1, v1], ..., [tN-1, vN-1]]
+
+    n_points >= 2. Se passato un valore minore viene silenziosamente portato a 2.
+    I tempi sono distribuiti uniformemente in [0, end_time].
+    I valori seguono una rampa lineare da y_min a y_max.
+    """
+    if n_points < 2:
+        n_points = 2
+    points = []
+    for i in range(n_points):
+        t = end_time * i / (n_points - 1)
+        v = y_min + (y_max - y_min) * i / (n_points - 1)
+        points.append(f'[{_fmt(t)}, {_fmt(v)}]')
+    return '[' + ', '.join(points) + ']'
 
 
 # Bounds default usati quando il parametro non ha bounds definiti

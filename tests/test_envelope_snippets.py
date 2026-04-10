@@ -579,3 +579,127 @@ class TestSnippet3PuntiMidpoint:
         two = next(i for i in items if '2 punti' in i.label)
         # Deve avere solo due righe di breakpoint, non tre
         assert two.insert_text.count('${') == 4  # 2 punti * 2 tab stops (x,y)
+
+
+# =============================================================================
+# Sintassi single-line per tutti gli snippet
+# =============================================================================
+
+class TestSingleLineSyntax:
+    """
+    Tutti gli snippet envelope devono usare sintassi YAML flow (inline),
+    senza newline nell'insert_text.
+
+    - Dict (cubic, step): {type: X, points: [[t,v], ...]}
+    - Compact loop singolo (diretto): [[[0, v], [100, v]], et, n]   (3 bracket)
+    - Misto loop+bp / loop multipli:  [[loop_spec, ...], [t,v], ...]  (lista esterna)
+    """
+
+    def test_nessuno_snippet_ha_newline(self, provider):
+        for item in provider.get_snippets():
+            assert '\n' not in item.insert_text, (
+                f"Snippet '{item.label}' contiene newline: {item.insert_text!r}"
+            )
+
+    def test_dict_cubic_usa_flow_syntax(self, provider):
+        cubic = next(
+            (i for i in provider.get_snippets()
+             if 'cubic' in i.label.lower() and 'loop' not in i.label.lower()),
+            None
+        )
+        assert cubic is not None
+        text = cubic.insert_text
+        assert '{' in text
+        assert 'type' in text
+        assert 'points' in text
+
+    def test_dict_step_usa_flow_syntax(self, provider):
+        step = next(
+            (i for i in provider.get_snippets()
+             if 'step' in i.label.lower() and 'loop' not in i.label.lower()),
+            None
+        )
+        assert step is not None
+        text = step.insert_text
+        assert '{' in text
+        assert 'type' in text
+        assert 'points' in text
+
+    def test_compact_loop_base_usa_formato_diretto(self, provider):
+        """Loop singolo: formato diretto [[[...], et, n]] senza lista esterna."""
+        base = next(
+            (i for i in provider.get_snippets()
+             if 'loop' in i.label.lower() and 'base' in i.label.lower()),
+            None
+        )
+        assert base is not None
+        assert base.insert_text.strip().startswith('[[['), (
+            f"Loop base non usa formato diretto: {base.insert_text!r}"
+        )
+
+    def test_tutti_gli_snippet_senza_newline(self, provider):
+        for item in provider.get_snippets_with_end_time(5.0):
+            assert '\n' not in item.insert_text, f"'{item.label}' ha newline"
+
+
+# =============================================================================
+# Nuovi snippet: formato misto esteso
+# =============================================================================
+
+class TestNuoviSnippetMisti:
+    """
+    Nuovi snippet per formati misti avanzati:
+    - loop → breakpoints standard
+    - loop multipli in sequenza
+    """
+
+    def test_contiene_snippet_loop_poi_breakpoints(self, provider):
+        labels = [i.label for i in provider.get_snippets()]
+        assert any(
+            'loop' in l.lower() and ('breakpoint' in l.lower() or '→' in l)
+            for l in labels
+        )
+
+    def test_contiene_snippet_loop_multipli(self, provider):
+        labels = [i.label for i in provider.get_snippets()]
+        assert any('multipli' in l.lower() for l in labels)
+
+    def test_loop_poi_breakpoints_struttura_corretta(self, provider):
+        """[[loop_spec], [t,v], [t,v]] — lista esterna con compact + breakpoints."""
+        item = next(
+            (i for i in provider.get_snippets()
+             if 'loop' in i.label.lower() and '→' in i.label),
+            None
+        )
+        assert item is not None
+        text = item.insert_text.strip()
+        # lista esterna: [[[[...], et, n], [t, v], [t, v]]
+        assert text.startswith('[[[['), (
+            f"loop→bp non inizia con '[[[[': {item.insert_text!r}"
+        )
+        assert '\n' not in item.insert_text
+
+    def test_loop_multipli_struttura_corretta(self, provider):
+        """[[loop_spec1], [loop_spec2]] — due compact spec in sequenza."""
+        item = next(
+            (i for i in provider.get_snippets()
+             if 'multipli' in i.label.lower()),
+            None
+        )
+        assert item is not None
+        text = item.insert_text.strip()
+        assert text.startswith('[[[['), (
+            f"loop multipli non inizia con '[[[[': {item.insert_text!r}"
+        )
+        assert '\n' not in item.insert_text
+
+    def test_nuovi_snippet_sono_completionitem(self, provider):
+        new_labels = [
+            l for l in [i.label for i in provider.get_snippets()]
+            if 'multipli' in l.lower() or '→' in l
+        ]
+        assert len(new_labels) == 2
+        for item in provider.get_snippets():
+            if item.label in new_labels:
+                assert isinstance(item, CompletionItem)
+                assert item.insert_text_format == InsertTextFormat.Snippet
