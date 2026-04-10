@@ -793,12 +793,13 @@ class EnvelopeEditor:
     def _on_key_press(self, event):
         key     = (event.key or '').lower()
         key_raw = event.key or ''
-        # Undo: Cmd+Z / Ctrl+Z
-        if key in ('super+z', 'ctrl+z'):
+        # Undo: Cmd+Z  (macOS manda 'cmd+z', altri backend 'super+z' o 'meta+z')
+        _is_cmd = 'super' in key or 'meta' in key or 'cmd' in key
+        if _is_cmd and key.endswith('z') and 'shift' not in key and 'ctrl' not in key:
             self._undo()
             return
-        # Redo: Cmd+Shift+Z / Ctrl+Shift+Z / Ctrl+Y — anche super+Z (alcuni backend)
-        if key in ('super+shift+z', 'ctrl+shift+z', 'ctrl+y') or key_raw in ('super+Z', 'ctrl+Z'):
+        # Redo: Cmd+Shift+Z
+        if _is_cmd and 'shift' in key and key.endswith('z') and 'ctrl' not in key:
             self._redo()
             return
         if key == 'f':
