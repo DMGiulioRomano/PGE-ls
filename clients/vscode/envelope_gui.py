@@ -11,6 +11,8 @@ Dipendenze: matplotlib (pip install matplotlib)
 """
 
 import argparse
+import collections
+import copy
 import sys
 from typing import List, Tuple
 
@@ -318,6 +320,11 @@ class EnvelopeEditor:
         self._pan_xlim  = None
         self._pan_ylim  = None
 
+        # Rubber-band Y-zoom state (Z+drag)
+        self._zoom_mode = False   # True quando Z è tenuto premuto
+        self._zoom_y0   = None    # Y al momento del press
+        self._zoom_rect = None    # Rectangle patch di feedback visivo
+
         # ── Sempre segment-based: normalizza input in self._segments ───────
         if segments:
             self._segments = [dict(s) for s in segments]
@@ -372,6 +379,11 @@ class EnvelopeEditor:
 
         self.points: List[Point] = sort_points(seg0['points'])
 
+        # ── Undo / Redo ───────────────────────────────────────────────────────
+        self._undo_stack: collections.deque = collections.deque(maxlen=50)
+        self._redo_stack: collections.deque = collections.deque()
+        self._undoing = False   # True durante _restore_state → sopprime push
+
         self._build_figure()
         self._sync_initial_state()
         self._update_seg_chips()
@@ -390,6 +402,14 @@ class EnvelopeEditor:
 
         # ── Figura ────────────────────────────────────────────────────────
         # 5 colonne: Struttura | Interpolazione | Distribuzione | Params | Preview
+        # Rimuove 'f' dal keymap fullscreen di matplotlib (default) per non
+        # entrare in conflitto con il nostro F = fit-to-content.
+        import matplotlib
+        fs_keys = list(matplotlib.rcParams.get('keymap.fullscreen', []))
+        if 'f' in fs_keys:
+            fs_keys.remove('f')
+            matplotlib.rcParams['keymap.fullscreen'] = fs_keys
+
         fig = plt.figure(figsize=(13.0, 7.0), facecolor=_BG)
         fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
         self.fig = fig
@@ -410,8 +430,8 @@ class EnvelopeEditor:
         ax.set_ylabel('valore', color=_AXIS, fontsize=8)
         ax.grid(True, color=_GRID, linestyle='--', linewidth=0.5, alpha=0.7)
         ax.set_title(
-            'Click: aggiungi   Drag: sposta   Destra: elimina   '
-            'Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   F: fit   Dbl: reset',
+            'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   '
+            'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   Z+drag: zoom area   F: fit   Dbl: reset',
             color=_FG2, fontsize=8, pad=4,
         )
         self.ax = ax
@@ -623,6 +643,7 @@ class EnvelopeEditor:
         fig.canvas.mpl_connect('button_release_event', self._on_release)
         fig.canvas.mpl_connect('scroll_event',         self._on_scroll)
         fig.canvas.mpl_connect('key_press_event',      self._on_key_press)
+        fig.canvas.mpl_connect('key_release_event',    self._on_key_release)
 
     # -------------------------------------------------------------------------
     # Sincronizzazione stato iniziale → widget
@@ -652,8 +673,8 @@ class EnvelopeEditor:
             self.radio_loop.set_active(loop_labels.index(loop_target))
 
         # Visibilità condizionale pannelli Col 2 / Col 3
-        self._ax_interp.set_visible(not is_loop)
-        self._ax_loop.set_visible(is_loop)
+        self._set_radio_visible(self._ax_interp, not is_loop)
+        self._set_radio_visible(self._ax_loop, is_loop)
         if not is_loop:
             self._ax_interp.set_title('Interpolazione', color=_FG, fontsize=9, pad=3)
             for lbl in self.radio_interp.labels:
@@ -722,6 +743,21 @@ class EnvelopeEditor:
         self._ax_endtime.set_visible(show)
 
     # -------------------------------------------------------------------------
+    # Breakpoints end_time helper
+    # -------------------------------------------------------------------------
+
+    def _update_bp_end_time(self):
+        """In BP mode: aggiorna self.end_time e xlim in base all'X dell'ultimo punto."""
+        if not self.points:
+            return
+        max_t = max(t for t, v in self.points)
+        pad   = max_t * 0.08 or 0.5   # 8% di padding a destra
+        self.end_time = max_t
+        if self._active_seg < len(self._segments):
+            self._segments[self._active_seg]['end_time'] = max_t
+        self.ax.set_xlim(0.0, max_t + pad)
+
+    # -------------------------------------------------------------------------
     # Zoom / pan helpers
     # -------------------------------------------------------------------------
 
@@ -742,16 +778,130 @@ class EnvelopeEditor:
         vs = [p[1] for p in pts]
         t_min, t_max = min(ts), max(ts)
         v_min, v_max = min(vs), max(vs)
-        t_pad = (t_max - t_min) * 0.10 or 0.5
         v_pad = (v_max - v_min) * 0.10 or (self.y_max - self.y_min) * 0.05 or 0.05
-        self.ax.set_xlim(t_min - t_pad, t_max + t_pad)
+        # X: clamp a [0, end_time] — niente spazio fuori dai bounds temporali
+        self.ax.set_xlim(0.0, self.end_time)
         self.ax.set_ylim(v_min - v_pad, v_max + v_pad)
         self.fig.canvas.draw_idle()
 
+    _HINT_NORMAL = (
+        'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   '
+        'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   Z+drag: zoom area   F: fit   Dbl: reset'
+    )
+    _HINT_ZOOM = '[ZOOM Y]  Trascina verticalmente per selezionare l\'area → rilascia per zoomare   Esc: esci'
+
     def _on_key_press(self, event):
-        """Tasto F → fit-to-content sui punti correnti."""
-        if (event.key or '').lower() == 'f':
+        key     = (event.key or '').lower()
+        key_raw = event.key or ''
+        # Undo: Cmd+Z / Ctrl+Z
+        if key in ('super+z', 'ctrl+z'):
+            self._undo()
+            return
+        # Redo: Cmd+Shift+Z / Ctrl+Shift+Z / Ctrl+Y — anche super+Z (alcuni backend)
+        if key in ('super+shift+z', 'ctrl+shift+z', 'ctrl+y') or key_raw in ('super+Z', 'ctrl+Z'):
+            self._redo()
+            return
+        if key == 'f':
             self._fit_to_content()
+        elif key == 'z' and not self._zoom_mode:
+            self._zoom_mode = True
+            self.ax.set_title(self._HINT_ZOOM, color='#00aaff', fontsize=8, pad=4)
+            self.fig.canvas.draw_idle()
+        elif key == 'escape':
+            self._cancel_zoom()
+        elif key in ('alt+up', 'alt+down'):
+            self._arrow_zoom_y(zoom_in=(key == 'alt+up'))
+
+    def _on_key_release(self, event):
+        if (event.key or '').lower() == 'z':
+            self._cancel_zoom()
+
+    def _cancel_zoom(self):
+        """Esce dalla modalità Z-zoom senza applicare nulla."""
+        self._zoom_mode = False
+        self._zoom_y0   = None
+        if self._zoom_rect is not None:
+            try:
+                self._zoom_rect.remove()
+            except ValueError:
+                pass
+            self._zoom_rect = None
+        self.ax.set_title(self._HINT_NORMAL, color=_FG2, fontsize=8, pad=4)
+        self.fig.canvas.draw_idle()
+
+    def _arrow_zoom_y(self, zoom_in: bool):
+        """Option+↑/↓ — zoom Y ancorato al breakpoint con Y minima.
+
+        Il limite inferiore della vista è fisso al valore del breakpoint più
+        basso; solo il limite superiore si muove (zoom in = si avvicina,
+        zoom out = si allontana).
+        """
+        if not self.points:
+            return
+        y_anchor = min(v for _, v in self.points)
+        _, y_hi = self.ax.get_ylim()
+        factor = 0.88 if zoom_in else (1.0 / 0.88)
+        new_hi = y_anchor + (y_hi - y_anchor) * factor
+        new_hi = min(self.y_max, new_hi)           # non uscire dai bounds
+        if new_hi > y_anchor:
+            self.ax.set_ylim(y_anchor, new_hi)
+            self.fig.canvas.draw_idle()
+
+    # -------------------------------------------------------------------------
+    # Undo / Redo
+    # -------------------------------------------------------------------------
+
+    def _snapshot(self) -> dict:
+        """Ritorna una copia profonda dello stato undoable corrente."""
+        self._save_current_segment()
+        return {
+            'segments':   copy.deepcopy(self._segments),
+            'active_seg': self._active_seg,
+            'struttura':  self._struttura,
+            'interp':     self._interp,
+            'loop_dist':  self._loop_dist,
+            'n_reps':     self._n_reps,
+            'ratio':      self._ratio,
+            'exponent':   self._exponent,
+            'end_time':   self.end_time,
+        }
+
+    def _push_undo(self):
+        """Salva lo stato attuale nello stack undo e svuota il redo."""
+        self._undo_stack.append(self._snapshot())
+        self._redo_stack.clear()
+
+    def _restore_state(self, snap: dict):
+        """Ripristina lo stato da uno snapshot e ri-sincronizza i widget."""
+        self._undoing = True
+        try:
+            self._segments   = copy.deepcopy(snap['segments'])
+            self._active_seg = snap['active_seg']
+            self._struttura  = snap['struttura']
+            self._interp     = snap['interp']
+            self._loop_dist  = snap['loop_dist']
+            self._n_reps     = snap['n_reps']
+            self._ratio      = snap['ratio']
+            self._exponent   = snap['exponent']
+            self.end_time    = snap['end_time']
+            # _load_segment sincronizza punti, radio buttons, pannelli, xlim
+            self._load_segment(self._active_seg)
+            self._update_seg_chips()
+            self.fig.canvas.draw()
+        finally:
+            self._undoing = False
+
+    def _undo(self):
+        if not self._undo_stack:
+            return
+        self._redo_stack.append(self._snapshot())
+        self._restore_state(self._undo_stack.pop())
+
+    def _redo(self):
+        if not self._redo_stack:
+            return
+        self._undo_stack.append(self._snapshot())
+        self._restore_state(self._redo_stack.pop())
 
     # -------------------------------------------------------------------------
     # Hit detection (coordinate display, pixel)
@@ -859,11 +1009,16 @@ class EnvelopeEditor:
         self._on_press(event)
 
     def _on_scroll(self, event):
-        """Scroll: zoom Y centrato sul cursore.  Ctrl+Scroll: zoom X."""
+        """Scroll: zoom Y centrato sul cursore.  Ctrl+Scroll: zoom X.
+        Sensibilità: 0.88 per step (più morbido del precedente 0.80).
+        Multi-step (trackpad fast scroll) gestito con potenza del fattore.
+        """
         if event.inaxes is not self.ax:
             return
-        factor = 0.80 if event.step > 0 else 1.25   # su = zoom in, giù = zoom out
-        key = (event.key or '').lower()
+        # factor < 1 = zoom in (range si restringe), > 1 = zoom out
+        base   = 0.88
+        factor = base ** event.step   # event.step > 0: scroll su = zoom in
+        key  = (event.key or '').lower()
         ctrl = 'ctrl' in key or 'control' in key or 'cmd' in key
         if ctrl:
             # Zoom X centrato sul cursore
@@ -871,15 +1026,22 @@ class EnvelopeEditor:
             xc = event.xdata if event.xdata is not None else (xmin + xmax) / 2
             self.ax.set_xlim(xc - (xc - xmin) * factor, xc + (xmax - xc) * factor)
         else:
-            # Zoom Y centrato sul cursore
+            # Zoom Y centrato sul cursore, clamped ai bounds del parametro
             ymin, ymax = self.ax.get_ylim()
             yc = event.ydata if event.ydata is not None else (ymin + ymax) / 2
-            self.ax.set_ylim(yc - (yc - ymin) * factor, yc + (ymax - yc) * factor)
+            new_lo = max(self.y_min, yc - (yc - ymin) * factor)
+            new_hi = min(self.y_max, yc + (ymax - yc) * factor)
+            self.ax.set_ylim(new_lo, new_hi)
         self.fig.canvas.draw_idle()
 
     def _on_press(self, event):
         if event.inaxes is not self.ax or event.xdata is None:
             return
+
+        # ── Rubber-band Y-zoom (Z tenuto premuto) ─────────────────────────
+        if self._zoom_mode and event.button == 1 and event.ydata is not None:
+            self._zoom_y0 = event.ydata
+            return   # non aggiungere/selezionare punti
 
         # In total preview o loop preview: solo zoom/reset
         if self._total_preview or self._preview_mode:
@@ -895,16 +1057,27 @@ class EnvelopeEditor:
         if event.button == 3:
             idx = self._find_nearest(event)
             if idx >= 0 and len(self.points) > 2:
+                if not self._undoing:
+                    self._push_undo()
                 self.points.pop(idx)
                 self._redraw()
                 self._update_preview()
             return
 
-        idx = self._find_nearest(event)
+        key  = (event.key or '').lower()
+        cmd  = 'super' in key or 'cmd' in key or 'meta' in key
+        idx  = self._find_nearest(event)
         if idx >= 0:
+            # Salva snapshot prima del drag: un unico undo per tutta la trascinata
+            if not self._undoing:
+                self._push_undo()
             self._sel = idx
-        else:
-            t = max(0.0, min(self.end_time, event.xdata))
+        elif cmd:
+            # Cmd+click → inserisce un nuovo breakpoint
+            if not self._undoing:
+                self._push_undo()
+            is_bp = self._struttura == 'breakpoints'
+            t = max(0.0, event.xdata if is_bp else min(self.end_time, event.xdata))
             v = max(self.y_min, min(self.y_max, event.ydata))
             self.points.append((t, v))
             self.points = sort_points(self.points)
@@ -912,10 +1085,33 @@ class EnvelopeEditor:
                 if abs(pt - t) < 1e-9 and abs(pv - v) < 1e-9:
                     self._sel = i
                     break
+            if is_bp:
+                self._update_bp_end_time()
             self._redraw()
             self._update_preview()
 
     def _on_motion(self, event):
+        # ── Rubber-band Y-zoom (Z+drag) ───────────────────────────────────
+        if self._zoom_mode and self._zoom_y0 is not None:
+            if event.inaxes is not self.ax or event.ydata is None:
+                return
+            from matplotlib.patches import Rectangle as _Rect
+            if self._zoom_rect is not None:
+                try:
+                    self._zoom_rect.remove()
+                except ValueError:
+                    pass
+            xl = self.ax.get_xlim()
+            y0, y1 = sorted([self._zoom_y0, event.ydata])
+            self._zoom_rect = self.ax.add_patch(_Rect(
+                (xl[0], y0), xl[1] - xl[0], y1 - y0,
+                facecolor='#00aaff', alpha=0.15,
+                edgecolor='#00aaff', linewidth=1, linestyle='--',
+                transform=self.ax.transData, zorder=5,
+            ))
+            self.fig.canvas.draw_idle()
+            return
+
         # ── Pan (middle-click drag) ────────────────────────────────────────
         if self._pan_start is not None:
             if event.inaxes is not self.ax:
@@ -939,7 +1135,8 @@ class EnvelopeEditor:
 
         if self._sel < 0 or event.inaxes is not self.ax or event.xdata is None:
             return
-        t = max(0.0, min(self.end_time, event.xdata))
+        is_bp = self._struttura == 'breakpoints'
+        t = max(0.0, event.xdata if is_bp else min(self.end_time, event.xdata))
         v = max(self.y_min, min(self.y_max, event.ydata))
         self.points[self._sel] = (t, v)
         self.points = sort_points(self.points)
@@ -947,10 +1144,27 @@ class EnvelopeEditor:
             if abs(pt - t) < 1e-9 and abs(pv - v) < 1e-9:
                 self._sel = i
                 break
+        if is_bp:
+            self._update_bp_end_time()
         self._redraw()
         self._update_preview()
 
-    def _on_release(self, _event):
+    def _on_release(self, event):
+        # ── Applica rubber-band Y-zoom ────────────────────────────────────
+        if self._zoom_mode and self._zoom_y0 is not None:
+            if self._zoom_rect is not None:
+                try:
+                    self._zoom_rect.remove()
+                except ValueError:
+                    pass
+                self._zoom_rect = None
+            y1 = event.ydata if (event.inaxes is self.ax and event.ydata is not None) else self._zoom_y0
+            y_lo, y_hi = sorted([self._zoom_y0, y1])
+            self._zoom_y0 = None
+            if y_hi - y_lo > 1e-6:   # selezione non degenerata
+                self.ax.set_ylim(max(self.y_min, y_lo), min(self.y_max, y_hi))
+            self.fig.canvas.draw_idle()
+            return
         self._sel = -1
         self._pan_start = None
 
@@ -991,7 +1205,7 @@ class EnvelopeEditor:
                 btn_prv.label.set_color(_LINE);   btn_prv.label.set_fontweight('bold')
             self.ax.set_title(
                 'Anteprima loop — sola lettura   '
-                'Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   F: fit   Dbl: reset',
+                'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   Z+drag: zoom area   F: fit   Dbl: reset',
                 color='#ffd700', fontsize=8, pad=4,
             )
         else:
@@ -1001,8 +1215,8 @@ class EnvelopeEditor:
                 ax_prv.set_facecolor('#1e1e1e');  btn_prv.ax.set_facecolor('#1e1e1e')
                 btn_prv.label.set_color(_FG2);    btn_prv.label.set_fontweight('normal')
             self.ax.set_title(
-                'Click: aggiungi   Drag: sposta   Destra: elimina   '
-                'Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   F: fit   Dbl: reset',
+                'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   '
+                'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   Z+drag: zoom area   F: fit   Dbl: reset',
                 color=_FG2, fontsize=8, pad=4,
             )
 
@@ -1058,20 +1272,22 @@ class EnvelopeEditor:
         seg['points'] = list(self.points)
         if seg['type'] == 'breakpoints':
             seg['interp'] = self._interp
+            # end_time = X dell'ultimo punto (auto-derivato)
+            if self.points:
+                seg['end_time'] = max(t for t, v in self.points)
         else:
             seg['loop_dist'] = self._loop_dist
             seg['n_reps']    = self._n_reps
             seg['ratio']     = self._ratio
             seg['exponent']  = self._exponent
-        # Persistiamo anche l'end_time corrente dal TextBox
-        try:
-            et_val = float(self.txt_endtime.text)
-            if et_val > 0:
-                seg['end_time'] = et_val
-                if seg['type'] == 'loop':
+            # Per loop: legge end_time dal TextBox come prima
+            try:
+                et_val = float(self.txt_endtime.text)
+                if et_val > 0:
+                    seg['end_time'] = et_val
                     seg['duration'] = et_val - seg.get('abs_start', 0.0)
-        except ValueError:
-            pass
+            except ValueError:
+                pass
 
     def _on_endtime_change(self, text: str):
         """Aggiorna end_time / duration del segmento attivo in tempo reale."""
@@ -1114,9 +1330,13 @@ class EnvelopeEditor:
             self.ax.set_xlim(0.0, 100.0)
             self.ax.set_xlabel('pattern (%)', color=_AXIS, fontsize=8)
         else:
-            seg_end = seg.get('end_time', self.end_time)
+            # BP: end_time = X dell'ultimo punto (non un valore fisso)
+            pts = self.points
+            seg_end = max(t for t, v in pts) if pts else seg.get('end_time', self.end_time)
+            pad     = seg_end * 0.08 or 0.5
             self.end_time = seg_end
-            self.ax.set_xlim(0.0, seg_end)
+            seg['end_time'] = seg_end
+            self.ax.set_xlim(0.0, seg_end + pad)
             self.ax.set_xlabel('tempo (s)', color=_AXIS, fontsize=8)
         self._preview_mode = False
 
@@ -1211,6 +1431,8 @@ class EnvelopeEditor:
 
     def _do_add_segment(self, seg_type: str):
         """Aggiunge effettivamente un segmento del tipo dato."""
+        if not self._undoing:
+            self._push_undo()
         self._save_current_segment()
         if self._segments:
             last = self._segments[-1]
@@ -1252,6 +1474,8 @@ class EnvelopeEditor:
         """Rimuove il segmento i (almeno 1 deve rimanere)."""
         if len(self._segments) <= 1:
             return
+        if not self._undoing:
+            self._push_undo()
         self._segments.pop(i)
         self._active_seg = min(self._active_seg, len(self._segments) - 1)
         self._load_segment(self._active_seg)
@@ -1275,7 +1499,7 @@ class EnvelopeEditor:
         self.ax.set_xlim(0.0, total_end)
         self.ax.set_title(
             'Anteprima totale — sola lettura   '
-            'Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   F: fit   Dbl: reset',
+            'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Mid drag: pan   Z+drag: zoom area   F: fit   Dbl: reset',
             color='#ffd700', fontsize=8, pad=4,
         )
         self._update_seg_chips()
@@ -1345,6 +1569,21 @@ class EnvelopeEditor:
 
         return all_ts, all_vs
 
+    @staticmethod
+    def _set_radio_visible(ax, visible: bool):
+        """Nasconde/mostra un pannello RadioButtons in modo affidabile.
+
+        ax.set_visible() non propaga sempre la visibilità ai figli in
+        matplotlib 3.9 su backend MacOSX — nascondiamo ogni artist figlio
+        esplicitamente per garantire che cerchi e label scompaiano davvero.
+        """
+        ax.set_visible(visible)
+        for artist in ax.get_children():
+            try:
+                artist.set_visible(visible)
+            except AttributeError:
+                pass
+
     def _sync_controls_for_current_struttura(self):
         """Allinea radio buttons e visibilità pannelli allo stato corrente."""
         is_loop = self._struttura == 'loop'
@@ -1365,19 +1604,15 @@ class EnvelopeEditor:
         if loop_target in loop_labels:
             self.radio_loop.set_active(loop_labels.index(loop_target))
 
-        # FIX: Visibilità mutuamente esclusiva con zorder corretto
-        self._ax_interp.set_visible(not is_loop)
-        self._ax_loop.set_visible(is_loop)
-        
+        # Visibilità mutuamente esclusiva — nascondi tutti gli artist figli
+        self._set_radio_visible(self._ax_interp, not is_loop)
+        self._set_radio_visible(self._ax_loop, is_loop)
+
         if not is_loop:
-            self._ax_interp.set_zorder(10)
-            self._ax_loop.set_zorder(0)
             self._ax_interp.set_title('Interpolazione', color=_FG, fontsize=9, pad=3)
             for lbl in self.radio_interp.labels:
                 lbl.set_color(_FG)
         else:
-            self._ax_loop.set_zorder(10)
-            self._ax_interp.set_zorder(0)
             self._ax_loop.set_title('Distribuzione loop', color=_FG, fontsize=9, pad=3)
             for lbl in self.radio_loop.labels:
                 lbl.set_color(_FG)
@@ -1391,12 +1626,13 @@ class EnvelopeEditor:
 
         # n_reps
         self.txt_nreps.set_val(str(self._n_reps))
-        
-        # Forza redraw per evitare glitch grafici
+
         self.fig.canvas.draw_idle()
 
     def _on_struttura_change(self, label: str):
         """Converte il tipo del segmento attivo (BP ↔ Loop)."""
+        if not self._undoing:
+            self._push_undo()
         self._convert_segment_type(label.lower().rstrip())
 
     def _convert_segment_type(self, new_type: str):
@@ -1450,11 +1686,15 @@ class EnvelopeEditor:
         self.fig.canvas.draw()
 
     def _on_interp_change(self, label: str):
+        if not self._undoing:
+            self._push_undo()
         self._interp = label.lower()
         self._redraw()
         self._update_preview()
 
     def _on_loop_dist_change(self, label: str):
+        if not self._undoing:
+            self._push_undo()
         self._loop_dist = self._LOOP_DIST_KEYS[label]
         # aggiorna etichetta parametro extra
         if self._loop_dist == 'geometrico':
