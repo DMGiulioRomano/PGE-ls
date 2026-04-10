@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const { spawn } = require('child_process');
 const vscode = require('vscode');
 const {
     LanguageClient,
@@ -177,6 +178,283 @@ async function activate(context) {
     });
 
     context.subscriptions.push(changeDisposable);
+
+    // -------------------------------------------------------------------------
+    // Comando: inserisci envelope con N punti equidistanziati
+    // Palette: "PGE: Inserisci envelope con N punti"
+    // -------------------------------------------------------------------------
+    const envelopeDisposable = vscode.commands.registerCommand(
+        'pge-ls.insertEnvelope',
+        async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || !isPgeFile(editor.document.uri)) {
+                vscode.window.showWarningMessage(
+                    'Apri un file PGE_*.yaml per usare questo comando.'
+                );
+                return;
+            }
+
+            const input = await vscode.window.showInputBox({
+                title: 'Envelope equidistanziato',
+                prompt: 'Numero di breakpoints da inserire (minimo 2)',
+                placeHolder: 'es. 5',
+                validateInput: v => {
+                    const n = parseInt(v, 10);
+                    if (isNaN(n) || n < 2) return 'Inserisci un numero intero >= 2';
+                    return null;
+                },
+            });
+            if (!input) return;
+
+            const nPoints = parseInt(input, 10);
+            const pos = editor.selection.active;
+
+            let insertText;
+            try {
+                insertText = await client.sendRequest('workspace/executeCommand', {
+                    command: 'pge.buildEnvelope',
+                    arguments: [
+                        editor.document.uri.toString(),
+                        pos.line,
+                        pos.character,
+                        nPoints,
+                    ],
+                });
+            } catch (err) {
+                vscode.window.showErrorMessage(`PGE LS: errore generazione envelope — ${err.message}`);
+                return;
+            }
+
+            if (!insertText) return;
+
+            await editor.edit(eb => eb.insert(pos, insertText));
+        }
+    );
+    context.subscriptions.push(envelopeDisposable);
+
+    // -------------------------------------------------------------------------
+    // Comando: apri GUI grafica per disegnare envelope
+    // Palette: "PGE: Apri editor envelope grafico"
+    // -------------------------------------------------------------------------
+    const GUI_TIMEOUT_MS = 300_000;   // 5 minuti
+
+    /**
+     * Lancia envelope_gui.py come subprocess con args arbitrari.
+     * Risolve con il testo stdout (o '') se la GUI viene chiusa senza output.
+     * Rigetta in caso di errore subprocess.
+     */
+    function runEnvelopeGui(pythonPath, args) {
+        return new Promise((resolve, reject) => {
+            const child = spawn(pythonPath, args);
+
+            let stdout = '';
+            let stderr = '';
+            child.stdout.on('data', d => { stdout += d.toString(); });
+            child.stderr.on('data', d => { stderr += d.toString(); });
+
+            const timer = setTimeout(() => {
+                child.kill();
+                resolve('');   // timeout: nessun inserimento
+            }, GUI_TIMEOUT_MS);
+
+            child.on('close', code => {
+                clearTimeout(timer);
+                if (code !== 0) {
+                    const msg = stderr.trim() || `exit code ${code}`;
+                    reject(new Error(msg));
+                } else {
+                    resolve(stdout.trim());
+                }
+            });
+
+            child.on('error', err => {
+                clearTimeout(timer);
+                reject(err);
+            });
+        });
+    }
+
+    const guiEditorDisposable = vscode.commands.registerCommand(
+        'pge-ls.openEnvelopeEditor',
+        async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || !isPgeFile(editor.document.uri)) {
+                vscode.window.showWarningMessage(
+                    'Apri un file PGE_*.yaml per usare questo comando.'
+                );
+                return;
+            }
+
+            const pos = editor.selection.active;
+
+            // 1. Chiedi al server il contesto (bounds + end_time)
+            let ctx;
+            try {
+                ctx = await client.sendRequest('workspace/executeCommand', {
+                    command: 'pge.getEnvelopeContext',
+                    arguments: [
+                        editor.document.uri.toString(),
+                        pos.line,
+                        pos.character,
+                    ],
+                });
+            } catch (err) {
+                vscode.window.showErrorMessage(`PGE LS: errore contesto envelope — ${err.message}`);
+                return;
+            }
+
+            // 2. Lancia la GUI
+            const config = vscode.workspace.getConfiguration('pgeLs');
+            const guiPythonPath = config.get('guiPythonPath') || config.get('pythonPath') || 'python';
+            const guiScript  = path.join(context.extensionPath, 'envelope_gui.py');
+
+            let result;
+            try {
+                result = await runEnvelopeGui(guiPythonPath, [
+                    guiScript,
+                    `--ymin=${ctx.y_min}`,
+                    `--ymax=${ctx.y_max}`,
+                    `--end_time=${ctx.end_time}`,
+                ]);
+            } catch (err) {
+                const msg = err.message || String(err);
+                const isTkMissing = msg.includes('tkinter') || msg.includes('python3-tk');
+                const detail = isTkMissing
+                    ? 'tkinter non disponibile. Su macOS: brew install python-tk  — poi imposta pgeLs.guiPythonPath sul Python con tkinter.'
+                    : msg;
+                vscode.window.showErrorMessage(`PGE LS: errore GUI envelope — ${detail}`);
+                return;
+            }
+
+            // 3. Inserisci il risultato (se non vuoto)
+            if (result) {
+                await editor.edit(eb => eb.insert(pos, ' ' + result));
+            }
+        }
+    );
+    context.subscriptions.push(guiEditorDisposable);
+
+    // -------------------------------------------------------------------------
+    // Cmd+Click su un valore envelope → apre la GUI pre-popolata con i punti
+    // esistenti. Dopo la modifica, il testo originale viene sostituito in-place.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Lancia la GUI con dati pre-popolati e sostituisce il testo nel documento.
+     * @param {object} envelopeData  risposta di pge.getEnvelopeAtCursor
+     * @param {vscode.TextDocument} document
+     */
+    async function openEnvelopeEditorForEditing(envelopeData, document) {
+        const cfg = vscode.workspace.getConfiguration('pgeLs');
+        const guiPy     = cfg.get('guiPythonPath') || cfg.get('pythonPath') || 'python';
+        const guiScript = path.join(context.extensionPath, 'envelope_gui.py');
+
+        const args = [
+            guiScript,
+            `--ymin=${envelopeData.y_min}`,
+            `--ymax=${envelopeData.y_max}`,
+            `--end_time=${envelopeData.end_time}`,
+            `--struttura=${envelopeData.struttura}`,
+        ];
+        if (envelopeData.struttura === 'misto') {
+            args.push(`--segments=${JSON.stringify(envelopeData.segments)}`);
+        } else {
+            args.push(`--points=${JSON.stringify(envelopeData.points)}`);
+            args.push(`--interp=${envelopeData.interp}`);
+            args.push(`--loop-dist=${envelopeData.loop_dist}`);
+            args.push(`--nreps=${envelopeData.n_reps}`);
+            args.push(`--ratio=${envelopeData.ratio}`);
+            args.push(`--exponent=${envelopeData.exponent}`);
+        }
+
+        let result;
+        try {
+            result = await runEnvelopeGui(guiPy, args);
+        } catch (err) {
+            vscode.window.showErrorMessage(`PGE LS: errore GUI envelope — ${err.message}`);
+            return;
+        }
+
+        if (!result) return;   // annullato dall'utente
+
+        // Sostituisce il valore originale sulla stessa riga
+        const r = envelopeData.replace_range;
+        const replaceRange = new vscode.Range(
+            new vscode.Position(r.line, r.start_char),
+            new vscode.Position(r.line, r.end_char),
+        );
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(document.uri, replaceRange, result);
+        await vscode.workspace.applyEdit(edit);
+    }
+
+    const pgeDocSelector = [
+        { scheme: 'file', language: 'yaml', pattern: '**/PGE_*.yaml' },
+        { scheme: 'file', language: 'yaml', pattern: '**/PGE_*.yml' },
+    ];
+
+    const definitionDisposable = vscode.languages.registerDefinitionProvider(
+        pgeDocSelector,
+        {
+            async provideDefinition(document, position) {
+                if (!isPgeFile(document.uri)) return null;
+
+                let envelopeData;
+                try {
+                    envelopeData = await client.sendRequest('workspace/executeCommand', {
+                        command: 'pge.getEnvelopeAtCursor',
+                        arguments: [
+                            document.uri.toString(),
+                            position.line,
+                            position.character,
+                        ],
+                    });
+                } catch {
+                    return null;
+                }
+
+                if (!envelopeData) return null;
+
+                // Apre la GUI in background (non blocca il definition provider)
+                openEnvelopeEditorForEditing(envelopeData, document).catch(err =>
+                    vscode.window.showErrorMessage(`PGE LS: ${err.message}`)
+                );
+
+                // Ritorna la posizione corrente come "definizione di se stesso"
+                // per evitare il toast "No definition found"
+                return new vscode.Location(document.uri, position);
+            },
+        }
+    );
+    context.subscriptions.push(definitionDisposable);
+
+    // -------------------------------------------------------------------------
+    // Semantic token colors: registra il colore per 'pge-normalized'
+    // nel workspace settings (scrive in .vscode/settings.json).
+    // Eseguito solo se la chiave non esiste ancora, per non sovrascrivere
+    // personalizzazioni dell'utente.
+    // -------------------------------------------------------------------------
+    try {
+        const stConfig = vscode.workspace.getConfiguration(
+            'editor.semanticTokenColorCustomizations'
+        );
+        const existing = stConfig.get('rules') || {};
+        if (!existing['pge-normalized'] || !existing['pge-block-key']) {
+            const merged = Object.assign({}, existing, {
+                'pge-normalized': { foreground: '#4ec9b0' },
+                'pge-block-key':  { foreground: '#c586c0' },
+            });
+            await vscode.workspace
+                .getConfiguration('editor')
+                .update(
+                    'semanticTokenColorCustomizations',
+                    { rules: merged },
+                    vscode.ConfigurationTarget.Workspace,
+                );
+        }
+    } catch (_) {
+        // Ignora errori (es. workspace read-only)
+    }
 
     vscode.window.setStatusBarMessage('$(check) PGE LS attivo', 5000);
 }

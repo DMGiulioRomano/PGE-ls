@@ -31,6 +31,10 @@ from lsprotocol.types import (
     TEXT_DOCUMENT_CODE_ACTION,
     TEXT_DOCUMENT_DEFINITION,
     TEXT_DOCUMENT_DOCUMENT_LINK,
+    TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
+    SemanticTokens,
+    SemanticTokensLegend,
+    SemanticTokensParams,
     CodeAction,
     DocumentLink,
     DocumentLinkOptions,
@@ -69,6 +73,7 @@ from granular_ls.yaml_analyzer import YamlAnalyzer, is_pge_file
 from granular_ls.providers.completion_provider import CompletionProvider
 from granular_ls.providers.hover_provider import HoverProvider
 from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+from granular_ls.envelope_snippets import build_envelope_n_points
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('pge-ls')
@@ -100,7 +105,7 @@ def _init_providers(bridge: SchemaBridge) -> None:
             refs_dir = candidate
     _completion_provider = CompletionProvider(bridge, refs_dir=refs_dir)
     _hover_provider = HoverProvider(bridge)
-    _diagnostic_provider = DiagnosticProvider(bridge)
+    _diagnostic_provider = DiagnosticProvider(bridge, refs_dir=str(refs_dir) if refs_dir else '')
     logger.info(
         f"Provider inizializzati con "
         f"{len(bridge.get_all_parameters())} parametri."
@@ -121,6 +126,116 @@ def _get_document_text(server: LanguageServer, uri: str) -> str:
         return doc.source or ''
     except Exception:
         return ''
+
+
+# =============================================================================
+# SEMANTIC TOKENS
+# =============================================================================
+
+# Token types:
+#   0 = 'pge-normalized'  — chiavi pointer in modalita' normalized (verde teal)
+#   1 = 'pge-block-key'   — chiavi blocco strutturali: pointer, pitch, grain, dephase, voices
+_SEMANTIC_LEGEND = SemanticTokensLegend(
+    token_types=['pge-normalized', 'pge-block-key'],
+    token_modifiers=[],
+)
+_TOKEN_NORMALIZED = 0
+_TOKEN_BLOCK_KEY  = 1
+
+# Parametri pointer soggetti a colorazione normalized
+_POINTER_UNIT_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
+
+# Chiavi blocco strutturali sempre colorate
+_BLOCK_KEYS = {'pointer', 'pitch', 'grain', 'dephase', 'voices'}
+
+
+def _compute_semantic_tokens(document_text: str) -> list:
+    """
+    Scansiona il documento e ritorna i dati semantic tokens delta-encoded.
+
+    Formato LSP: [deltaLine, deltaStartChar, length, tokenType, tokenModifiers]
+    Tutti i valori relativi al token precedente.
+
+    Tipi emessi:
+      _TOKEN_BLOCK_KEY  (1) — chiavi blocco (pointer, pitch, grain, dephase, voices)
+                              a 4 spazi di indent, sempre colorate.
+      _TOKEN_NORMALIZED (0) — chiavi pointer (start, loop_start, loop_end, loop_dur)
+                              solo quando l'unita' effettiva e' 'normalized'.
+    """
+    if not document_text:
+        return []
+
+    import re as _re
+    from granular_ls.providers.hover_provider import _get_effective_unit_mode
+
+    lines = document_text.split('\n')
+    # lista di (line, start_char, length, token_type)
+    tokens = []
+
+    # Trova i confini di ogni stream
+    stream_starts = [
+        i for i, line in enumerate(lines)
+        if (line.strip().startswith('- ') or line.strip() == '-')
+        and (len(line) - len(line.lstrip())) == 2
+    ]
+    stream_ranges = [
+        (s, stream_starts[i + 1] if i + 1 < len(stream_starts) else len(lines))
+        for i, s in enumerate(stream_starts)
+    ]
+
+    for stream_start, stream_end in stream_ranges:
+        for i in range(stream_start, stream_end):
+            raw = lines[i]
+            stripped = raw.strip()
+            leading = len(raw) - len(raw.lstrip())
+
+            # --- Token tipo 1: chiavi blocco a 4 spazi ---
+            if leading == 4:
+                m = _re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', stripped)
+                if m and m.group(1) in _BLOCK_KEYS:
+                    tokens.append((i, leading, len(m.group(1)), _TOKEN_BLOCK_KEY))
+                    continue
+
+            # --- Token tipo 0: chiavi pointer normalized a 6 spazi ---
+            if leading == 6:
+                m = _re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', stripped)
+                if not m:
+                    continue
+                key = m.group(1)
+                if key not in _POINTER_UNIT_PARAMS:
+                    continue
+                # Verifica che siamo dentro un blocco pointer: di questo stream
+                # Cerca la prima riga con indent < 6 scorrendo verso l'alto.
+                pointer_block = False
+                for k in range(i - 1, stream_start - 1, -1):
+                    r = lines[k]
+                    if not r.strip():
+                        continue
+                    r_leading = len(r) - len(r.lstrip())
+                    if r_leading < 6:
+                        if r_leading == 4 and r.strip().startswith('pointer:'):
+                            pointer_block = True
+                        break
+                if not pointer_block:
+                    continue
+                mode, _ = _get_effective_unit_mode(document_text, i)
+                if mode == 'normalized':
+                    tokens.append((i, leading, len(key), _TOKEN_NORMALIZED))
+
+    if not tokens:
+        return []
+
+    # Delta-encode (ordine: line asc, col asc)
+    data = []
+    prev_line = 0
+    prev_col = 0
+    for (line_n, col, length, tok_type) in sorted(tokens, key=lambda t: (t[0], t[1])):
+        delta_line = line_n - prev_line
+        delta_col = col - prev_col if delta_line == 0 else col
+        data.extend([delta_line, delta_col, length, tok_type, 0])
+        prev_line = line_n
+        prev_col = col
+    return data
 
 
 # =============================================================================
@@ -208,9 +323,10 @@ def handle_hover(params: HoverParams) -> Optional[object]:
         parent_path=context.parent_path,
         indent_level=context.indent_level,
         in_stream_element=context.in_stream_element,
+        cursor_line=line,
     )
 
-    result = _hover_provider.get_hover(hover_context)
+    result = _hover_provider.get_hover(hover_context, document_text=text)
     logger.info(f"HOVER: result={'Hover' if result else 'None'}")
     return result
 
@@ -654,6 +770,20 @@ def _publish_diagnostics(uri: str) -> None:
     logger.debug(f"Pubblicati {len(diagnostics)} diagnostici per {uri}")
 
 
+@server.feature(
+    TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
+    _SEMANTIC_LEGEND,
+)
+def handle_semantic_tokens_full(ls: LanguageServer,
+                                 params: SemanticTokensParams) -> SemanticTokens:
+    """Emette semantic tokens per colorare le chiavi pointer in modalita' normalized."""
+    uri = params.text_document.uri
+    if not is_pge_file(uri):
+        return SemanticTokens(data=[])
+    text = _get_document_text(ls, uri)
+    return SemanticTokens(data=_compute_semantic_tokens(text))
+
+
 @server.feature(TEXT_DOCUMENT_DID_OPEN)
 def handle_did_open(params: DidOpenTextDocumentParams) -> None:
     """Documento aperto: pubblica subito i diagnostici iniziali."""
@@ -670,6 +800,377 @@ def handle_did_change(params: DidChangeTextDocumentParams) -> None:
 def handle_did_save(params: DidSaveTextDocumentParams) -> None:
     """Documento salvato: ricalcola i diagnostici anche al salvataggio."""
     _publish_diagnostics(params.text_document.uri)
+
+
+def _resolve_envelope_context(text: str, line: int, character: int) -> dict:
+    """
+    Risolve bounds (y_min, y_max) e end_time per il parametro alla posizione cursore.
+    Ritorna {'y_min': float, 'y_max': float, 'end_time': float}.
+    """
+    context = YamlAnalyzer.get_context(text, line, character)
+
+    y_min, y_max = 0.0, 1.0
+    if context.current_key and _completion_provider:
+        bridge = _completion_provider._bridge
+        for p in bridge.get_all_parameters():
+            local_key = p.yaml_path.split('.')[-1]
+            if local_key == context.current_key or p.yaml_path == context.current_key:
+                if p.min_val is not None and p.max_val is not None:
+                    y_min, y_max = p.min_val, p.max_val
+                break
+        else:
+            raw = bridge.get_raw_bounds(context.current_key)
+            if raw and raw.get('min_val') is not None and raw.get('max_val') is not None:
+                y_min, y_max = raw['min_val'], raw['max_val']
+
+    stream_ctx = YamlAnalyzer.get_stream_context_at_line(text, line)
+    if stream_ctx.get('time_mode') == 'normalized':
+        end_time = 1.0
+    else:
+        end_time = float(stream_ctx.get('duration') or 10.0)
+
+    return {'y_min': float(y_min), 'y_max': float(y_max), 'end_time': end_time}
+
+
+@server.command('pge.buildEnvelope')
+def handle_build_envelope(ls: LanguageServer, args):
+    """
+    Genera N breakpoints equidistanziati per il parametro sotto il cursore.
+
+    args: [uri, line, character, n_points]  (passati direttamente da pygls)
+    Risposta: stringa da inserire, es. ' [[0.0, 0.0], [5.0, 0.5], [10.0, 1.0]]'
+    """
+    args = list(args) if args else []
+    uri       = str(args[0]) if len(args) > 0 else ''
+    line      = int(args[1]) if len(args) > 1 else 0
+    character = int(args[2]) if len(args) > 2 else 0
+    n_points  = max(2, int(args[3])) if len(args) > 3 else 3
+
+    try:
+        text = ls.workspace.get_text_document(uri).source
+    except Exception:
+        text = ''
+
+    ctx = _resolve_envelope_context(text, line, character)
+    return ' ' + build_envelope_n_points(ctx['y_min'], ctx['y_max'], ctx['end_time'], n_points)
+
+
+@server.command('pge.getEnvelopeContext')
+def handle_get_envelope_context(ls: LanguageServer, args):
+    """
+    Ritorna il contesto envelope per la posizione cursore.
+
+    args: [uri, line, character]
+    Risposta: {'y_min': float, 'y_max': float, 'end_time': float}
+    Usato da extension.js prima di aprire la GUI envelope_gui.py.
+    """
+    args = list(args) if args else []
+    uri       = str(args[0]) if len(args) > 0 else ''
+    line      = int(args[1]) if len(args) > 1 else 0
+    character = int(args[2]) if len(args) > 2 else 0
+
+    try:
+        text = ls.workspace.get_text_document(uri).source
+    except Exception:
+        text = ''
+
+    return _resolve_envelope_context(text, line, character)
+
+
+def _is_compact_loop(item) -> bool:
+    """True se item è una sezione loop compatta: [[[%,v],...], et, n, ...]"""
+    return (
+        isinstance(item, list) and len(item) >= 3
+        and isinstance(item[0], list) and len(item[0]) > 0
+        and isinstance(item[0][0], list)
+        and isinstance(item[1], (int, float))
+        and isinstance(item[2], (int, float))
+    )
+
+
+def _parse_loop_segment(item, abs_start: float = 0.0) -> dict:
+    """Parsa un compact loop item in un segment dict (per formato misto)."""
+    pattern   = item[0]
+    end_time  = float(item[1])
+    n_reps    = int(item[2])
+    loop_dist = 'base'
+    ratio     = 1.5
+    exponent  = 2.0
+
+    if len(item) >= 4:
+        fourth = item[3]
+        if isinstance(fourth, str) and fourth == 'cubic':
+            loop_dist = 'cubic'
+        elif isinstance(fourth, str):
+            if len(item) >= 5:
+                timing = item[4]
+                if isinstance(timing, str):
+                    loop_dist = 'accelerando' if timing == 'exponential' else 'ritardando'
+                elif isinstance(timing, dict):
+                    t_type = timing.get('type')
+                    if t_type == 'geometric':
+                        loop_dist = 'geometrico'
+                        ratio = float(timing.get('ratio', 1.5))
+                    elif t_type == 'power':
+                        loop_dist = 'power'
+                        exponent = float(timing.get('exponent', 2.0))
+
+    # end_time è assoluto; abs_start è il tempo di inizio della sezione
+    duration = end_time - abs_start
+    if duration <= 0:
+        duration = end_time
+    pts = [[duration * float(pct) / 100.0, float(v)] for pct, v in pattern]
+
+    return {
+        'type':      'loop',
+        'loop_dist': loop_dist,
+        'n_reps':    n_reps,
+        'ratio':     ratio,
+        'exponent':  exponent,
+        'duration':  duration,
+        'abs_start': abs_start,
+        'end_time':  duration,   # usato dalla GUI come xlim del canvas
+        'points':    pts,
+    }
+
+
+def _try_parse_mixed(val) -> list:
+    """
+    Prova a interpretare val come formato misto/multi-loop.
+    Ritorna lista di segment dict oppure None.
+
+    Formato misto: lista i cui elementi sono [t,v] oppure sezioni loop compatte.
+    Multi-loop: lista di sole sezioni loop compatte.
+    """
+    segments  = []
+    bp_points = []
+    abs_time  = 0.0
+
+    for item in val:
+        if not isinstance(item, list):
+            return None
+
+        if _is_compact_loop(item):
+            if bp_points:
+                abs_time = max(t for t, v in bp_points)
+                segments.append({
+                    'type':     'breakpoints',
+                    'interp':   'linear',
+                    'points':   bp_points[:],
+                    'end_time': abs_time,
+                })
+                bp_points = []
+
+            loop_seg = _parse_loop_segment(item, abs_start=abs_time)
+            segments.append(loop_seg)
+            abs_time = loop_seg['abs_start'] + loop_seg['duration']
+
+        elif (len(item) == 2
+              and isinstance(item[0], (int, float))
+              and isinstance(item[1], (int, float))):
+            bp_points.append([float(item[0]), float(item[1])])
+
+        else:
+            return None   # elemento sconosciuto
+
+    if bp_points:
+        segments.append({
+            'type':     'breakpoints',
+            'interp':   'linear',
+            'points':   bp_points[:],
+            'end_time': max(t for t, v in bp_points),
+        })
+
+    # Deve avere almeno un loop e almeno 2 segmenti totali
+    has_loop = any(s['type'] == 'loop' for s in segments)
+    if not has_loop or len(segments) < 2:
+        return None
+
+    return segments
+
+
+def _parse_envelope_value(value_str: str) -> dict:
+    """
+    Parsa un valore envelope YAML (flow) e ritorna un dict strutturato.
+    Ritorna None se la stringa non è un envelope valido.
+
+    Formati supportati:
+      [[t, v], ...]                             → breakpoints linear
+      {type: cubic/step, points: [[t,v],...]}   → breakpoints cubic/step
+      [[[%, v], ...], et, n]                    → loop base
+      [[[%, v], ...], et, n, "cubic"]           → loop cubic
+      [[[%, v], ...], et, n, "linear", "exponential"|"logarithmic"]
+      [[[%, v], ...], et, n, "linear", {type: geometric, ratio: r}]
+      [[[%, v], ...], et, n, "linear", {type: power, exponent: e}]
+      [[t,v],...,[[[%,v],...],et,n],...]        → misto (breakpoints + loop)
+      [[[[%,v],...],et1,n1],[[[%,v],...],et2,n2]] → multi-loop
+    """
+    import yaml  # pyyaml
+
+    try:
+        val = yaml.safe_load(value_str.strip())
+    except Exception:
+        return None
+
+    if val is None:
+        return None
+
+    # ── Dict: {type: ..., points: [...]} ─────────────────────────────────
+    if isinstance(val, dict) and 'type' in val and 'points' in val:
+        interp = str(val['type'])   # 'cubic' | 'step'
+        pts = [[float(t), float(v)] for t, v in val['points']]
+        return {
+            'struttura': 'breakpoints',
+            'interp': interp,
+            'loop_dist': 'base',
+            'n_reps': 4,
+            'ratio': 1.5,
+            'exponent': 2.0,
+            'points': pts,
+        }
+
+    if not isinstance(val, list) or len(val) == 0:
+        return None
+
+    # ── Lista piatta [[t, v], ...] ────────────────────────────────────────
+    if all(
+        isinstance(x, list) and len(x) == 2
+        and isinstance(x[0], (int, float)) and isinstance(x[1], (int, float))
+        for x in val
+    ):
+        pts = [[float(t), float(v)] for t, v in val]
+        return {
+            'struttura': 'breakpoints',
+            'interp': 'linear',
+            'loop_dist': 'base',
+            'n_reps': 4,
+            'ratio': 1.5,
+            'exponent': 2.0,
+            'points': pts,
+        }
+
+    # ── Compact loop [[[%, v], ...], et, n, ...] ──────────────────────────
+    if (
+        isinstance(val[0], list) and len(val) >= 3
+        and isinstance(val[1], (int, float))
+        and isinstance(val[2], (int, float))
+    ):
+        pattern  = val[0]       # [[pct, v], ...]
+        end_time = float(val[1])
+        n_reps   = int(val[2])
+        loop_dist = 'base'
+        ratio     = 1.5
+        exponent  = 2.0
+
+        if len(val) >= 4:
+            fourth = val[3]
+            if isinstance(fourth, str) and fourth == 'cubic':
+                loop_dist = 'cubic'
+            elif isinstance(fourth, str):   # 'linear' (o altro interp)
+                if len(val) >= 5:
+                    timing = val[4]
+                    if isinstance(timing, str):
+                        loop_dist = 'accelerando' if timing == 'exponential' else 'ritardando'
+                    elif isinstance(timing, dict):
+                        t_type = timing.get('type')
+                        if t_type == 'geometric':
+                            loop_dist = 'geometrico'
+                            ratio = float(timing.get('ratio', 1.5))
+                        elif t_type == 'power':
+                            loop_dist = 'power'
+                            exponent = float(timing.get('exponent', 2.0))
+
+        # Converte percentuali → coordinate tempo
+        pts = [[end_time * float(pct) / 100.0, float(v)] for pct, v in pattern]
+        return {
+            'struttura': 'loop',
+            'interp': 'linear',
+            'loop_dist': loop_dist,
+            'n_reps': n_reps,
+            'ratio': ratio,
+            'exponent': exponent,
+            'end_time': end_time,
+            'points': pts,
+        }
+
+    # ── Misto / multi-loop ────────────────────────────────────────────────────
+    mixed_segs = _try_parse_mixed(val)
+    if mixed_segs is not None:
+        return {
+            'struttura': 'misto',
+            'segments':  mixed_segs,
+            'points':    [],
+            'interp':    'linear',
+            'loop_dist': 'base',
+            'n_reps':    4,
+            'ratio':     1.5,
+            'exponent':  2.0,
+        }
+
+    return None
+
+
+@server.command('pge.getEnvelopeAtCursor')
+def handle_get_envelope_at_cursor(ls: LanguageServer, args):
+    """
+    Parsa l'envelope sulla riga del cursore e ritorna struttura + punti + range da sostituire.
+
+    args: [uri, line, character]
+    Risposta:
+      {points, struttura, interp, loop_dist, n_reps, ratio, exponent,
+       y_min, y_max, end_time,
+       replace_range: {line, start_char, end_char}}
+    oppure null se il cursore non è su un envelope.
+    """
+    args      = list(args) if args else []
+    uri       = str(args[0])  if len(args) > 0 else ''
+    line      = int(args[1])  if len(args) > 1 else 0
+    character = int(args[2])  if len(args) > 2 else 0
+
+    try:
+        text = ls.workspace.get_text_document(uri).source
+    except Exception:
+        return None
+
+    lines = text.splitlines()
+    if line >= len(lines):
+        return None
+
+    line_text = lines[line]
+
+    # Trova il valore dopo ': '
+    colon_idx = line_text.find(': ')
+    if colon_idx < 0:
+        return None
+    value_str = line_text[colon_idx + 2:].strip()
+    if not value_str:
+        return None
+
+    envelope = _parse_envelope_value(value_str)
+    if envelope is None:
+        return None
+
+    # Bounds e end_time dal contesto LSP
+    ctx = _resolve_envelope_context(text, line, colon_idx + 2)
+
+    return {
+        'points':    envelope['points'],
+        'struttura': envelope['struttura'],
+        'segments':  envelope.get('segments', []),
+        'interp':    envelope.get('interp', 'linear'),
+        'loop_dist': envelope.get('loop_dist', 'base'),
+        'n_reps':    envelope.get('n_reps', 4),
+        'ratio':     envelope.get('ratio', 1.5),
+        'exponent':  envelope.get('exponent', 2.0),
+        'y_min':     ctx['y_min'],
+        'y_max':     ctx['y_max'],
+        'end_time':  envelope.get('end_time', ctx['end_time']),
+        'replace_range': {
+            'line':       line,
+            'start_char': colon_idx + 2,
+            'end_char':   len(line_text),
+        },
+    }
 
 
 # =============================================================================

@@ -96,6 +96,17 @@ class SchemaBridge:
             raw_data.get('distribution_modes') or _STATIC_DISTRIBUTION_MODES
         )
 
+        # Nomi delle finestrature del grano (grain.envelope).
+        # Letti da WindowRegistry in from_python_path; fallback statico.
+        _STATIC_GRAIN_ENVELOPE_NAMES = [
+            'hamming', 'hanning', 'bartlett', 'blackman', 'blackman_harris',
+            'gaussian', 'kaiser', 'rectangle', 'sinc', 'half_sine',
+            'expodec', 'expodec_strong', 'exporise', 'exporise_strong',
+            'rexpodec', 'rexporise',
+        ]
+        self._grain_envelope_names: List[str] = (
+            raw_data.get('grain_envelope_names') or _STATIC_GRAIN_ENVELOPE_NAMES
+        )
 
         # Conserviamo gli spec raw per get_dephase_keys()
         self._raw_specs = specs
@@ -161,6 +172,11 @@ class SchemaBridge:
                 variation_mode=b.get('variation_mode', 'additive') if b else 'additive',
                 is_internal=is_internal,
             )
+
+        # Conserviamo il dizionario bounds completo (include parametri come
+        # 'scatter' e 'num_voices' che hanno bounds in GRANULAR_PARAMETERS
+        # ma nessun ParameterSpec in ALL_SCHEMAS). Serve per get_raw_bounds().
+        self._raw_bounds: dict = bounds
 
         # solo e mute sono mutuamente esclusivi: uno stream non puo' essere
         # sia in ascolto esclusivo che silenziato simultaneamente.
@@ -298,6 +314,23 @@ class SchemaBridge:
         """Lista delle modalita' di distribuzione disponibili (es. uniform, gaussian)."""
         return list(self._distribution_modes)
 
+    def get_grain_envelope_names(self) -> List[str]:
+        """Lista dei nomi delle finestrature del grano (grain.envelope)."""
+        return list(self._grain_envelope_names)
+
+    def get_raw_bounds(self, param_name: str) -> Optional[dict]:
+        """
+        Restituisce i bounds raw per un parametro, anche se non ha un ParameterSpec.
+
+        Utile per parametri come 'scatter' e 'num_voices' che vivono in
+        GRANULAR_PARAMETERS ma vengono parsati fuori da ALL_SCHEMAS
+        (es. direttamente in _init_voice_manager di stream.py).
+
+        Returns:
+            Dict con min_val, max_val, variation_mode, ecc. oppure None.
+        """
+        return self._raw_bounds.get(param_name)
+
     def get_documentation(self, param: ParameterInfo) -> str:
         """
         Stringa di documentazione leggibile per il provider Hover.
@@ -339,9 +372,18 @@ class SchemaBridge:
         ParameterInfo contiene 'default: Any' che puo' essere None.
         json.dumps gestisce None come null, e' compatibile.
         """
+        # extra_bounds: parametri con bounds ma senza ParameterSpec (es. scatter,
+        # num_voices). Necessari per get_raw_bounds() in modalita' snapshot.
+        extra_bounds = {
+            name: b
+            for name, b in self._raw_bounds.items()
+            if name not in self._params
+        }
         data = {
             'parameters': [asdict(p) for p in self._params.values()],
             'distribution_modes': self._distribution_modes,
+            'grain_envelope_names': self._grain_envelope_names,
+            'extra_bounds': extra_bounds,
         }
         return json.dumps(data, indent=2)
 
@@ -512,6 +554,13 @@ class SchemaBridge:
             except Exception:
                 pass  # Usa il fallback statico nel costruttore
 
+            # Carica i nomi delle finestrature del grano da WindowRegistry
+            try:
+                from controllers.window_registry import WindowRegistry
+                raw_data['grain_envelope_names'] = list(WindowRegistry.WINDOWS.keys())
+            except Exception:
+                pass  # Usa il fallback statico nel costruttore
+
             return cls(raw_data)
 
         finally:
@@ -562,6 +611,12 @@ class SchemaBridge:
                     'default_jitter': 0.0,
                     'variation_mode': p['variation_mode'],
                 }
+
+        # Ripristina extra_bounds (parametri senza ParameterSpec come scatter,
+        # num_voices) in modo che get_raw_bounds() funzioni in modalita' snapshot.
+        for name, b in data.get('extra_bounds', {}).items():
+            if name not in bounds:
+                bounds[name] = b
 
         raw = {'specs': specs, 'bounds': bounds}
         if 'distribution_modes' in data:

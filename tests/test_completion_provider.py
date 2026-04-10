@@ -111,7 +111,7 @@ def bridge():
 def make_context(context_type='key', current_text='',
                  parent_path=None, indent_level=2,
                  in_stream_element=True, current_key='',
-                 leading_spaces=None):
+                 leading_spaces=None, cursor_line=0):
     return YamlContext(
         context_type=context_type,
         current_text=current_text,
@@ -120,6 +120,7 @@ def make_context(context_type='key', current_text='',
         in_stream_element=in_stream_element,
         current_key=current_key,
         leading_spaces=leading_spaces if leading_spaces is not None else indent_level * 2,
+        cursor_line=cursor_line,
     )
 
 
@@ -775,8 +776,15 @@ class TestEnvelopeCompletionsInValueContext:
         provider = CompletionProvider(b)
         ctx = self._make_value_ctx('density')
         result = provider.get_completions(ctx, document_text='')
+        # L'item 'N punti' usa textEdit con newText='' (nessuna inserzione);
+        # items command-only (text_edit vuoto): N punti e GUI editor
+        _COMMAND_LABELS = {'envelope N punti...', 'envelope editor grafico...'}
         for item in result:
-            assert item.insert_text_format == InsertTextFormat.Snippet
+            if item.label in _COMMAND_LABELS:
+                assert item.text_edit is not None
+                assert item.text_edit.new_text == ''
+            else:
+                assert item.insert_text_format == InsertTextFormat.Snippet
 
     def test_value_context_items_hanno_documentazione(self):
         b = make_bridge_with_stream_keys()
@@ -1038,3 +1046,131 @@ class TestDephaseEnvelopeFull:
         # Ogni chiave deve avere command per aprire menu envelope
         for item in items:
             assert item.command is not None
+
+
+# =============================================================================
+# TestVoiceStrategySnippet
+# =============================================================================
+
+class TestVoiceStrategySnippet:
+    """
+    Flusso in due passi per voices dimensions:
+    1. Completamento dimension key → inserisce 'dim: {strategy: ' + TRIGGER_SUGGEST
+    2. Completamento strategy inline → inserisce 'name, kwarg: ${1:0}}' chiudendo il dict
+    """
+
+    def test_dimension_inserisce_inline_dict_aperto(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(
+            context_type='key',
+            current_text='',
+            parent_path=['voices'],
+            indent_level=3,
+            leading_spaces=6,
+        )
+        items = provider.get_completions(ctx, '')
+        pitch_items = [it for it in items if it.label == 'pitch']
+        assert len(pitch_items) == 1  # un solo item per dimension
+        assert pitch_items[0].insert_text == 'pitch: {strategy: '
+        assert pitch_items[0].command is not None  # TRIGGER_SUGGEST
+
+    def test_dimension_senza_newline(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(
+            context_type='key',
+            current_text='',
+            parent_path=['voices'],
+            indent_level=3,
+        )
+        items = provider.get_completions(ctx, '')
+        dim_items = [it for it in items
+                     if it.label in ('pitch', 'pan', 'pointer', 'onset_offset')]
+        assert len(dim_items) > 0
+        for it in dim_items:
+            assert '\n' not in (it.insert_text or '')
+
+    def test_inline_strategy_completion_chiude_dict(self, bridge):
+        from lsprotocol.types import InsertTextFormat
+        provider = CompletionProvider(bridge)
+        # Simuliamo la riga 'pitch: {strategy: ' con cursore alla fine
+        document = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pitch: {strategy: \n"
+        )
+        ctx = make_context(
+            context_type='value',
+            current_text='',
+            current_key='pitch',
+            parent_path=['voices'],
+            indent_level=3,
+            leading_spaces=6,
+            cursor_line=7,
+        )
+        items = provider.get_completions(ctx, document)
+        assert len(items) > 0
+        # Ogni item deve chiudere il dict con '}'
+        for it in items:
+            assert (it.insert_text or '').endswith('}')
+        # Almeno uno deve avere tab stop
+        assert any('$' in (it.insert_text or '') for it in items)
+
+    def test_inline_strategy_step_contiene_kwarg(self, bridge):
+        from lsprotocol.types import InsertTextFormat
+        provider = CompletionProvider(bridge)
+        document = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pitch: {strategy: step\n"
+        )
+        ctx = make_context(
+            context_type='value',
+            current_text='step',
+            current_key='pitch',
+            parent_path=['voices'],
+            indent_level=3,
+            cursor_line=7,
+        )
+        items = provider.get_completions(ctx, document)
+        step_items = [it for it in items if it.label == 'step']
+        assert len(step_items) == 1
+        # insert_text deve contenere il kwarg 'step:' e chiudere con '}'
+        assert 'step:' in step_items[0].insert_text
+        assert step_items[0].insert_text.endswith('}')
+        assert step_items[0].insert_text_format == InsertTextFormat.Snippet
+
+    def test_inline_strategy_senza_kwargs_chiude_solo(self, bridge):
+        provider = CompletionProvider(bridge)
+        # stochastic per pan non ha kwargs (verifichiamo con una strategy fittizia)
+        # Usiamo _get_voice_strategy_inline_completions direttamente
+        items = provider._get_voice_strategy_inline_completions('pitch', '')
+        assert len(items) > 0
+        for it in items:
+            assert (it.insert_text or '').endswith('}')
+
+    def test_strategy_block_style_inserisce_solo_nome(self, bridge):
+        # Nel contesto block style (parent_path=['voices','pitch']), solo il nome
+        provider = CompletionProvider(bridge)
+        ctx = make_context(
+            context_type='value',
+            current_text='',
+            current_key='strategy',
+            parent_path=['voices', 'pitch'],
+            indent_level=4,
+            leading_spaces=8,
+        )
+        items = provider.get_completions(ctx, '')
+        assert len(items) > 0
+        for it in items:
+            assert '\n' not in (it.insert_text or '')
+            assert not (it.insert_text or '').endswith('}')

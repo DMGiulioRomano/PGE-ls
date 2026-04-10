@@ -2,7 +2,7 @@
   "name": "pge-ls",
   "displayName": "PGE Language Server",
   "description": "Autocompletion, hover e diagnostica per file PGE_*.yaml del Python Granular Engine.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "hksolid",
   "engines": {
     "vscode": "^1.75.0"
@@ -25,6 +25,16 @@
   ],
   "main": "./extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "pge-ls.insertEnvelope",
+        "title": "PGE: Inserisci envelope con N punti"
+      },
+      {
+        "command": "pge-ls.openEnvelopeEditor",
+        "title": "PGE: Apri editor envelope grafico"
+      }
+    ],
     "configuration": {
       "title": "PGE Language Server",
       "properties": {
@@ -42,6 +52,11 @@
           "type": "string",
           "default": "",
           "description": "Percorso a un file snapshot JSON alternativo. Usato se granularSrcPath e' vuoto."
+        },
+        "pgeLs.guiPythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Percorso Python con tkinter per la GUI envelope (es. /opt/homebrew/bin/python3). Se vuoto, usa pgeLs.pythonPath."
         }
       }
     }
