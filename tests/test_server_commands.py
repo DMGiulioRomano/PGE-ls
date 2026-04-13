@@ -261,3 +261,223 @@ class TestHandleGetEnvelopeContext:
 
     def test_registrato_in_fm_commands(self):
         assert 'pge.getEnvelopeContext' in srv.server.lsp.fm.commands
+
+
+# =============================================================================
+# _parse_envelope_value — time_unit (Step 1)
+# =============================================================================
+
+class TestParseEnvelopeValueTimeUnit:
+
+    def test_dict_con_time_unit_normalized_estratto(self):
+        """time_unit: normalized nel dict viene estratto nel risultato."""
+        result = srv._parse_envelope_value(
+            '{type: linear, points: [[0, 0], [1, 1]], time_unit: normalized}'
+        )
+        assert result is not None
+        assert result.get('time_unit') == 'normalized'
+
+    def test_dict_senza_time_unit_non_ha_chiave(self):
+        """Dict senza time_unit: la chiave non deve essere nel risultato."""
+        result = srv._parse_envelope_value('{type: cubic, points: [[0, 0], [10, 1]]}')
+        assert result is not None
+        assert 'time_unit' not in result
+
+    def test_lista_piatta_non_ha_time_unit(self):
+        """Lista piatta non può avere time_unit."""
+        result = srv._parse_envelope_value('[[0, 0], [10, 1]]')
+        assert result is not None
+        assert 'time_unit' not in result
+
+    def test_compact_loop_non_ha_time_unit(self):
+        """Compact loop non può avere time_unit."""
+        result = srv._parse_envelope_value('[[[0, 0.5], [1, 1.0]], 10.0, 3]')
+        assert result is not None
+        assert 'time_unit' not in result
+
+
+# =============================================================================
+# _resolve_envelope_context — param_time_unit (Step 2)
+# =============================================================================
+
+class TestResolveEnvelopeContextTimeUnit:
+
+    def test_param_time_unit_normalized_sovrascrive_stream_absolute(self):
+        """time_unit: normalized nel dict ha precedenza su stream absolute."""
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    duration: 42.0\n'
+            '    density: '
+        )
+        line = yaml_text.count('\n')
+        result = srv._resolve_envelope_context(
+            yaml_text, line, 14,
+            param_time_unit='normalized'
+        )
+        assert result['end_time'] == 1.0
+
+    def test_param_time_unit_normalized_con_stream_normalized(self):
+        """Entrambi normalized: end_time == 1.0."""
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    time_mode: normalized\n'
+            '    density: '
+        )
+        line = yaml_text.count('\n')
+        result = srv._resolve_envelope_context(
+            yaml_text, line, 14,
+            param_time_unit='normalized'
+        )
+        assert result['end_time'] == 1.0
+
+    def test_param_time_unit_none_fallback_a_stream_normalized(self):
+        """Senza param_time_unit, time_mode: normalized dello stream governa."""
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    time_mode: normalized\n'
+            '    density: '
+        )
+        line = yaml_text.count('\n')
+        result = srv._resolve_envelope_context(
+            yaml_text, line, 14,
+            param_time_unit=None
+        )
+        assert result['end_time'] == 1.0
+
+    def test_param_time_unit_none_fallback_a_duration(self):
+        """Senza param_time_unit e time_mode absolute, usa duration."""
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    duration: 42.0\n'
+            '    density: '
+        )
+        line = yaml_text.count('\n')
+        result = srv._resolve_envelope_context(
+            yaml_text, line, 14
+        )
+        assert result['end_time'] == 42.0
+
+
+# =============================================================================
+# handle_get_envelope_at_cursor — propagazione time_unit (Step 3)
+# =============================================================================
+
+class TestHandleGetEnvelopeAtCursorTimeUnit:
+
+    def test_dict_time_unit_normalized_sovrascrive_duration_stream(self):
+        """
+        Parametro con {type: linear, points: [...], time_unit: normalized}
+        in uno stream con duration: 42.0 → end_time deve essere 1.0, non 42.0.
+        """
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    duration: 42.0\n'
+            '    density: {type: linear, points: [[0, 0.5], [1, 1.0]], time_unit: normalized}'
+        )
+        ls = _make_ls(document_text=yaml_text)
+        line = yaml_text.count('\n')
+        result = srv.handle_get_envelope_at_cursor(ls, ['file:///fake.yml', line, 20])
+        assert result is not None
+        assert result['end_time'] == 1.0
+
+    def test_dict_senza_time_unit_usa_duration_stream(self):
+        """Dict senza time_unit: usa duration dello stream (comportamento invariato)."""
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    duration: 42.0\n'
+            '    density: {type: linear, points: [[0, 0.5], [42.0, 1.0]]}'
+        )
+        ls = _make_ls(document_text=yaml_text)
+        line = yaml_text.count('\n')
+        result = srv.handle_get_envelope_at_cursor(ls, ['file:///fake.yml', line, 20])
+        assert result is not None
+        assert result['end_time'] == 42.0
+
+
+# =============================================================================
+# handle_get_envelope_at_cursor — formato block YAML
+# =============================================================================
+
+class TestHandleGetEnvelopeAtCursorBlockYaml:
+
+    def test_block_yaml_con_time_unit_normalized(self):
+        """
+        Envelope scritto come block YAML con time_unit: normalized.
+        Il cursore è sulla riga chiave; il valore è su righe successive.
+        """
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    duration: 42.0\n'
+            '    speed_ratio:\n'
+            '      time_unit: normalized\n'
+            '      points:\n'
+            '        - [0.0, 0.04]\n'
+            '        - [0.5, 0.006]\n'
+        )
+        ls = _make_ls(document_text=yaml_text)
+        # cursore sulla riga 'speed_ratio:'
+        line = 3
+        result = srv.handle_get_envelope_at_cursor(ls, ['file:///fake.yml', line, 6])
+        assert result is not None
+        assert result['end_time'] == 1.0
+        assert len(result['points']) == 2
+        assert result['struttura'] == 'breakpoints'
+
+    def test_block_yaml_senza_time_unit_usa_duration(self):
+        """Block YAML senza time_unit: usa duration dello stream."""
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    duration: 42.0\n'
+            '    density:\n'
+            '      points:\n'
+            '        - [0.0, 0.5]\n'
+            '        - [42.0, 1.0]\n'
+        )
+        ls = _make_ls(document_text=yaml_text)
+        line = 3
+        result = srv.handle_get_envelope_at_cursor(ls, ['file:///fake.yml', line, 6])
+        assert result is not None
+        assert result['end_time'] == 42.0
+
+    def test_block_yaml_replace_range_multi_riga(self):
+        """Per block YAML, replace_range deve avere end_line != line."""
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    duration: 42.0\n'
+            '    speed_ratio:\n'
+            '      time_unit: normalized\n'
+            '      points:\n'
+            '        - [0.0, 0.04]\n'
+            '        - [0.5, 0.006]\n'
+        )
+        ls = _make_ls(document_text=yaml_text)
+        line = 3
+        result = srv.handle_get_envelope_at_cursor(ls, ['file:///fake.yml', line, 6])
+        assert result is not None
+        rr = result['replace_range']
+        assert rr['line'] == line
+        assert 'end_line' in rr
+        assert rr['end_line'] > line
+
+    def test_inline_replace_range_senza_end_line(self):
+        """Per envelope inline, replace_range NON deve avere end_line."""
+        yaml_text = (
+            'streams:\n'
+            '  - stream_id: s1\n'
+            '    duration: 42.0\n'
+            '    density: {type: linear, points: [[0, 0.5], [42.0, 1.0]]}'
+        )
+        ls = _make_ls(document_text=yaml_text)
+        line = yaml_text.count('\n')
+        result = srv.handle_get_envelope_at_cursor(ls, ['file:///fake.yml', line, 20])
+        assert result is not None
+        assert 'end_line' not in result['replace_range']

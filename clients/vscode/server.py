@@ -802,10 +802,20 @@ def handle_did_save(params: DidSaveTextDocumentParams) -> None:
     _publish_diagnostics(params.text_document.uri)
 
 
-def _resolve_envelope_context(text: str, line: int, character: int) -> dict:
+def _resolve_envelope_context(
+    text: str,
+    line: int,
+    character: int,
+    param_time_unit: str = None,
+) -> dict:
     """
     Risolve bounds (y_min, y_max) e end_time per il parametro alla posizione cursore.
     Ritorna {'y_min': float, 'y_max': float, 'end_time': float}.
+
+    Precedenza per end_time:
+      1. param_time_unit (dal dict del parametro envelope, se presente)
+      2. time_mode dello stream padre
+      3. duration dello stream padre (default 10.0)
     """
     context = YamlAnalyzer.get_context(text, line, character)
 
@@ -824,7 +834,9 @@ def _resolve_envelope_context(text: str, line: int, character: int) -> dict:
                 y_min, y_max = raw['min_val'], raw['max_val']
 
     stream_ctx = YamlAnalyzer.get_stream_context_at_line(text, line)
-    if stream_ctx.get('time_mode') == 'normalized':
+    if param_time_unit == 'normalized':
+        end_time = 1.0
+    elif stream_ctx.get('time_mode') == 'normalized':
         end_time = 1.0
     else:
         end_time = float(stream_ctx.get('duration') or 10.0)
@@ -1015,11 +1027,11 @@ def _parse_envelope_value(value_str: str) -> dict:
     if val is None:
         return None
 
-    # ── Dict: {type: ..., points: [...]} ─────────────────────────────────
-    if isinstance(val, dict) and 'type' in val and 'points' in val:
-        interp = str(val['type'])   # 'cubic' | 'step'
+    # ── Dict: {type: ..., points: [...]} o {points: [...], time_unit: ...} ──
+    if isinstance(val, dict) and 'points' in val:
+        interp = str(val.get('type', 'linear'))   # 'linear' | 'cubic' | 'step'
         pts = [[float(t), float(v)] for t, v in val['points']]
-        return {
+        result = {
             'struttura': 'breakpoints',
             'interp': interp,
             'loop_dist': 'base',
@@ -1028,6 +1040,10 @@ def _parse_envelope_value(value_str: str) -> dict:
             'exponent': 2.0,
             'points': pts,
         }
+        time_unit = val.get('time_unit')
+        if time_unit is not None:
+            result['time_unit'] = str(time_unit)
+        return result
 
     if not isinstance(val, list) or len(val) == 0:
         return None
@@ -1138,20 +1154,51 @@ def handle_get_envelope_at_cursor(ls: LanguageServer, args):
 
     line_text = lines[line]
 
-    # Trova il valore dopo ': '
+    # Trova il valore dopo ': ' oppure 'key:' senza valore inline (block YAML)
     colon_idx = line_text.find(': ')
     if colon_idx < 0:
-        return None
-    value_str = line_text[colon_idx + 2:].strip()
+        # Block YAML: riga che termina con ':' senza valore inline
+        stripped = line_text.rstrip()
+        if not stripped.endswith(':'):
+            return None
+        colon_idx = len(stripped) - 1
+
+    value_str = line_text[colon_idx + 2:].strip() if colon_idx + 2 < len(line_text) else ''
+
+    # Formato block YAML: il valore è su righe successive più indentate
+    last_block_line = line
     if not value_str:
-        return None
+        key_indent = len(line_text) - len(line_text.lstrip())
+        block_parts = []
+        for i in range(line + 1, len(lines)):
+            l = lines[i]
+            if l.strip() == '':
+                continue
+            if (len(l) - len(l.lstrip())) > key_indent:
+                block_parts.append(l)
+                last_block_line = i
+            else:
+                break
+        if not block_parts:
+            return None
+        import textwrap
+        value_str = textwrap.dedent('\n'.join(block_parts))
 
     envelope = _parse_envelope_value(value_str)
     if envelope is None:
         return None
 
     # Bounds e end_time dal contesto LSP
-    ctx = _resolve_envelope_context(text, line, colon_idx + 2)
+    param_time_unit = envelope.get('time_unit')
+    ctx = _resolve_envelope_context(text, line, colon_idx + 2, param_time_unit=param_time_unit)
+
+    replace_range = {
+        'line':       line,
+        'start_char': colon_idx + 2,
+        'end_char':   len(lines[last_block_line]),
+    }
+    if last_block_line != line:
+        replace_range['end_line'] = last_block_line
 
     return {
         'points':    envelope['points'],
@@ -1165,11 +1212,7 @@ def handle_get_envelope_at_cursor(ls: LanguageServer, args):
         'y_min':     ctx['y_min'],
         'y_max':     ctx['y_max'],
         'end_time':  envelope.get('end_time', ctx['end_time']),
-        'replace_range': {
-            'line':       line,
-            'start_char': colon_idx + 2,
-            'end_char':   len(line_text),
-        },
+        'replace_range': replace_range,
     }
 
 

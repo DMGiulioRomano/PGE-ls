@@ -377,11 +377,12 @@ async function activate(context) {
 
         if (!result) return;   // annullato dall'utente
 
-        // Sostituisce il valore originale sulla stessa riga
+        // Sostituisce il valore originale (inline o block multi-riga)
         const r = envelopeData.replace_range;
+        const endLine = r.end_line !== undefined ? r.end_line : r.line;
         const replaceRange = new vscode.Range(
             new vscode.Position(r.line, r.start_char),
-            new vscode.Position(r.line, r.end_char),
+            new vscode.Position(endLine, r.end_char),
         );
         const edit = new vscode.WorkspaceEdit();
         edit.replace(document.uri, replaceRange, result);
