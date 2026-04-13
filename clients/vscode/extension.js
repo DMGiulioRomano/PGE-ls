@@ -379,13 +379,17 @@ async function activate(context) {
 
         // Sostituisce il valore originale (inline o block multi-riga)
         const r = envelopeData.replace_range;
+        const isBlock = r.end_line !== undefined && r.end_line !== r.line;
         const endLine = r.end_line !== undefined ? r.end_line : r.line;
         const replaceRange = new vscode.Range(
             new vscode.Position(r.line, r.start_char),
             new vscode.Position(endLine, r.end_char),
         );
         const edit = new vscode.WorkspaceEdit();
-        edit.replace(document.uri, replaceRange, result);
+        // Per block YAML start_char supera la fine della riga chiave (es. "key:" senza spazio
+        // inline): VSCode clamp all'EOL, quindi il valore si incollerebbe senza spazio.
+        // Prepend ' ' come fa il path di nuovo inserimento.
+        edit.replace(document.uri, replaceRange, isBlock ? ' ' + result : result);
         await vscode.workspace.applyEdit(edit);
     }
 

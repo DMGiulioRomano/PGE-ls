@@ -352,6 +352,13 @@ class EnvelopeEditor:
                 'end_time': end_time,
             }]
 
+        # Breakpoint finale implicito: solo sull'ultimo segmento BP.
+        # Se l'ultimo punto ha X < end_time, ne aggiungiamo uno a end_time
+        # con la stessa Y, così l'utente vede l'estensione implicita del valore.
+        # NON va applicato ai segmenti intermedi: il loro confine destro è
+        # determinato dal segmento successivo, non dalla durata totale.
+        self._inject_implicit_final_point()
+
         self._active_seg = 0
 
         # Carica stato iniziale dal primo segmento
@@ -751,6 +758,34 @@ class EnvelopeEditor:
 
     # -------------------------------------------------------------------------
     # Breakpoints end_time helper
+    # -------------------------------------------------------------------------
+    # Breakpoint finale implicito
+    # -------------------------------------------------------------------------
+
+    def _inject_implicit_final_point(self):
+        """Aggiunge un breakpoint implicito alla fine dello stream sull'ultimo segmento.
+
+        Regola: se il segmento più a destra è di tipo 'breakpoints' e il suo
+        ultimo punto ha X < self.end_time, inseriamo automaticamente un punto
+        in (self.end_time, last_y).  Il punto diventa reale e modificabile.
+
+        Si applica SOLO all'ultimo segmento perché:
+        - i segmenti intermedi hanno il confine destro definito dal segmento
+          successivo, non dalla durata globale;
+        - applicarlo agli intermedi aggiungerebbe breakpoint nei posti sbagliati.
+        """
+        last_seg = self._segments[-1]
+        if last_seg.get('type') != 'breakpoints':
+            return
+        pts = last_seg.get('points', [])
+        if not pts:
+            return
+        last_t, last_v = max(pts, key=lambda p: p[0])
+        ref = self.end_time
+        if last_t < ref - 1e-9:
+            last_seg['points'] = sort_points(pts + [(ref, last_v)])
+            last_seg['end_time'] = ref
+
     # -------------------------------------------------------------------------
 
     def _update_bp_end_time(self):
