@@ -315,6 +315,7 @@ async function activate(context) {
                     `--ymin=${ctx.y_min}`,
                     `--ymax=${ctx.y_max}`,
                     `--end_time=${ctx.end_time}`,
+                    ...(ctx.param_name ? [`--param=${ctx.param_name}`] : []),
                 ]);
             } catch (err) {
                 const msg = err.message || String(err);
@@ -355,6 +356,7 @@ async function activate(context) {
             `--ymax=${envelopeData.y_max}`,
             `--end_time=${envelopeData.end_time}`,
             `--struttura=${envelopeData.struttura}`,
+            ...(envelopeData.param_name ? [`--param=${envelopeData.param_name}`] : []),
         ];
         if (envelopeData.struttura === 'misto') {
             args.push(`--segments=${JSON.stringify(envelopeData.segments)}`);

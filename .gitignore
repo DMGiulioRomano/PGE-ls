@@ -34,3 +34,5 @@ clients/vscode/granular_ls/granular_ls/
 *~
 # Snapshot generati (opzionale: commentalo se vuoi versionarli)
 schema_snapshot.json
+# Claude Code — impostazioni locali utente (path assoluti, permessi macchina)
+.claude/settings.local.json

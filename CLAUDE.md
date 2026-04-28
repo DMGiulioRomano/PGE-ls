@@ -65,6 +65,13 @@ Three stateless providers (each request receives full document text):
 
 `clients/vscode/` contains a **bundled copy** of `server.py` and `granular_ls/`. `build.sh` handles the sync. Do not edit files under `clients/vscode/granular_ls/` or `clients/vscode/server.py` directly.
 
+## Documentation
+
+Internal design docs live under `docs/`. When you add a new file there, add a corresponding entry in this table.
+
+
+- [envelope_gui_total_preview.md](docs/envelope_gui_total_preview.md) = Come viene gestito il tempo nell'anteprima totale dell'EnvelopeEditor (asse X assoluto, boundary drag, decorazioni).
+
 ## Git Workflow
 
 **No direct commits to `main`.** Every change must go through a branch and pull request:

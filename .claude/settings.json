@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; echo \"$f\" | grep -q '/docs/' && echo \"{\\\"systemMessage\\\": \\\"Reminder: '$(basename \\\"$f\\\")' aggiunto a docs/ — aggiungi una riga nella tabella Documentation in CLAUDE.md\\\"}\" ; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

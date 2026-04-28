@@ -841,7 +841,12 @@ def _resolve_envelope_context(
     else:
         end_time = float(stream_ctx.get('duration') or 10.0)
 
-    return {'y_min': float(y_min), 'y_max': float(y_max), 'end_time': end_time}
+    return {
+        'y_min': float(y_min),
+        'y_max': float(y_max),
+        'end_time': end_time,
+        'param_name': context.current_key or '',
+    }
 
 
 @server.command('pge.buildEnvelope')
@@ -1209,9 +1214,10 @@ def handle_get_envelope_at_cursor(ls: LanguageServer, args):
         'n_reps':    envelope.get('n_reps', 4),
         'ratio':     envelope.get('ratio', 1.5),
         'exponent':  envelope.get('exponent', 2.0),
-        'y_min':     ctx['y_min'],
-        'y_max':     ctx['y_max'],
-        'end_time':  envelope.get('end_time', ctx['end_time']),
+        'y_min':       ctx['y_min'],
+        'y_max':       ctx['y_max'],
+        'end_time':    envelope.get('end_time', ctx['end_time']),
+        'param_name':  ctx['param_name'],
         'replace_range': replace_range,
     }
 

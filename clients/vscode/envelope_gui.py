@@ -309,11 +309,14 @@ class EnvelopeEditor:
         ratio: float = 1.5,
         exponent: float = 2.0,
         segments: list = None,
+        param_name: str = '',
     ):
-        self.y_min    = y_min
-        self.y_max    = y_max
-        self.end_time = end_time
-        self._result  = ''
+        self.y_min           = y_min
+        self.y_max           = y_max
+        self.end_time        = end_time
+        self._stream_end_time = end_time   # invariant: mai sovrascritto da _load_segment
+        self._result         = ''
+        self._param_name     = param_name
         self._sel     = -1
 
         # Rubber-band Y-zoom state (Z+drag)
@@ -385,11 +388,27 @@ class EnvelopeEditor:
         self._boundary_lines     = []     # Line2D handle confini
         self._seg_band_patches   = []     # axvspan bande colorate segmenti
         self._seg_labels         = []     # Text etichette S1, S2, ...
+        self._hovered_seg        = -1    # indice banda segmento in hover (-1=nessuno)
+        self._hovered_boundary   = -1    # indice linea confine in hover (-1=nessuno)
+
+        # ── Split preview (anteprima divisione segmento per aggiunta nuova tab) ──
+        self._split_preview_mode         = False
+        self._split_preview_type         = None   # 'breakpoints' | 'loop'
+        self._split_preview_x            = 0.0   # posizione della linea di divisione
+        self._split_preview_seg_start    = 0.0
+        self._split_preview_seg_end      = 1.0
+        self._split_preview_line         = None   # Line2D handle
+        self._split_ghost_patch          = None   # axvspan ghost nuovo segmento
+        self._split_preview_dragging     = False
+        self._split_preview_proportional = False  # Shift+drag: scala tutti i seg precedenti
 
         # ── Pending add-segment (con vincolo durata) ──────────────────────
         self._pending_add_type    = None
         self._pending_add_t_start = 0.0
         self._pending_add_t_end   = 1.0
+
+        # ── Limite sinistro asse X del segmento BP corrente ───────────────
+        self._seg_xmin = 0.0   # t_start del segmento attivo (0 per segmento unico)
 
         self.points: List[Point] = sort_points(seg0['points'])
 
@@ -428,11 +447,20 @@ class EnvelopeEditor:
         fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
         self.fig = fig
 
+        # Previene "Another Axes already grabs mouse input" liberando il grab
+        # prima che qualunque widget lo richieda (registrato per primo = eseguito per primo).
+        def _release_mouse_grab(event):
+            if getattr(fig.canvas, '_mouse_grabber', None) is not None:
+                fig.canvas.release_mouse(fig.canvas._mouse_grabber)
+        fig.canvas.mpl_connect('button_press_event', _release_mouse_grab)
+
         # ── Axes principale ───────────────────────────────────────────────
         # Lascia il 40% inferiore per i controlli + 2% per i bottoni
         # Lascia spazio per due righe di tab sopra (row1=0.965, row2=0.925)
         ax = fig.add_axes([0.05, 0.44, 0.93, 0.47])
         ax.set_facecolor(_BG2)
+        ax.margins(x=0)
+        ax.set_autoscalex_on(False)
         ax.set_xlim(0.0, self.end_time)
         yr = self.y_max - self.y_min
         pad = yr * 0.05 or 0.05
@@ -445,7 +473,7 @@ class EnvelopeEditor:
         ax.grid(True, color=_GRID, linestyle='--', linewidth=0.5, alpha=0.7)
         ax.set_title(
             'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   '
-            'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Z+drag: zoom area   F: fit   Dbl: reset',
+            'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom X   Shift+Scroll: zoom Y   Z+drag: zoom area   F: fit   Dbl: reset',
             color=_FG2, fontsize=8, pad=4,
         )
         self.ax = ax
@@ -506,7 +534,7 @@ class EnvelopeEditor:
         )
         for lbl in self.radio_loop.labels:
             lbl.set_color(_FG)
-            lbl.set_fontsize(9)
+            lbl.set_fontsize(11)
         self.radio_loop.on_clicked(self._on_loop_dist_change)
         self._ax_loop.set_visible(False)   # nascosto finché struttura = 'loop'
 
@@ -621,12 +649,18 @@ class EnvelopeEditor:
         self._btn_overlay_2   = btn_ov2
         self._overlay_mode    = None      # None | 'add' | 'delete'
         self._del_pending_seg = None
+        # Posizioni default overlay (per ripristino dopo split_confirm)
+        self._overlay_default_pos1 = (x_add,        _CHIP_Y, 0.065, _CHIP_H)
+        self._overlay_default_pos2 = (x_add + 0.07, _CHIP_Y, 0.07,  _CHIP_H)
+        self._chip_x_add = x_add
+        self._chip_y     = _CHIP_Y
+        self._chip_h     = _CHIP_H
 
         # ── Col 5: Preview ────────────────────────────────────────────────
         fig.text(0.47, 0.42, 'Preview:', color=_FG2, fontsize=9, va='top')
         self.preview_txt = fig.text(
             0.47, 0.38, '',
-            color=_LINE, fontsize=8, fontfamily='monospace', va='top',
+            color=_LINE, fontsize=11, fontfamily='monospace', va='top',
         )
 
         # ── Bottoni ───────────────────────────────────────────────────────
@@ -643,11 +677,7 @@ class EnvelopeEditor:
         self.btn_ok.label.set_fontweight('bold')
         self.btn_ok.on_clicked(self._on_ok)
 
-        # ── Titolo finestra ───────────────────────────────────────────────
-        try:
-            fig.canvas.manager.set_window_title('PGE — Envelope Editor')
-        except Exception:
-            pass
+        self._window_title = f'PGE — Envelope Editor — {self._param_name}' if self._param_name else 'PGE — Envelope Editor'
 
         # ── Connetti eventi mouse ──────────────────────────────────────────
         # Le schede usano button_press_event diretto (non Button.on_clicked)
@@ -658,6 +688,7 @@ class EnvelopeEditor:
         fig.canvas.mpl_connect('scroll_event',         self._on_scroll)
         fig.canvas.mpl_connect('key_press_event',      self._on_key_press)
         fig.canvas.mpl_connect('key_release_event',    self._on_key_release)
+        fig.canvas.mpl_connect('axes_leave_event',     self._on_axes_leave)
 
     # -------------------------------------------------------------------------
     # Sincronizzazione stato iniziale → widget
@@ -793,11 +824,14 @@ class EnvelopeEditor:
         if not self.points:
             return
         max_t = max(t for t, v in self.points)
-        pad   = max_t * 0.08 or 0.5   # 8% di padding a destra
         self.end_time = max_t
         if self._active_seg < len(self._segments):
             self._segments[self._active_seg]['end_time'] = max_t
-        self.ax.set_xlim(0.0, max_t + pad)
+        # Espandi xlim solo se il punto va oltre la vista corrente; non restringere mai
+        _, cur_xmax = self.ax.get_xlim()
+        if max_t > cur_xmax:
+            span = max_t - self._seg_xmin
+            self.ax.set_xlim(self._seg_xmin, max_t if max_t > self._seg_xmin else self._seg_xmin + 0.5)
 
     # -------------------------------------------------------------------------
     # Zoom / pan helpers
@@ -805,7 +839,7 @@ class EnvelopeEditor:
 
     def _reset_view(self):
         """Ripristina X e Y al range originale completo."""
-        self.ax.set_xlim(0.0, self.end_time)
+        self.ax.set_xlim(self._seg_xmin, self.end_time)
         yr  = self.y_max - self.y_min
         pad = yr * 0.05 or 0.05
         self.ax.set_ylim(self.y_min - pad, self.y_max + pad)
@@ -813,6 +847,17 @@ class EnvelopeEditor:
 
     def _fit_to_content(self):
         """Zoom automatico sui punti visibili (F key).  Aggiunge 10% di padding."""
+        if self._total_preview:
+            all_ts, all_vs = self._get_total_preview_data()
+            if not all_ts:
+                return
+            t_min, t_max = min(all_ts), max(all_ts)
+            v_min, v_max = min(all_vs), max(all_vs)
+            v_pad = (v_max - v_min) * 0.10 or (self.y_max - self.y_min) * 0.05 or 0.05
+            self.ax.set_xlim(0.0, max(t_max, self._total_end_time(), self._stream_end_time))
+            self.ax.set_ylim(v_min - v_pad, v_max + v_pad)
+            self.fig.canvas.draw_idle()
+            return
         pts = self.points
         if not pts:
             return
@@ -821,14 +866,14 @@ class EnvelopeEditor:
         t_min, t_max = min(ts), max(ts)
         v_min, v_max = min(vs), max(vs)
         v_pad = (v_max - v_min) * 0.10 or (self.y_max - self.y_min) * 0.05 or 0.05
-        # X: clamp a [0, end_time] — niente spazio fuori dai bounds temporali
-        self.ax.set_xlim(0.0, self.end_time)
+        # X: clamp a [seg_xmin, end_time] — niente spazio fuori dai bounds temporali
+        self.ax.set_xlim(self._seg_xmin, self.end_time)
         self.ax.set_ylim(v_min - v_pad, v_max + v_pad)
         self.fig.canvas.draw_idle()
 
     _HINT_NORMAL = (
         'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   '
-        'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Z+drag: zoom area   F: fit   Dbl: reset'
+        'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom X   Shift+Scroll: zoom Y   Z+drag: zoom area   F: fit   Dbl: reset'
     )
     _HINT_ZOOM = '[ZOOM Y]  Trascina verticalmente per selezionare l\'area → rilascia per zoomare   Esc: esci'
 
@@ -896,7 +941,8 @@ class EnvelopeEditor:
 
     def _snapshot(self) -> dict:
         """Ritorna una copia profonda dello stato undoable corrente."""
-        self._save_current_segment()
+        if not self._total_preview:
+            self._save_current_segment()
         return {
             'segments':   copy.deepcopy(self._segments),
             'active_seg': self._active_seg,
@@ -999,7 +1045,9 @@ class EnvelopeEditor:
             if bb2.x0 <= event.x <= bb2.x1 and bb2.y0 <= event.y <= bb2.y1:
                 self._on_overlay_click(2)
                 return
-            return   # click fuori dall'overlay: ignora senza propagare
+            # split_confirm: click nel plot → propaga a _on_press (drag linea bianca)
+            if self._overlay_mode != 'split_confirm':
+                return
 
         # ── Accordion: header Struttura ───────────────────────────────────
         for ax_h, label in ((self._ax_str_bp, 'breakpoints'), (self._ax_str_lp, 'loop')):
@@ -1054,23 +1102,23 @@ class EnvelopeEditor:
         # factor < 1 = zoom in (range si restringe), > 1 = zoom out
         base   = 0.88
         factor = base ** event.step   # event.step > 0: scroll su = zoom in
-        key  = (event.key or '').lower()
-        ctrl = 'ctrl' in key or 'control' in key or 'cmd' in key
-        if ctrl:
-            # Zoom X centrato sul cursore, clampato a [0, end_time]
+        key   = (event.key or '').lower()
+        shift = 'shift' in key
+        if shift:
+            # Shift+Scroll: zoom Y centrato sul cursore, clamped ai bounds del parametro
+            ymin, ymax = self.ax.get_ylim()
+            yc = event.ydata if event.ydata is not None else (ymin + ymax) / 2
+            new_lo = max(self.y_min, yc - (yc - ymin) * factor)
+            new_hi = min(self.y_max, yc + (ymax - yc) * factor)
+            self.ax.set_ylim(new_lo, new_hi)
+        else:
+            # Scroll: zoom X centrato sul cursore, clampato a [0, end_time]
             xmin, xmax = self.ax.get_xlim()
             xc = event.xdata if event.xdata is not None else (xmin + xmax) / 2
             new_xmin = max(0.0,           xc - (xc - xmin) * factor)
             new_xmax = min(self.end_time, xc + (xmax - xc) * factor)
             if new_xmax - new_xmin >= 0.1:
                 self.ax.set_xlim(new_xmin, new_xmax)
-        else:
-            # Zoom Y centrato sul cursore, clamped ai bounds del parametro
-            ymin, ymax = self.ax.get_ylim()
-            yc = event.ydata if event.ydata is not None else (ymin + ymax) / 2
-            new_lo = max(self.y_min, yc - (yc - ymin) * factor)
-            new_hi = min(self.y_max, yc + (ymax - yc) * factor)
-            self.ax.set_ylim(new_lo, new_hi)
         self.fig.canvas.draw_idle()
 
     def _on_press(self, event):
@@ -1082,17 +1130,24 @@ class EnvelopeEditor:
             self._zoom_y0 = event.ydata
             return   # non aggiungere/selezionare punti
 
-        # In total preview: gestisci drag confini + zoom/reset
+        # In total preview: gestisci drag confini + zoom/reset (e linea split se attiva)
         if self._total_preview:
             if getattr(event, 'dblclick', False) and event.button == 1:
                 self._reset_view()
                 return
             if event.button == 1:
-                idx = self._find_nearest_boundary(event)
-                if idx >= 0:
-                    if not self._undoing:
-                        self._push_undo()
-                    self._boundary_drag_idx = idx
+                if self._split_preview_mode:
+                    # Solo la linea bianca è draggabile durante split preview
+                    px, _ = self.ax.transData.transform((self._split_preview_x, 0))
+                    if abs(px - event.x) <= _HIT_RADIUS_PX:
+                        self._split_preview_dragging = True
+                        self._split_preview_proportional = 'shift' in (event.key or '').lower()
+                else:
+                    idx = self._find_nearest_boundary(event)
+                    if idx >= 0:
+                        if not self._undoing:
+                            self._push_undo()
+                        self._boundary_drag_idx = idx
             return
 
         # In loop preview: solo zoom/reset
@@ -1164,6 +1219,19 @@ class EnvelopeEditor:
             self.fig.canvas.draw_idle()
             return
 
+        # ── Split preview drag ────────────────────────────────────────────
+        if self._split_preview_dragging:
+            if event.inaxes is self.ax and event.xdata is not None:
+                eps   = 0.01
+                x_lo  = eps if self._split_preview_proportional else self._split_preview_seg_start + eps
+                new_x = max(x_lo, min(self._split_preview_seg_end - eps, event.xdata))
+                self._split_preview_x = new_x
+                self._redraw()
+                self._draw_total_preview_decorations()
+                self._draw_split_preview_line()
+                self.fig.canvas.draw_idle()
+            return
+
         # ── Boundary drag (timeline interattiva total preview) ────────────
         if self._boundary_drag_idx is not None:
             if event.inaxes is self.ax and event.xdata is not None:
@@ -1173,8 +1241,10 @@ class EnvelopeEditor:
                 self.fig.canvas.draw_idle()
             return
 
+        # ── Hover highlights in total preview ────────────────────────────
+        self._update_hover_total_preview(event)
 
-        if self._sel < 0 or event.inaxes is not self.ax or event.xdata is None:
+        if self._total_preview or self._sel < 0 or event.inaxes is not self.ax or event.xdata is None:
             return
         is_bp = self._struttura == 'breakpoints'
         t = max(0.0, event.xdata if is_bp else min(self.end_time, event.xdata))
@@ -1207,9 +1277,16 @@ class EnvelopeEditor:
             self.fig.canvas.draw_idle()
             return
 
+        # ── Finalizza split preview drag ──────────────────────────────────
+        if self._split_preview_dragging:
+            self._split_preview_dragging = False
+            self.fig.canvas.draw_idle()
+            return
+
         # ── Finalizza boundary drag ───────────────────────────────────────
         if self._boundary_drag_idx is not None:
             self._boundary_drag_idx = None
+            self._sel = -1
             self._draw_total_preview_decorations()
             self._update_preview()
             self.fig.canvas.draw_idle()
@@ -1254,7 +1331,7 @@ class EnvelopeEditor:
                 btn_prv.label.set_color(_LINE);   btn_prv.label.set_fontweight('bold')
             self.ax.set_title(
                 'Anteprima loop — sola lettura   '
-                'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Z+drag: zoom area   F: fit   Dbl: reset',
+                'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom X   Shift+Scroll: zoom Y   Z+drag: zoom area   F: fit   Dbl: reset',
                 color='#ffd700', fontsize=8, pad=4,
             )
         else:
@@ -1265,7 +1342,7 @@ class EnvelopeEditor:
                 btn_prv.label.set_color(_FG2);    btn_prv.label.set_fontweight('normal')
             self.ax.set_title(
                 'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   '
-                'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom Y   Ctrl+Scroll: zoom X   Z+drag: zoom area   F: fit   Dbl: reset',
+                'Cmd+click: aggiungi   Drag: sposta   Destra: elimina   Scroll: zoom X   Shift+Scroll: zoom Y   Z+drag: zoom area   F: fit   Dbl: reset',
                 color=_FG2, fontsize=8, pad=4,
             )
 
@@ -1369,7 +1446,7 @@ class EnvelopeEditor:
         else:
             # BP: aggiorna self.end_time per il clamping dei punti
             self.end_time = et_val
-            self.ax.set_xlim(0.0, et_val)
+            self.ax.set_xlim(self._seg_xmin, et_val)
         self._update_preview()
         self.fig.canvas.draw_idle()
 
@@ -1377,31 +1454,41 @@ class EnvelopeEditor:
         """Carica il segmento i nel canvas (aggiorna punti, controlli, xlim)."""
         seg = self._segments[i]
         self.points = sort_points(list(seg['points']))
-        if seg['type'] == 'loop':
-            # Pattern loop: asse X in % (0-100), i punti sono già in [0,100]
-            self.end_time = 100.0
-            self.ax.set_xlim(0.0, 100.0)
-            self.ax.set_xlabel('pattern (%)', color=_AXIS, fontsize=8)
-        else:
-            # BP: end_time = X dell'ultimo punto (non un valore fisso)
+        if seg['type'] == 'breakpoints':
             pts = self.points
-            seg_end = max(t for t, v in pts) if pts else seg.get('end_time', self.end_time)
-            pad     = seg_end * 0.08 or 0.5
+            seg_end   = max(t for t, v in pts) if pts else seg.get('end_time', self.end_time)
+            seg_start = min(t for t, v in pts) if pts else 0.0
+            self._seg_xmin = seg_start
             self.end_time = seg_end
             seg['end_time'] = seg_end
-            self.ax.set_xlim(0.0, seg_end + pad)
+            span = seg_end - seg_start
+            self.ax.set_xlim(seg_start, seg_end if pts else seg_start + 0.5)
             self.ax.set_xlabel('tempo (s)', color=_AXIS, fontsize=8)
-        self._preview_mode = False
-
-        if seg['type'] == 'breakpoints':
-            self._struttura = 'breakpoints'
-            self._interp    = seg.get('interp', 'linear')
+            self._struttura    = 'breakpoints'
+            self._interp       = seg.get('interp', 'linear')
+            self._preview_mode = False
         else:
+            # Carica i parametri loop prima di impostare xlim (dipende da _preview_mode)
             self._struttura = 'loop'
             self._loop_dist = seg.get('loop_dist', 'base')
             self._n_reps    = seg.get('n_reps', 4)
             self._ratio     = seg.get('ratio', 1.5)
             self._exponent  = seg.get('exponent', 2.0)
+            self.end_time   = 100.0
+            if self._preview_mode:
+                abs_start = seg.get('abs_start', 0.0)
+                duration  = seg.get('duration', 1.0)
+                rep_times = _compute_rep_times(
+                    duration, self._n_reps, self._loop_dist,
+                    self._ratio, self._exponent,
+                )
+                total_end = rep_times[-1][1] if rep_times else duration
+                self.ax.set_xlim(abs_start, abs_start + total_end)
+                self.ax.set_xlabel('tempo (s)', color=_AXIS, fontsize=8)
+            else:
+                self.ax.set_xlim(0.0, 100.0)
+                self.ax.set_xlabel('pattern (%)', color=_AXIS, fontsize=8)
+            self._update_tab_style()
 
         # Aggiorna radio buttons e pannelli
         self._sync_controls_for_current_struttura()
@@ -1412,10 +1499,15 @@ class EnvelopeEditor:
         """Click su un chip segmento: salva il corrente, carica il nuovo."""
         if i == self._active_seg and not self._total_preview:
             return
-        self._total_preview = False
-        self._save_current_segment()
+        was_total_preview = self._total_preview
+        if self._total_preview:
+            self._total_preview = False
+            self._clear_total_preview_decorations()
+        if not was_total_preview:
+            self._save_current_segment()
         self._active_seg = i
         self._load_segment(i)
+        self._update_tab_style()
         self._update_seg_chips()
         self.fig.canvas.draw()
 
@@ -1426,10 +1518,12 @@ class EnvelopeEditor:
     # ── Overlay helpers ───────────────────────────────────────────────────
 
     def _show_overlay(self, mode: str):
-        """Mostra i due bottoni overlay. mode: 'add' | 'delete' | 'add_truncate' | 'add_blocked'."""
+        """Mostra i due bottoni overlay. mode: 'add' | 'delete' | 'add_truncate' | 'add_blocked' | 'split_confirm'."""
         self._overlay_mode = mode
         self._ax_seg_add.set_visible(False)
-        self._ax_total_preview.set_visible(False)
+        # split_confirm vive dentro "Anteprima totale": lascia quel chip visibile
+        if mode != 'split_confirm':
+            self._ax_total_preview.set_visible(False)
         if mode == 'add':
             self._btn_overlay_1.label.set_text('+ BP')
             self._btn_overlay_2.label.set_text('+ Loop')
@@ -1466,6 +1560,21 @@ class EnvelopeEditor:
             self._ax_overlay_2.set_facecolor('#2d2d2d')
             self._btn_overlay_2.ax.set_facecolor('#2d2d2d')
             self._btn_overlay_2.label.set_color(_FG)
+        elif mode == 'split_confirm':
+            # Sposta i bottoni a sinistra del chip "Anteprima totale" per non sovrapporsi
+            x = self._chip_x_add
+            y = self._chip_y
+            h = self._chip_h
+            self._ax_overlay_1.set_position([x - 0.114, y, 0.055, h])
+            self._ax_overlay_2.set_position([x - 0.056, y, 0.055, h])
+            self._btn_overlay_1.label.set_text('✓ Aggiungi')
+            self._btn_overlay_2.label.set_text('✗ Annulla')
+            self._ax_overlay_1.set_facecolor(_BTN_OK)
+            self._btn_overlay_1.ax.set_facecolor(_BTN_OK)
+            self._btn_overlay_1.label.set_color('#ffffff')
+            self._ax_overlay_2.set_facecolor('#2d2d2d')
+            self._btn_overlay_2.ax.set_facecolor('#2d2d2d')
+            self._btn_overlay_2.label.set_color(_FG)
         self._ax_overlay_1.set_visible(True)
         self._ax_overlay_2.set_visible(True)
         self.fig.canvas.draw_idle()
@@ -1476,6 +1585,9 @@ class EnvelopeEditor:
         self._del_pending_seg = None
         self._ax_overlay_1.set_visible(False)
         self._ax_overlay_2.set_visible(False)
+        # Ripristina posizioni default dei bottoni overlay (possono essere stati spostati da split_confirm)
+        self._ax_overlay_1.set_position(self._overlay_default_pos1)
+        self._ax_overlay_2.set_position(self._overlay_default_pos2)
         self._ax_seg_add.set_visible(True)
         self._ax_total_preview.set_visible(True)
         self._update_seg_chips()
@@ -1484,8 +1596,29 @@ class EnvelopeEditor:
     def _on_overlay_click(self, btn_idx: int):
         if self._overlay_mode == 'add':
             seg_type = 'breakpoints' if btn_idx == 1 else 'loop'
+            self._enter_split_preview(seg_type)
+            return
+        elif self._overlay_mode == 'split_confirm':
+            seg_type     = self._split_preview_type
+            split_x      = self._split_preview_x
+            seg_end      = self._split_preview_seg_end
+            proportional = self._split_preview_proportional
+            confirmed    = (btn_idx == 1)
+            self._exit_split_preview()
             self._dismiss_overlay()
-            self._do_add_segment(seg_type)
+            if confirmed:
+                if proportional:
+                    scale = split_x / seg_end if seg_end > 1e-9 else 1.0
+                    for i, seg in enumerate(self._segments):
+                        self._segments[i] = self._scale_seg_time(seg, scale)
+                    self._finalize_add_segment(seg_type, split_x, seg_end)
+                else:
+                    self._finalize_add_segment(seg_type, split_x, seg_end, trunc_prev_at=split_x)
+            else:
+                self._load_segment(self._active_seg)
+                self._update_tab_style()
+                self.fig.canvas.draw()
+            return
         elif self._overlay_mode == 'delete':
             pending = self._del_pending_seg
             self._dismiss_overlay()
@@ -1525,10 +1658,22 @@ class EnvelopeEditor:
         available = self.end_time - t_start
 
         if available <= 1e-6:
-            self._pending_add_type    = seg_type
-            self._pending_add_t_start = t_start
-            self._pending_add_t_end   = t_start
-            self._show_overlay('add_blocked')
+            if self.end_time <= 1e-6:
+                self._pending_add_type    = seg_type
+                self._pending_add_t_start = t_start
+                self._pending_add_t_end   = t_start
+                self._show_overlay('add_blocked')
+                return
+            # L'ultimo segmento copre tutta la durata: spezzalo per fare spazio.
+            last = self._segments[-1]
+            if last['type'] == 'loop':
+                seg_start = last.get('abs_start', 0.0)
+            else:
+                seg_pts = last.get('points', [])
+                seg_start = min(t for t, _ in seg_pts) if seg_pts else 0.0
+            slice_sz = min(1.0, (self.end_time - seg_start) / 2)
+            t_start = self.end_time - slice_sz
+            self._finalize_add_segment(seg_type, t_start, self.end_time, trunc_prev_at=t_start)
             return
 
         t_end = t_start + min(1.0, available)
@@ -1542,11 +1687,13 @@ class EnvelopeEditor:
 
         self._finalize_add_segment(seg_type, t_start, t_end)
 
-    def _finalize_add_segment(self, seg_type: str, t_start: float, t_end: float):
+    def _finalize_add_segment(self, seg_type: str, t_start: float, t_end: float, *, trunc_prev_at: float = None):
         """Crea e appende il nuovo segmento a _segments."""
         if not self._undoing:
             self._push_undo()
         self._save_current_segment()
+        if trunc_prev_at is not None and self._segments:
+            self._truncate_last_seg(trunc_prev_at)
         duration = t_end - t_start
         if seg_type == 'breakpoints':
             new_seg = {
@@ -1573,6 +1720,124 @@ class EnvelopeEditor:
         self._update_seg_chips()
         self.fig.canvas.draw()
 
+    def _truncate_last_seg(self, t_end: float):
+        """Tronca i dati dell'ultimo segmento a t_end per fare spazio a un nuovo segmento."""
+        if not self._segments:
+            return
+        seg = self._segments[-1]
+        if seg['type'] == 'loop':
+            seg['duration'] = t_end - seg.get('abs_start', 0.0)
+            seg['end_time'] = t_end
+        else:
+            pts = seg.get('points', [])
+            if pts:
+                old_start = min(t for t, _ in pts)
+                old_end   = max(t for t, _ in pts)
+                old_span  = old_end - old_start
+                new_span  = t_end - old_start
+                if old_span > 1e-9:
+                    scale = new_span / old_span
+                    new_pts = [[old_start + (t - old_start) * scale, v] for t, v in pts]
+                else:
+                    new_pts = [[t_end if abs(t - old_end) < 1e-9 else t, v] for t, v in pts]
+            else:
+                new_pts = [[t_end, (self.y_min + self.y_max) / 2]]
+            seg['points'] = sort_points(new_pts)
+            seg['end_time'] = t_end
+
+    # ── Split-preview: anteprima divisione segmento ───────────────────────────
+
+    def _enter_split_preview(self, seg_type: str):
+        """Entra in modalità split-preview: mostra anteprima interattiva della divisione."""
+        if self._segments:
+            last = self._segments[-1]
+            if last['type'] == 'loop':
+                seg_start = last.get('abs_start', 0.0)
+                seg_end   = seg_start + last.get('duration', 1.0)
+            else:
+                pts = last.get('points', [])
+                seg_start = min(t for t, _ in pts) if pts else 0.0
+                seg_end   = max(t for t, _ in pts) if pts else 1.0
+        else:
+            seg_start = 0.0
+            seg_end   = self.end_time or 1.0
+
+        split_x = (seg_start + seg_end) / 2.0
+
+        self._split_preview_mode         = True
+        self._split_preview_type         = seg_type
+        self._split_preview_x            = split_x
+        self._split_preview_seg_start    = seg_start
+        self._split_preview_seg_end      = seg_end
+        self._split_preview_line         = None
+        self._split_ghost_patch          = None
+        self._split_preview_dragging     = False
+        self._split_preview_proportional = False
+
+        self._save_current_segment()
+        self._preview_mode_before_total = getattr(self, '_preview_mode_before_total', self._preview_mode)
+        self._total_preview = True
+        self._preview_mode  = False
+        total_end = max(self._total_end_time(), self._stream_end_time, seg_end)
+        self.ax.set_xlim(0.0, total_end)
+        type_label = 'BP' if seg_type == 'breakpoints' else 'Loop'
+        self.ax.set_title(
+            f'Divisione segmento → {type_label}   '
+            'Trascina la linea bianca per scegliere il punto di taglio   '
+            '(Shift+drag: ridimensiona tutti i segmenti proporzionalmente)',
+            color='#ffffff', fontsize=8, pad=4,
+        )
+        self._update_seg_chips()
+        self._redraw()
+        self._draw_total_preview_decorations()
+        self._draw_split_preview_line()
+        self._show_overlay('split_confirm')
+        self.fig.canvas.draw()
+
+    def _draw_split_preview_line(self):
+        """Disegna la linea bianca draggabile e il ghost del nuovo segmento."""
+        if self._split_preview_line is not None:
+            try:
+                self._split_preview_line.remove()
+            except ValueError:
+                pass
+            self._split_preview_line = None
+        if self._split_ghost_patch is not None:
+            try:
+                self._split_ghost_patch.remove()
+            except ValueError:
+                pass
+            self._split_ghost_patch = None
+
+        x       = self._split_preview_x
+        seg_end = self._split_preview_seg_end
+        n       = len(self._segments)
+        ghost_color = _SEG_COLORS[n % len(_SEG_COLORS)]
+
+        self._split_ghost_patch = self.ax.axvspan(
+            x, seg_end, alpha=0.30, color=ghost_color, zorder=1,
+        )
+        self._split_preview_line = self.ax.axvline(
+            x, color='#ffffff', linestyle='-', linewidth=2.0, alpha=0.95, zorder=5,
+        )
+
+    def _exit_split_preview(self):
+        """Esce dalla modalità split-preview e pulisce gli artefatti grafici."""
+        for obj_attr in ('_split_preview_line', '_split_ghost_patch'):
+            obj = getattr(self, obj_attr, None)
+            if obj is not None:
+                try:
+                    obj.remove()
+                except ValueError:
+                    pass
+                setattr(self, obj_attr, None)
+        self._split_preview_mode         = False
+        self._split_preview_dragging     = False
+        self._split_preview_proportional = False
+        self._total_preview              = False
+        self._clear_total_preview_decorations()
+        self._preview_mode = getattr(self, '_preview_mode_before_total', False)
+
     def _do_delete_segment(self, i: int):
         """Rimuove il segmento i (almeno 1 deve rimanere)."""
         if len(self._segments) <= 1:
@@ -1585,42 +1850,53 @@ class EnvelopeEditor:
         self._update_seg_chips()
         self.fig.canvas.draw()
 
+    def _clear_total_preview_decorations(self):
+        """Rimuove dal plot bande, linee confine e label dell'anteprima totale."""
+        self._boundary_drag_idx = None
+        self._hovered_seg = -1
+        self._hovered_boundary = -1
+        for p in self._seg_band_patches:
+            try:
+                p.remove()
+            except ValueError:
+                pass
+        self._seg_band_patches = []
+        for vl in self._boundary_lines:
+            try:
+                vl.remove()
+            except ValueError:
+                pass
+        self._boundary_lines = []
+        for txt in self._seg_labels:
+            try:
+                txt.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._seg_labels = []
+
     def _on_total_preview_click(self):
         """Attiva/disattiva l'anteprima totale di tutti i segmenti."""
         if self._total_preview:
             # Torna al segmento attivo — pulisci decorazioni timeline
             self._total_preview = False
-            self._boundary_drag_idx = None
-            for p in self._seg_band_patches:
-                try:
-                    p.remove()
-                except ValueError:
-                    pass
-            self._seg_band_patches = []
-            for vl in self._boundary_lines:
-                try:
-                    vl.remove()
-                except ValueError:
-                    pass
-            self._boundary_lines = []
-            for txt in self._seg_labels:
-                try:
-                    txt.remove()
-                except (ValueError, AttributeError):
-                    pass
-            self._seg_labels = []
+            self._clear_total_preview_decorations()
+            # Ripristina _preview_mode prima di _load_segment (gestisce xlim correttamente)
+            self._preview_mode = getattr(self, '_preview_mode_before_total', False)
             self._load_segment(self._active_seg)
+            self._update_tab_style()
             self._update_seg_chips()
             self.fig.canvas.draw()
             return
+        self._preview_mode_before_total = self._preview_mode
         self._save_current_segment()
         self._total_preview = True
         self._preview_mode  = False
-        total_end = max(self._total_end_time(), self.end_time)
-        self.ax.set_xlim(0.0, total_end * 1.02)
+        self._sel = -1
+        total_end = max(self._total_end_time(), self._stream_end_time)
+        self.ax.set_xlim(0.0, total_end)
         self.ax.set_title(
             'Anteprima totale   '
-            'Drag linea gialla: sposta confine   Scroll: zoom Y   Ctrl+Scroll: zoom X   Dbl: reset   '
+            'Drag linea gialla: sposta confine   Scroll: zoom X   Shift+Scroll: zoom Y   Dbl: reset   '
             '— Linea rossa = fine stream',
             color='#ffd700', fontsize=8, pad=4,
         )
@@ -1690,9 +1966,18 @@ class EnvelopeEditor:
                 pass
         self._seg_labels = []
 
+        # In proportional split-preview, mostra i segmenti scalati
+        if self._split_preview_mode and self._split_preview_proportional:
+            seg_end = self._split_preview_seg_end
+            split_x = self._split_preview_x
+            scale   = split_x / seg_end if seg_end > 1e-9 else 1.0
+            display_segs = [self._scale_seg_time(s, scale) for s in self._segments]
+        else:
+            display_segs = self._segments
+
         # Calcola inizi di ogni segmento
         starts = [0.0]
-        for seg in self._segments[:-1]:
+        for seg in display_segs[:-1]:
             if seg['type'] == 'loop':
                 starts.append(seg.get('abs_start', 0.0) + seg.get('duration', 0.0))
             else:
@@ -1700,7 +1985,7 @@ class EnvelopeEditor:
                 starts.append(max(t for t, _ in pts) if pts else 0.0)
 
         # Bande colorate + etichette
-        for i, seg in enumerate(self._segments):
+        for i, seg in enumerate(display_segs):
             x0 = starts[i]
             if seg['type'] == 'loop':
                 x1 = seg.get('abs_start', 0.0) + seg.get('duration', 0.0)
@@ -1720,7 +2005,15 @@ class EnvelopeEditor:
             self._seg_labels.append(txt)
 
         # Linee gialle draggabili ai confini interni
-        for bx in self._seg_boundary_xs():
+        # (in split-preview proportionale usa le posizioni scalate)
+        boundary_xs = []
+        for seg in display_segs[:-1]:
+            if seg['type'] == 'loop':
+                boundary_xs.append(seg.get('abs_start', 0.0) + seg.get('duration', 0.0))
+            else:
+                pts = seg.get('points', [])
+                boundary_xs.append(max(t for t, _ in pts) if pts else 0.0)
+        for bx in boundary_xs:
             vl = self.ax.axvline(
                 bx, color=_SEL, linestyle='--', linewidth=1.5, alpha=0.9, zorder=4,
             )
@@ -1728,7 +2021,7 @@ class EnvelopeEditor:
 
         # Linea rossa fissa: limite stream
         vl_end = self.ax.axvline(
-            self.end_time, color='#ff4444', linestyle='-', linewidth=1.5, alpha=0.85, zorder=4,
+            self._stream_end_time, color='#ff4444', linestyle='-', linewidth=1.5, alpha=0.85, zorder=4,
         )
         self._boundary_lines.append(vl_end)
 
@@ -1736,7 +2029,7 @@ class EnvelopeEditor:
         """Aggiorna i segmenti adiacenti al confine idx in seguito a un drag."""
         boundaries = self._seg_boundary_xs()
         lo = 0.0 if idx == 0 else boundaries[idx - 1]
-        hi = self.end_time if idx >= len(self._segments) - 2 else boundaries[idx + 1]
+        hi = self._stream_end_time if idx >= len(self._segments) - 2 else boundaries[idx + 1]
         eps = 0.01
         new_x = max(lo + eps, min(hi - eps, new_x))
 
@@ -1761,21 +2054,141 @@ class EnvelopeEditor:
 
         # Aggiorna il segmento di destra
         if seg_r['type'] == 'loop':
+            old_abs_start_r = seg_r.get('abs_start', 0.0)
+            old_end_r = old_abs_start_r + seg_r.get('duration', 0.0)
+            new_duration_r = old_end_r - new_x
             seg_r['abs_start'] = new_x
-            seg_r['end_time']  = new_x + seg_r.get('duration', 0.0)
+            seg_r['duration']  = max(eps, new_duration_r)
+            seg_r['end_time']  = old_end_r
         else:
             pts = seg_r['points']
             old_start_r = min(t for t, _ in pts)
-            delta = new_x - old_start_r
-            seg_r['points'] = [(t + delta, v) for t, v in pts]
-            seg_r['end_time'] = max(t for t, _ in seg_r['points'])
+            old_end_r   = max(t for t, _ in pts)
+            old_span_r  = old_end_r - old_start_r
+            new_span_r  = old_end_r - new_x
+            if old_span_r > 1e-9 and new_span_r > 1e-9:
+                seg_r['points'] = [
+                    (new_x + (t - old_start_r) * new_span_r / old_span_r, v)
+                    for t, v in pts
+                ]
+            else:
+                seg_r['points'] = [(new_x if abs(t - old_start_r) < 1e-9 else old_end_r, v) for t, v in pts]
+            seg_r['end_time'] = old_end_r
+
+    def _update_hover_total_preview(self, event):
+        """Aggiorna hover highlights su bande e linee confine nell'anteprima totale."""
+        if not self._total_preview or self._boundary_drag_idx is not None:
+            return
+
+        if event.inaxes is not self.ax or event.xdata is None:
+            changed = self._hovered_seg != -1 or self._hovered_boundary != -1
+            self._hovered_seg = -1
+            self._hovered_boundary = -1
+            if changed:
+                self._refresh_hover_styles()
+                self.fig.canvas.draw_idle()
+            return
+
+        near_bnd = self._find_nearest_boundary(event)
+
+        if near_bnd >= 0:
+            new_seg = -1
+            new_bnd = near_bnd
+        else:
+            boundaries = self._seg_boundary_xs()
+            x = event.xdata
+            new_seg = len(self._segments) - 1
+            for i, bx in enumerate(boundaries):
+                if x < bx:
+                    new_seg = i
+                    break
+            new_bnd = -1
+
+        changed = (new_seg != self._hovered_seg) or (new_bnd != self._hovered_boundary)
+        self._hovered_seg = new_seg
+        self._hovered_boundary = new_bnd
+        if changed:
+            self._refresh_hover_styles()
+            self.fig.canvas.draw_idle()
+
+    def _refresh_hover_styles(self):
+        """Applica alpha/spessore in base a _hovered_seg e _hovered_boundary."""
+        for i, p in enumerate(self._seg_band_patches):
+            p.set_alpha(0.35 if i == self._hovered_seg else 0.18)
+        for i, vl in enumerate(self._boundary_lines[:-1]):  # ultimo = linea rossa stream
+            if i == self._hovered_boundary:
+                vl.set_linewidth(3.0)
+                vl.set_alpha(1.0)
+                vl.set_color('#ffe566')
+            else:
+                vl.set_linewidth(1.5)
+                vl.set_alpha(0.9)
+                vl.set_color(_SEL)
+
+    def _on_axes_leave(self, event):
+        if event.inaxes is not self.ax:
+            return
+        changed = self._hovered_seg != -1 or self._hovered_boundary != -1
+        self._hovered_seg = -1
+        self._hovered_boundary = -1
+        if changed and self._total_preview:
+            self._refresh_hover_styles()
+            self.fig.canvas.draw_idle()
+
+    def _scale_seg_time(self, seg: dict, scale: float) -> dict:
+        """Ritorna copia di seg con tutte le coordinate temporali moltiplicate per scale."""
+        seg = dict(seg)
+        if seg['type'] == 'breakpoints':
+            seg['points']   = [[t * scale, v] for t, v in seg.get('points', [])]
+            if 'end_time' in seg:
+                seg['end_time'] = seg['end_time'] * scale
+        else:
+            seg['abs_start'] = seg.get('abs_start', 0.0) * scale
+            seg['duration']  = seg.get('duration',  0.0) * scale
+            seg['end_time']  = seg.get('end_time',  0.0) * scale
+        return seg
+
+    def _build_split_preview_segs(self, seg):
+        """Ritorna (left_seg, right_seg) virtuali che mostrano il risultato dello split."""
+        seg_start = self._split_preview_seg_start
+        seg_end   = self._split_preview_seg_end
+        split_x   = self._split_preview_x
+        span      = seg_end - seg_start
+
+        if seg['type'] == 'breakpoints':
+            pts = sort_points(seg.get('points', []))
+            if span > 1e-9:
+                s = (split_x - seg_start) / span
+                left_pts = [[seg_start + (t - seg_start) * s, v] for t, v in pts]
+            else:
+                left_pts = list(pts)
+            left_seg  = dict(seg, points=left_pts, end_time=split_x)
+            right_seg = dict(seg, points=[], end_time=seg_end)
+        else:  # loop
+            left_seg  = dict(seg, abs_start=seg_start, duration=max(1e-9, split_x - seg_start),
+                             end_time=split_x)
+            right_seg = dict(seg, abs_start=split_x, duration=max(1e-9, seg_end - split_x),
+                             end_time=seg_end, points=[])
+        return left_seg, right_seg
 
     def _get_total_preview_data(self):
         """Genera la curva completa espandendo tutti i segmenti in coordinate assolute."""
         import numpy as np
         all_ts, all_vs = [], []
 
-        for seg in self._segments:
+        segs = list(self._segments)
+        if self._split_preview_mode and segs:
+            if self._split_preview_proportional:
+                seg_end = self._split_preview_seg_end
+                split_x = self._split_preview_x
+                scale   = split_x / seg_end if seg_end > 1e-9 else 1.0
+                segs = [self._scale_seg_time(s, scale) for s in segs]
+                # right_seg (nuovo) è vuoto — ghost mostrato via axvspan
+            else:
+                left_seg, right_seg = self._build_split_preview_segs(segs[-1])
+                segs = segs[:-1] + [left_seg, right_seg]
+
+        for seg in segs:
             pts = sort_points(seg['points'])
             if not pts:
                 continue
@@ -2011,7 +2424,8 @@ class EnvelopeEditor:
           1 segmento Loop → compact loop
           tutto il resto  → formato misto
         """
-        self._save_current_segment()
+        if not self._total_preview:
+            self._save_current_segment()
         segs = self._segments
         if len(segs) == 1:
             seg = segs[0]
@@ -2179,6 +2593,10 @@ class EnvelopeEditor:
     # -------------------------------------------------------------------------
 
     def run(self) -> str:
+        try:
+            self.fig.canvas.manager.set_window_title(self._window_title)
+        except Exception:
+            pass
         self._plt.show()
         return self._result
 
@@ -2202,6 +2620,8 @@ def main():
     parser.add_argument('--exponent',  type=float,  default=2.0)
     parser.add_argument('--segments',  type=str,    default='',
                         help='JSON lista segmenti per formato misto')
+    parser.add_argument('--param',     type=str,    default='',
+                        help='Nome parametro mostrato nel titolo finestra')
     args = parser.parse_args()
 
     try:
@@ -2240,6 +2660,7 @@ def main():
         ratio=args.ratio,
         exponent=args.exponent,
         segments=segments,
+        param_name=args.param,
     )
     result = editor.run()
     if result:
