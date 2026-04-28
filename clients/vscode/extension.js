@@ -315,6 +315,7 @@ async function activate(context) {
                     `--ymin=${ctx.y_min}`,
                     `--ymax=${ctx.y_max}`,
                     `--end_time=${ctx.end_time}`,
+                    ...(ctx.param_name ? [`--param=${ctx.param_name}`] : []),
                 ]);
             } catch (err) {
                 const msg = err.message || String(err);
@@ -355,6 +356,7 @@ async function activate(context) {
             `--ymax=${envelopeData.y_max}`,
             `--end_time=${envelopeData.end_time}`,
             `--struttura=${envelopeData.struttura}`,
+            ...(envelopeData.param_name ? [`--param=${envelopeData.param_name}`] : []),
         ];
         if (envelopeData.struttura === 'misto') {
             args.push(`--segments=${JSON.stringify(envelopeData.segments)}`);
@@ -377,14 +379,19 @@ async function activate(context) {
 
         if (!result) return;   // annullato dall'utente
 
-        // Sostituisce il valore originale sulla stessa riga
+        // Sostituisce il valore originale (inline o block multi-riga)
         const r = envelopeData.replace_range;
+        const isBlock = r.end_line !== undefined && r.end_line !== r.line;
+        const endLine = r.end_line !== undefined ? r.end_line : r.line;
         const replaceRange = new vscode.Range(
             new vscode.Position(r.line, r.start_char),
-            new vscode.Position(r.line, r.end_char),
+            new vscode.Position(endLine, r.end_char),
         );
         const edit = new vscode.WorkspaceEdit();
-        edit.replace(document.uri, replaceRange, result);
+        // Per block YAML start_char supera la fine della riga chiave (es. "key:" senza spazio
+        // inline): VSCode clamp all'EOL, quindi il valore si incollerebbe senza spazio.
+        // Prepend ' ' come fa il path di nuovo inserimento.
+        edit.replace(document.uri, replaceRange, isBlock ? ' ' + result : result);
         await vscode.workspace.applyEdit(edit);
     }
 

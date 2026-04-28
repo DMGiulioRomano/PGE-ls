@@ -12,3 +12,5 @@ Pygments==2.20.0
 pytest==8.4.2
 tomli==2.4.1
 typing_extensions==4.15.0
+# MCP Server
+mcp-pyautogui-server>=0.1.0
