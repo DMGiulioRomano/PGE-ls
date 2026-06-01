@@ -144,11 +144,9 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
         'stochastic': VoiceStrategySpec(
             name='stochastic',
             description=(
-                "Assegna offset in semitoni casuali ma deterministici a ogni voce.\n\n"
-                "Gli offset sono distribuiti uniformemente in `[−semitone_range, +semitone_range]`. "
-                "Il seed è calcolato da `stream_id + voice_index`, garantendo riproducibilità "
-                "tra esecuzioni diverse.\n\n"
-                "**Esempio:** `semitone_range: 6.0` → ogni voce ha un offset fisso entro ±6 semitoni."
+                "Assegna offset in semitoni casuali a ogni voce.\n\n"
+                "Gli offset sono distribuiti uniformemente in `[−semitone_range, +semitone_range]`.\n\n"
+                "**Esempio:** `semitone_range: 6.0` → ogni voce ha un offset casuale entro ±6 semitoni."
             ),
             kwargs={
                 'semitone_range': VoiceKwargSpec(
@@ -160,6 +158,29 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
                         "Deviazione massima in semitoni (verso l'alto o il basso).\n\n"
                         "Gli offset sono distribuiti uniformemente in `[−range, +range]`.\n\n"
                         "Deve essere ≥ 0."
+                    ),
+                ),
+            },
+        ),
+
+        'spectral': VoiceStrategySpec(
+            name='spectral',
+            description=(
+                "Distribuisce le voci sui parziali della serie armonica naturale.\n\n"
+                "Voce `i` → parziale `i+1` → `round(12 × log₂(i+1))` semitoni.\n\n"
+                "Serie: `[0, 12, 19, 24, 28, 31, 34, 36, ...]` per le prime 8 voci.\n\n"
+                "**Esempio:** 4 voci → offset `[0, 12, 19, 24]` semitoni."
+            ),
+            kwargs={
+                'max_partial': VoiceKwargSpec(
+                    name='max_partial',
+                    type='int',
+                    required=False,
+                    min_val=1.0,
+                    description=(
+                        "Numero di parziali pre-calcolati all'inizializzazione.\n\n"
+                        "Default: `16`. Voci oltre questo limite sono calcolate on-demand.\n\n"
+                        "Deve essere ≥ 1."
                     ),
                 ),
             },
@@ -384,7 +405,7 @@ _VOICE_TOP_LEVEL_DOCS: Dict[str, str] = {
     'pitch': (
         "**pitch** — Strategy di offset in semitoni per voce.\n\n"
         "Dimensione opzionale. Se assente, tutte le voci usano lo stesso pitch.\n\n"
-        "Strategy disponibili: `step`, `range`, `chord`, `stochastic`\n\n"
+        "Strategy disponibili: `step`, `range`, `chord`, `stochastic`, `spectral`\n\n"
         "```yaml\npitch:\n  strategy: chord\n  chord: dom7\n```"
     ),
     'onset_offset': (

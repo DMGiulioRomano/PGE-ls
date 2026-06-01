@@ -95,6 +95,26 @@ class TestPitchStrategies:
         assert kwarg.required is True
         assert kwarg.min_val == 0.0
 
+    def test_stochastic_descrizione_non_deterministica(self):
+        desc = VOICE_STRATEGY_REGISTRY['pitch']['stochastic'].description.lower()
+        assert 'deterministici' not in desc
+        assert 'riproducib' not in desc
+
+    def test_strategy_spectral_esiste(self):
+        assert 'spectral' in VOICE_STRATEGY_REGISTRY['pitch']
+
+    def test_spectral_ha_kwarg_max_partial(self):
+        spec = VOICE_STRATEGY_REGISTRY['pitch']['spectral']
+        assert 'max_partial' in spec.kwargs
+        kwarg = spec.kwargs['max_partial']
+        assert kwarg.required is False
+        assert kwarg.type == 'int'
+        assert kwarg.min_val == 1.0
+
+    def test_spectral_descrizione_contiene_serie_armonica(self):
+        desc = VOICE_STRATEGY_REGISTRY['pitch']['spectral'].description
+        assert 'armonica' in desc.lower()
+
 
 class TestOnsetOffsetStrategies:
     """Verifica le strategy della dimensione onset_offset."""
