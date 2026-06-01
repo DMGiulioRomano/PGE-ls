@@ -1290,6 +1290,20 @@ class DiagnosticProvider:
                             source=SOURCE,
                         ))
 
+                    # Controlla valori bool
+                    if (kwarg_spec.type == 'bool'
+                            and kwarg_val_str not in ('true', 'false')):
+                        diagnostics.append(Diagnostic(
+                            range=self._line_range(kwarg_line),
+                            message=(
+                                f"Valore `{kwarg_val_str}` non valido per "
+                                f"`voices.{dim}.{kwarg_name}`. "
+                                f"Valori consentiti: `true`, `false`."
+                            ),
+                            severity=DiagnosticSeverity.Error,
+                            source=SOURCE,
+                        ))
+
         return diagnostics
 
     def _check_start_bypassed_by_loop_start(self, document_text: str) -> List[Diagnostic]:

@@ -1331,3 +1331,82 @@ class TestCheckMissingValues:
         result = provider.get_diagnostics(yaml)
         errors = self._missing_errors(result)
         assert errors == []
+
+    # --- voices.pointer normalized ---
+
+    def test_pointer_normalized_true_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pointer:\n"
+            "        strategy: linear\n"
+            "        step: 0.1\n"
+            "        normalized: true\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        bool_errors = [d for d in result if 'normalized' in d.message]
+        assert bool_errors == []
+
+    def test_pointer_normalized_false_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pointer:\n"
+            "        strategy: stochastic\n"
+            "        pointer_range: 0.05\n"
+            "        normalized: false\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        bool_errors = [d for d in result if 'normalized' in d.message]
+        assert bool_errors == []
+
+    def test_pointer_normalized_valore_invalido_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pointer:\n"
+            "        strategy: linear\n"
+            "        step: 0.1\n"
+            "        normalized: yes\n"   # non è bool YAML-LSP valido
+        )
+        result = provider.get_diagnostics(yaml)
+        bool_errors = [d for d in result if 'normalized' in d.message]
+        assert len(bool_errors) == 1
+        assert 'true' in bool_errors[0].message or 'false' in bool_errors[0].message
+
+    def test_pointer_assente_normalized_nessun_warning_richiesto(self, bridge):
+        # normalized è opzionale: non deve produrre warning se assente
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pointer:\n"
+            "        strategy: linear\n"
+            "        step: 0.1\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        normalized_warnings = [d for d in result if 'normalized' in d.message]
+        assert normalized_warnings == []

@@ -156,6 +156,36 @@ class TestPointerStrategies:
         spec = VOICE_STRATEGY_REGISTRY['pointer']['stochastic']
         assert 'pointer_range' in spec.kwargs
 
+    def test_linear_ha_kwarg_normalized(self):
+        spec = VOICE_STRATEGY_REGISTRY['pointer']['linear']
+        assert 'normalized' in spec.kwargs
+        kwarg = spec.kwargs['normalized']
+        assert kwarg.type == 'bool'
+        assert kwarg.required is False
+
+    def test_stochastic_ha_kwarg_normalized(self):
+        spec = VOICE_STRATEGY_REGISTRY['pointer']['stochastic']
+        assert 'normalized' in spec.kwargs
+        kwarg = spec.kwargs['normalized']
+        assert kwarg.type == 'bool'
+        assert kwarg.required is False
+
+    def test_normalized_descritto_in_top_level_doc(self):
+        doc = get_top_level_doc('pointer')
+        assert doc is not None
+        assert 'normalized' in doc
+
+    def test_find_kwarg_normalized_in_pointer(self):
+        kwarg = find_kwarg_in_dimension('pointer', 'normalized')
+        assert kwarg is not None
+        assert kwarg.type == 'bool'
+
+    def test_normalized_non_in_pitch_dim(self):
+        assert find_kwarg_in_dimension('pitch', 'normalized') is None
+
+    def test_normalized_non_in_pan_dim(self):
+        assert find_kwarg_in_dimension('pan', 'normalized') is None
+
 
 class TestPanStrategies:
     """Verifica le strategy della dimensione pan."""
