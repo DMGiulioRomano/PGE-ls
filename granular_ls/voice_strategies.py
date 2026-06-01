@@ -269,7 +269,10 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
             name='linear',
             description=(
                 "Distribuisce le voci a posizioni di lettura lineari nel sample.\n\n"
-                "La voce `i` legge da `base_position + i × step`."
+                "La voce `i` legge da `base_position + i × step`.\n\n"
+                "- default (`normalized` assente / `false`): `step` in **secondi**.\n"
+                "- `normalized: true`: `step` come **frazione di `sample_dur_sec`** "
+                "(es. `0.1` = 10% del buffer)."
             ),
             kwargs={
                 'step': VoiceKwargSpec(
@@ -278,7 +281,20 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
                     required=True,
                     description=(
                         "Offset di posizione di lettura tra voci adiacenti.\n\n"
-                        "Unità: secondi (o normalizzata se `loop_unit: normalized`)."
+                        "Unità: **secondi** di default; **frazione di `sample_dur_sec`** "
+                        "se `normalized: true`."
+                    ),
+                ),
+                'normalized': VoiceKwargSpec(
+                    name='normalized',
+                    type='bool',
+                    required=False,
+                    description=(
+                        "Se `true`, interpreta `step` come frazione di `sample_dur_sec` "
+                        "invece che in secondi.\n\n"
+                        "Default: `false` (offset in secondi, retrocompatibile).\n\n"
+                        "**Esempio:** `step: 0.1, normalized: true` → ogni voce "
+                        "è sfasata del 10% del buffer."
                     ),
                 ),
             },
@@ -289,7 +305,9 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
             description=(
                 "Assegna posizioni di lettura casuali deterministiche.\n\n"
                 "Ogni voce riceve una variazione di puntatore in "
-                "`[−pointer_range, +pointer_range]`."
+                "`[−pointer_range, +pointer_range]`.\n\n"
+                "- default (`normalized` assente / `false`): `pointer_range` in **secondi**.\n"
+                "- `normalized: true`: `pointer_range` come **frazione di `sample_dur_sec`**."
             ),
             kwargs={
                 'pointer_range': VoiceKwargSpec(
@@ -298,7 +316,21 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
                     required=True,
                     description=(
                         "Variazione massima di posizione di lettura.\n\n"
-                        "Distribuita uniformemente in `[−range, +range]`."
+                        "Distribuita uniformemente in `[−range, +range]`.\n\n"
+                        "Unità: **secondi** di default; **frazione di `sample_dur_sec`** "
+                        "se `normalized: true`."
+                    ),
+                ),
+                'normalized': VoiceKwargSpec(
+                    name='normalized',
+                    type='bool',
+                    required=False,
+                    description=(
+                        "Se `true`, interpreta `pointer_range` come frazione di `sample_dur_sec` "
+                        "invece che in secondi.\n\n"
+                        "Default: `false` (offset in secondi, retrocompatibile).\n\n"
+                        "**Esempio:** `pointer_range: 0.05, normalized: true` → variazione "
+                        "casuale entro ±5% del buffer."
                     ),
                 ),
             },
@@ -418,7 +450,10 @@ _VOICE_TOP_LEVEL_DOCS: Dict[str, str] = {
         "**pointer** — Strategy di offset di posizione di lettura per voce.\n\n"
         "Dimensione opzionale. Se assente, tutte le voci leggono dalla stessa posizione.\n\n"
         "Strategy disponibili: `linear`, `stochastic`\n\n"
-        "```yaml\npointer:\n  strategy: stochastic\n  pointer_range: 0.1\n```"
+        "**Flag `normalized`** (opzionale, default `false`): se `true`, gli offset "
+        "sono interpretati come **frazione di `sample_dur_sec`** invece che in secondi. "
+        "Vale per entrambe le strategy.\n\n"
+        "```yaml\npointer:\n  strategy: linear\n  step: 0.1\n  normalized: true\n```"
     ),
     'pan': (
         "**pan** — Strategy di posizionamento stereo per voce.\n\n"

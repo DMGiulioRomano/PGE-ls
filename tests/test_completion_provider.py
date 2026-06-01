@@ -1174,3 +1174,43 @@ class TestVoiceStrategySnippet:
         for it in items:
             assert '\n' not in (it.insert_text or '')
             assert not (it.insert_text or '').endswith('}')
+
+    def test_pointer_dimension_suggerisce_normalized(self, bridge):
+        # Dentro voices.pointer block style, normalized deve essere suggerito
+        provider = CompletionProvider(bridge)
+        document = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pointer:\n"
+            "        strategy: linear\n"
+            "        step: 0.1\n"
+            "        \n"  # cursore qui
+        )
+        ctx = make_context(
+            context_type='key',
+            current_text='',
+            parent_path=['voices', 'pointer'],
+            indent_level=4,
+            leading_spaces=8,
+            cursor_line=10,
+        )
+        items = provider.get_completions(ctx, document)
+        labels = [it.label for it in items]
+        assert 'normalized' in labels
+
+    def test_pointer_inline_strategy_contiene_normalized_snippet(self, bridge):
+        # In inline completion, normalized deve comparire come tab stop bool
+        items = provider_instance = CompletionProvider(bridge)
+        inline_items = provider_instance._get_voice_strategy_inline_completions(
+            'pointer', ''
+        )
+        linear_items = [it for it in inline_items if it.label == 'linear']
+        assert len(linear_items) == 1
+        # Il snippet deve contenere normalized con scelta true/false
+        assert 'normalized' in linear_items[0].insert_text
+        assert 'true' in linear_items[0].insert_text
