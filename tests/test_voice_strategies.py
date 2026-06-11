@@ -65,12 +65,17 @@ class TestPitchStrategies:
         assert kwarg.required is True
         assert kwarg.type == 'float'
 
-    def test_range_ha_kwarg_semitone_range(self):
+    def test_range_ha_kwarg_pitch_range(self):
         spec = VOICE_STRATEGY_REGISTRY['pitch']['range']
-        assert 'semitone_range' in spec.kwargs
-        kwarg = spec.kwargs['semitone_range']
+        assert 'pitch_range' in spec.kwargs
+        kwarg = spec.kwargs['pitch_range']
         assert kwarg.required is True
         assert kwarg.min_val == 0.0
+
+    def test_range_non_ha_piu_semitone_range(self):
+        # Hard break PGE: semitone_range rinominato in pitch_range
+        spec = VOICE_STRATEGY_REGISTRY['pitch']['range']
+        assert 'semitone_range' not in spec.kwargs
 
     def test_chord_ha_kwarg_chord_con_enum(self):
         spec = VOICE_STRATEGY_REGISTRY['pitch']['chord']
@@ -82,18 +87,35 @@ class TestPitchStrategies:
         assert 'dom7' in kwarg.enum_values
         assert 'min7' in kwarg.enum_values
 
-    def test_chord_enum_contiene_tutti_gli_accordi(self):
+    def test_chord_enum_speculare_a_chord_intervals(self):
+        from granular_ls.voice_strategies import CHORD_INTERVALS
         kwarg = VOICE_STRATEGY_REGISTRY['pitch']['chord'].kwargs['chord']
-        expected = {'maj', 'min', 'dom7', 'maj7', 'min7', 'dim', 'aug',
-                    'sus2', 'sus4', 'dim7', 'minmaj7'}
-        assert set(kwarg.enum_values) == expected
+        assert set(kwarg.enum_values) == set(CHORD_INTERVALS.keys())
 
-    def test_stochastic_ha_kwarg_semitone_range(self):
+    def test_chord_enum_contiene_accordi_estesi(self):
+        # Registry PGE esteso fino a 7 voci
+        kwarg = VOICE_STRATEGY_REGISTRY['pitch']['chord'].kwargs['chord']
+        for nome in ('dom9', 'maj9', 'min11', 'dom13', 'altered', '9sus4'):
+            assert nome in kwarg.enum_values
+
+    def test_chord_ha_kwarg_inversion_opzionale(self):
+        spec = VOICE_STRATEGY_REGISTRY['pitch']['chord']
+        assert 'inversion' in spec.kwargs
+        kwarg = spec.kwargs['inversion']
+        assert kwarg.required is False
+        assert kwarg.type == 'int'
+        assert kwarg.min_val == 0.0
+
+    def test_stochastic_ha_kwarg_pitch_range(self):
         spec = VOICE_STRATEGY_REGISTRY['pitch']['stochastic']
-        assert 'semitone_range' in spec.kwargs
-        kwarg = spec.kwargs['semitone_range']
+        assert 'pitch_range' in spec.kwargs
+        kwarg = spec.kwargs['pitch_range']
         assert kwarg.required is True
         assert kwarg.min_val == 0.0
+
+    def test_stochastic_non_ha_piu_semitone_range(self):
+        spec = VOICE_STRATEGY_REGISTRY['pitch']['stochastic']
+        assert 'semitone_range' not in spec.kwargs
 
     def test_stochastic_descrizione_non_deterministica(self):
         desc = VOICE_STRATEGY_REGISTRY['pitch']['stochastic'].description.lower()
@@ -114,6 +136,44 @@ class TestPitchStrategies:
     def test_spectral_descrizione_contiene_serie_armonica(self):
         desc = VOICE_STRATEGY_REGISTRY['pitch']['spectral'].description
         assert 'armonica' in desc.lower()
+
+
+class TestPitchUnitKwarg:
+    """Il kwarg `unit` delle strategy pitch unit-agnostiche (issue #9/#10)."""
+
+    @pytest.mark.parametrize('strategy', ['step', 'range', 'stochastic'])
+    def test_strategy_agnostiche_hanno_unit(self, strategy):
+        spec = VOICE_STRATEGY_REGISTRY['pitch'][strategy]
+        assert 'unit' in spec.kwargs
+        kwarg = spec.kwargs['unit']
+        assert kwarg.type == 'pitch_unit'
+        assert kwarg.required is False
+
+    @pytest.mark.parametrize('strategy', ['chord', 'spectral'])
+    def test_strategy_semitone_locked_non_espongono_unit(self, strategy):
+        # chord/spectral accettano solo semitones: unit non viene suggerito
+        spec = VOICE_STRATEGY_REGISTRY['pitch'][strategy]
+        assert 'unit' not in spec.kwargs
+
+    def test_unit_doc_menziona_geometria_ratio(self):
+        kwarg = VOICE_STRATEGY_REGISTRY['pitch']['step'].kwargs['unit']
+        assert 'ratio' in kwarg.description
+        assert 'geometric' in kwarg.description.lower()
+
+    def test_descrizione_step_geometrica_con_ratio(self):
+        desc = VOICE_STRATEGY_REGISTRY['pitch']['step'].description
+        assert 'step^i' in desc
+        assert 'geometric' in desc.lower()
+
+    def test_descrizione_stochastic_simmetrica_con_ratio(self):
+        desc = VOICE_STRATEGY_REGISTRY['pitch']['stochastic'].description
+        assert 'ratio' in desc
+
+    def test_solo_pitch_ha_kwarg_unit(self):
+        # unit appartiene alla dimensione pitch, non alle altre
+        for dim in ('onset_offset', 'pointer', 'pan'):
+            for spec in VOICE_STRATEGY_REGISTRY[dim].values():
+                assert 'unit' not in spec.kwargs
 
 
 class TestOnsetOffsetStrategies:

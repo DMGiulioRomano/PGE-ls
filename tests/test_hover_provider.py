@@ -78,7 +78,7 @@ def bridge():
                           exclusive_group='density_mode', group_priority=1),
             # volume con dephase_key per testare hover nel blocco dephase
             {
-                'name': 'volume', 'yaml_path': 'volume', 'default': -6.0,
+                'name': 'volume', 'yaml_path': 'volume', 'default': 0.0,
                 'is_smart': True, 'exclusive_group': None, 'group_priority': 99,
                 'range_path': None, 'dephase_key': 'volume',
             },
@@ -256,9 +256,10 @@ class TestGetHoverContenuto:
         assert '0.0' in result.contents.value
 
     def test_documentazione_semitones_variation_mode_quantized(self, bridge):
+        # Superficie unit-driven: la doc arriva dal registry pitch_units
         provider = HoverProvider(bridge)
         ctx = make_context(context_type='key',
-                           current_text='pitch.semitones',
+                           current_text='semitones',
                            parent_path=['pitch'], indent_level=1)
         result = provider.get_hover(ctx)
         assert result is not None
@@ -297,14 +298,16 @@ class TestGetHoverExclusiveGroup:
         result = provider.get_hover(ctx)
         assert 'exclusive' not in result.contents.value.lower()
 
-    def test_pitch_semitones_menziona_pitch_mode(self, bridge):
+    def test_pitch_semitones_menziona_unicita_unita(self, bridge):
+        # Il gruppo esclusivo pitch_mode non esiste piu': il vincolo e'
+        # "una sola chiave-unità per blocco" (modello unit-driven).
         provider = HoverProvider(bridge)
         ctx = make_context(context_type='key',
-                           current_text='pitch.semitones',
+                           current_text='semitones',
                            parent_path=['pitch'])
         result = provider.get_hover(ctx)
         assert result is not None
-        assert 'pitch_mode' in result.contents.value
+        assert 'una sola chiave-unit' in result.contents.value.lower()
 
 
 # =============================================================================
@@ -499,3 +502,124 @@ class TestGetHoverDephaseKeys:
         result = provider.get_hover(ctx)
         assert result is not None
         assert len(result.contents.value) > 0
+
+
+# =============================================================================
+# 10. get_hover - blocco pitch unit-driven (issue #9)
+# =============================================================================
+
+class TestGetHoverPitchUnits:
+    """
+    Hover per le chiavi del blocco pitch: la superficie e' unit-driven
+    (registry pitch_units), non passa piu' dal bridge.
+    """
+
+    @pytest.mark.parametrize('key, atteso', [
+        ('semitones', '[-36, 36]'),
+        ('cents', '[-3600, 3600]'),
+        ('quarter_tone', '[-72, 72]'),
+        ('eighth_tone', '[-144, 144]'),
+        ('ratio', '[0.125, 8.0]'),
+    ])
+    def test_unita_preset_mostrano_bounds(self, bridge, key, atteso):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text=key,
+                           parent_path=['pitch'], indent_level=3)
+        result = provider.get_hover(ctx)
+        assert result is not None
+        assert atteso in result.contents.value
+
+    def test_hover_su_blocco_pitch_elenca_le_unita(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='pitch')
+        result = provider.get_hover(ctx)
+        assert result is not None
+        for key in ('semitones', 'cents', 'quarter_tone',
+                    'eighth_tone', 'edo', 'ratio'):
+            assert key in result.contents.value
+
+    def test_hover_edo_menziona_value_a_fianco(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='edo',
+                           parent_path=['pitch'], indent_level=3)
+        result = provider.get_hover(ctx)
+        assert result is not None
+        assert 'value' in result.contents.value
+
+    def test_hover_value_con_edo_nel_blocco_mostra_bounds_dinamici(self, bridge):
+        provider = HoverProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    pitch:\n"
+            "      edo: 31\n"
+            "      value: 18\n"
+        )
+        ctx = YamlContext(context_type='key', current_text='value',
+                          parent_path=['pitch'], indent_level=3,
+                          cursor_line=4)
+        result = provider.get_hover(ctx, yaml)
+        assert result is not None
+        assert '[-93, 93]' in result.contents.value
+
+    def test_hover_range_mostra_unita_attiva(self, bridge):
+        provider = HoverProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    pitch:\n"
+            "      ratio: 1.5\n"
+            "      range: 0.1\n"
+        )
+        ctx = YamlContext(context_type='key', current_text='range',
+                          parent_path=['pitch'], indent_level=3,
+                          cursor_line=4)
+        result = provider.get_hover(ctx, yaml)
+        assert result is not None
+        assert 'ratio' in result.contents.value
+        assert '[0, 2]' in result.contents.value
+
+    def test_chiave_sconosciuta_nel_blocco_pitch_ritorna_none(self, bridge):
+        # Il blocco e' strict: nessun hover per refusi tipo 'semitone'
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='semitone',
+                           parent_path=['pitch'], indent_level=3)
+        assert provider.get_hover(ctx) is None
+
+
+class TestGetHoverVoicesPitchUnit:
+    """Hover per il kwarg `unit` e i suoi valori in voices.pitch (issue #10)."""
+
+    def test_hover_su_kwarg_unit(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='unit',
+                           parent_path=['voices', 'pitch'], indent_level=4)
+        result = provider.get_hover(ctx)
+        assert result is not None
+        assert 'ratio' in result.contents.value
+        assert 'geometric' in result.contents.value.lower()
+
+    def test_hover_su_valore_ratio_menziona_geometrica(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='ratio',
+                           parent_path=['voices', 'pitch'], indent_level=4)
+        result = provider.get_hover(ctx)
+        assert result is not None
+        assert 'geometric' in result.contents.value.lower()
+        assert '> 0' in result.contents.value
+
+    def test_hover_su_valore_cents(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='cents',
+                           parent_path=['voices', 'pitch'], indent_level=4)
+        result = provider.get_hover(ctx)
+        assert result is not None
+        assert '1200' in result.contents.value
+
+    def test_hover_su_pitch_range(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='pitch_range',
+                           parent_path=['voices', 'pitch'], indent_level=4)
+        result = provider.get_hover(ctx)
+        assert result is not None
+        assert 'semitone_range' in result.contents.value  # nota hard break

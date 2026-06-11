@@ -29,12 +29,14 @@ Struttura YAML supportata:
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from granular_ls.pitch_units import VOICE_UNIT_DOC
+
 
 @dataclass(frozen=True)
 class VoiceKwargSpec:
     """Specifica di un singolo kwarg di una voice strategy."""
     name: str
-    type: str               # 'float', 'int', 'enum', 'bool'
+    type: str               # 'float', 'int', 'enum', 'bool', 'pitch_unit'
     required: bool
     description: str
     enum_values: Optional[Tuple[str, ...]] = None   # solo per type == 'enum'
@@ -51,21 +53,87 @@ class VoiceStrategySpec:
 
 
 # ---------------------------------------------------------------------------
+# Accordi disponibili per la strategy pitch 'chord'.
+# Speculare a CHORD_INTERVALS di src/strategies/voice_pitch_strategy.py:
+# intervalli in semitoni dalla fondamentale. Usato per enum, docs e per
+# validare il range di `inversion` ([0, n_note-1]).
+# ---------------------------------------------------------------------------
+
+CHORD_INTERVALS: Dict[str, Tuple[int, ...]] = {
+    # --- 3 voci ---
+    'maj':      (0, 4, 7),
+    'min':      (0, 3, 7),
+    'dim':      (0, 3, 6),
+    'aug':      (0, 4, 8),
+    'sus2':     (0, 2, 7),
+    'sus4':     (0, 5, 7),
+    # --- 4 voci ---
+    'dom7':     (0, 4, 7, 10),
+    'maj7':     (0, 4, 7, 11),
+    'min7':     (0, 3, 7, 10),
+    'dim7':     (0, 3, 6, 9),
+    'minmaj7':  (0, 3, 7, 11),
+    # --- 5 voci ---
+    'dom9':     (0, 4, 7, 10, 14),
+    'maj9':     (0, 4, 7, 11, 14),
+    'min9':     (0, 3, 7, 10, 14),
+    '9sus4':    (0, 5, 7, 10, 14),
+    # --- 6 voci ---
+    'dom9s11':  (0, 4, 7, 10, 14, 18),
+    'maj9s11':  (0, 4, 7, 11, 14, 18),
+    'min11':    (0, 3, 7, 10, 14, 17),
+    # --- 7 voci ---
+    'dom13':    (0, 4, 7, 10, 14, 17, 21),
+    'min13':    (0, 3, 7, 10, 14, 17, 21),
+    'maj13s11': (0, 4, 7, 11, 14, 18, 21),
+    'altered':  (0, 4, 7, 10, 13, 15, 20),
+}
+
+
+def _chord_table() -> str:
+    """Tabella Markdown degli accordi, generata da CHORD_INTERVALS."""
+    rows = ['| Valore | Intervalli (semitoni) | Voci |',
+            '|--------|-----------------------|------|']
+    for name, intervals in CHORD_INTERVALS.items():
+        rows.append(
+            f"| `{name}` | {', '.join(str(i) for i in intervals)} "
+            f"| {len(intervals)} |"
+        )
+    return '\n'.join(rows)
+
+
+# Kwarg `unit` condiviso dalle strategy pitch unit-agnostiche
+# (step, range, stochastic). chord e spectral sono semitone-locked e non
+# lo espongono nel completamento (il motore accetta solo `semitones`).
+_UNIT_KWARG = VoiceKwargSpec(
+    name='unit',
+    type='pitch_unit',
+    required=False,
+    description=VOICE_UNIT_DOC,
+)
+
+
+# ---------------------------------------------------------------------------
 # Registry completo: dimension -> strategy_name -> VoiceStrategySpec
 # ---------------------------------------------------------------------------
 
 VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
 
     # -----------------------------------------------------------------------
-    # PITCH: offset in semitoni per voce
+    # PITCH: distribuzione pitch per voce, geometria definita da `unit`
     # -----------------------------------------------------------------------
     'pitch': {
         'step': VoiceStrategySpec(
             name='step',
             description=(
-                "Distribuisce le voci a intervalli fissi in semitoni.\n\n"
-                "La voce `i` riceve un offset di `i × step` semitoni rispetto al pitch base.\n\n"
-                "**Esempio:** `step: 3.0` con 4 voci → offset `[0, 3, 6, 9]` semitoni."
+                "Distribuisce le voci a passi fissi nell'unità attiva.\n\n"
+                "Posizione della voce `i` = `i`, ampiezza = `step`.\n\n"
+                "- **Famiglia EDO** (default `semitones`): offset additivi "
+                "`[0, step, 2·step, ...]`. Esempio: `step: 3.0` con 4 voci → "
+                "`[0, 3, 6, 9]` semitoni.\n"
+                "- **`unit: ratio`**: progressione **geometrica** `step^i`. "
+                "Esempio: `step: 2.0` con 4 voci → fattori `[1, 2, 4, 8]` "
+                "(ottave). Richiede `step > 0`."
             ),
             kwargs={
                 'step': VoiceKwargSpec(
@@ -73,34 +141,48 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
                     type='float',
                     required=True,
                     description=(
-                        "Intervallo in semitoni tra voci adiacenti.\n\n"
-                        "Può essere negativo per una progressione discendente.\n\n"
-                        "**Esempio:** `step: 3.0` → ogni voce è 3 semitoni più alta della precedente."
+                        "Passo tra voci adiacenti, espresso nell'unità attiva "
+                        "(`unit`, default semitoni).\n\n"
+                        "Con la famiglia EDO può essere negativo per una "
+                        "progressione discendente. Con `unit: ratio` deve "
+                        "essere `> 0` (con valore ≤ 0 il motore produce "
+                        "identità). Accetta scalare o envelope."
                     ),
                 ),
+                'unit': _UNIT_KWARG,
             },
         ),
 
         'range': VoiceStrategySpec(
             name='range',
             description=(
-                "Distribuisce le voci linearmente su un intervallo totale di semitoni.\n\n"
-                "Le voci sono equidistanti tra 0 e `semitone_range`.\n\n"
-                "**Formula:** `offset(v) = v × semitone_range / (num_voices − 1)`\n\n"
-                "**Esempio:** `semitone_range: 12.0` con 4 voci → offset `[0, 4, 8, 12]` semitoni."
+                "Distribuisce le voci nell'intervallo `[identità, pitch_range]`.\n\n"
+                "Posizione della voce `i` = `i / (num_voices − 1)` ∈ `[0, 1]`, "
+                "ampiezza = `pitch_range`.\n\n"
+                "- **Famiglia EDO** (default `semitones`): equidistanti. "
+                "Esempio: `pitch_range: 12.0` con 4 voci → `[0, 4, 8, 12]` "
+                "semitoni.\n"
+                "- **`unit: ratio`**: distribuzione **geometrica** "
+                "`pitch_range^posizione`. Esempio: `pitch_range: 2.0` con "
+                "4 voci → fattori `[1, 1.26, 1.59, 2]`. Richiede "
+                "`pitch_range > 0`."
             ),
             kwargs={
-                'semitone_range': VoiceKwargSpec(
-                    name='semitone_range',
+                'pitch_range': VoiceKwargSpec(
+                    name='pitch_range',
                     type='float',
                     required=True,
                     min_val=0.0,
                     description=(
-                        "Intervallo totale in semitoni distribuito linearmente su tutte le voci.\n\n"
-                        "Deve essere ≥ 0.\n\n"
-                        "**Formula:** `offset(v) = v × semitone_range / (num_voices − 1)`"
+                        "Estensione totale della distribuzione, espressa "
+                        "nell'unità attiva (`unit`, default semitoni).\n\n"
+                        "Famiglia EDO: deve essere ≥ 0. Con `unit: ratio` "
+                        "deve essere `> 0`. Accetta scalare o envelope.\n\n"
+                        "> Sostituisce la vecchia chiave `semitone_range` "
+                        "(hard break: il motore la rifiuta)."
                     ),
                 ),
+                'unit': _UNIT_KWARG,
             },
         ),
 
@@ -108,9 +190,15 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
             name='chord',
             description=(
                 "Assegna le voci agli intervalli di un accordo.\n\n"
-                "Se `num_voices > len(chord_intervals)`, le voci in eccesso ricevono "
-                "gli stessi intervalli traslati di un'ottava (12 semitoni).\n\n"
-                "**Esempio:** `chord: dom7` con 6 voci → offset `[0, 4, 7, 10, 12, 16]` semitoni."
+                "Se `num_voices > n_note`, le voci in eccesso continuano il "
+                "pattern all'ottava superiore: voce `i` → "
+                "`intervals[i % n] + (i // n) × 12`.\n\n"
+                "**Esempio:** `chord: dom7` con 6 voci → offset "
+                "`[0, 4, 7, 10, 12, 16]` semitoni.\n\n"
+                "`inversion` ruota gli intervalli (rivolti): il grado `k` "
+                "diventa la voce più bassa.\n\n"
+                "> Strategy **semitone-locked**: accetta solo "
+                "`unit: semitones` (o `unit` assente)."
             ),
             kwargs={
                 'chord': VoiceKwargSpec(
@@ -118,24 +206,24 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
                     type='enum',
                     required=True,
                     description=(
-                        "Tipo di accordo che definisce gli intervalli delle voci.\n\n"
-                        "| Valore | Intervalli (semitoni) | Nome |\n"
-                        "|--------|-----------------------|------|\n"
-                        "| `maj` | 0, 4, 7 | Maggiore |\n"
-                        "| `min` | 0, 3, 7 | Minore |\n"
-                        "| `dom7` | 0, 4, 7, 10 | Dominante settima |\n"
-                        "| `maj7` | 0, 4, 7, 11 | Maggiore settima |\n"
-                        "| `min7` | 0, 3, 7, 10 | Minore settima |\n"
-                        "| `dim` | 0, 3, 6 | Diminuito |\n"
-                        "| `aug` | 0, 4, 8 | Aumentato |\n"
-                        "| `sus2` | 0, 2, 7 | Sospeso 2ª |\n"
-                        "| `sus4` | 0, 5, 7 | Sospeso 4ª |\n"
-                        "| `dim7` | 0, 3, 6, 9 | Diminuito settima |\n"
-                        "| `minmaj7` | 0, 3, 7, 11 | Minore maggiore settima |"
+                        "Tipo di accordo che definisce gli intervalli delle "
+                        "voci.\n\n" + _chord_table()
                     ),
-                    enum_values=(
-                        'maj', 'min', 'dom7', 'maj7', 'min7',
-                        'dim', 'aug', 'sus2', 'sus4', 'dim7', 'minmaj7',
+                    enum_values=tuple(CHORD_INTERVALS.keys()),
+                ),
+                'inversion': VoiceKwargSpec(
+                    name='inversion',
+                    type='int',
+                    required=False,
+                    min_val=0.0,
+                    description=(
+                        "Rivolto dell'accordo: ruota gli intervalli in modo "
+                        "che il grado `k` diventi la voce più bassa "
+                        "(normalizzata a 0).\n\n"
+                        "- `inversion: 0` → posizione fondamentale (default)\n"
+                        "- `inversion: 1` → primo rivolto (terza al basso)\n"
+                        "- ...\n\n"
+                        "Range valido: `[0, n_note − 1]` dell'accordo scelto."
                     ),
                 ),
             },
@@ -144,22 +232,33 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
         'stochastic': VoiceStrategySpec(
             name='stochastic',
             description=(
-                "Assegna offset in semitoni casuali a ogni voce.\n\n"
-                "Gli offset sono distribuiti uniformemente in `[−semitone_range, +semitone_range]`.\n\n"
-                "**Esempio:** `semitone_range: 6.0` → ogni voce ha un offset casuale entro ±6 semitoni."
+                "Assegna a ogni voce un offset casuale fisso entro il run.\n\n"
+                "Posizione della voce = uniforme in `[−1, 1]`, ampiezza = "
+                "`pitch_range`.\n\n"
+                "- **Famiglia EDO** (default `semitones`): offset in "
+                "`[−pitch_range, +pitch_range]`. Esempio: `pitch_range: 6.0` "
+                "→ entro ±6 semitoni.\n"
+                "- **`unit: ratio`**: simmetrico **geometrico** "
+                "`pitch_range^posizione`. Esempio: `pitch_range: 2.0` → "
+                "fattori in `[0.5, 2]`. Richiede `pitch_range > 0`."
             ),
             kwargs={
-                'semitone_range': VoiceKwargSpec(
-                    name='semitone_range',
+                'pitch_range': VoiceKwargSpec(
+                    name='pitch_range',
                     type='float',
                     required=True,
                     min_val=0.0,
                     description=(
-                        "Deviazione massima in semitoni (verso l'alto o il basso).\n\n"
-                        "Gli offset sono distribuiti uniformemente in `[−range, +range]`.\n\n"
-                        "Deve essere ≥ 0."
+                        "Deviazione massima (verso l'alto o il basso), "
+                        "espressa nell'unità attiva (`unit`, default "
+                        "semitoni).\n\n"
+                        "Famiglia EDO: deve essere ≥ 0. Con `unit: ratio` "
+                        "deve essere `> 0`. Accetta scalare o envelope.\n\n"
+                        "> Sostituisce la vecchia chiave `semitone_range` "
+                        "(hard break: il motore la rifiuta)."
                     ),
                 ),
+                'unit': _UNIT_KWARG,
             },
         ),
 
@@ -169,7 +268,9 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
                 "Distribuisce le voci sui parziali della serie armonica naturale.\n\n"
                 "Voce `i` → parziale `i+1` → `round(12 × log₂(i+1))` semitoni.\n\n"
                 "Serie: `[0, 12, 19, 24, 28, 31, 34, 36, ...]` per le prime 8 voci.\n\n"
-                "**Esempio:** 4 voci → offset `[0, 12, 19, 24]` semitoni."
+                "**Esempio:** 4 voci → offset `[0, 12, 19, 24]` semitoni.\n\n"
+                "> Strategy **semitone-locked**: accetta solo "
+                "`unit: semitones` (o `unit` assente)."
             ),
             kwargs={
                 'max_partial': VoiceKwargSpec(
@@ -435,10 +536,14 @@ _VOICE_TOP_LEVEL_DOCS: Dict[str, str] = {
         "```yaml\nscatter: [[0.0, 0.0], [4.0, 0.8]]\n```"
     ),
     'pitch': (
-        "**pitch** — Strategy di offset in semitoni per voce.\n\n"
+        "**pitch** — Strategy di distribuzione pitch per voce.\n\n"
         "Dimensione opzionale. Se assente, tutte le voci usano lo stesso pitch.\n\n"
         "Strategy disponibili: `step`, `range`, `chord`, `stochastic`, `spectral`\n\n"
-        "```yaml\npitch:\n  strategy: chord\n  chord: dom7\n```"
+        "La chiave opzionale `unit` definisce la geometria della "
+        "distribuzione: `semitones` (default) | `cents` | `quarter_tone` | "
+        "`eighth_tone` | `{edo: N}` | `ratio` (geometrica). "
+        "`chord` e `spectral` accettano solo `semitones`.\n\n"
+        "```yaml\npitch:\n  strategy: range\n  pitch_range: 12.0\n  unit: semitones\n```"
     ),
     'onset_offset': (
         "**onset_offset** — Strategy di sfasamento temporale per voce.\n\n"
@@ -471,7 +576,7 @@ VOICES_BLOCK_DOC = (
     "offset indipendenti su pitch, onset, pointer e pan tramite strategy-based dispatch.\n\n"
     "Chiavi disponibili:\n"
     "- `num_voices` — numero di voci (richiesto)\n"
-    "- `pitch` — offset pitch in semitoni\n"
+    "- `pitch` — distribuzione pitch nell'unità attiva (`unit`)\n"
     "- `onset_offset` — sfasamento temporale di onset\n"
     "- `pointer` — offset di posizione di lettura\n"
     "- `pan` — posizionamento stereo\n\n"

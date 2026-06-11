@@ -83,7 +83,7 @@ def bridge():
             make_raw_spec('fill_factor', 'fill_factor', default=2,
                           exclusive_group='density_mode', group_priority=1),
             make_raw_spec('distribution', 'distribution', default=0.0),
-            make_raw_spec('volume', 'volume', default=-6.0),
+            make_raw_spec('volume', 'volume', default=0.0),
             # annidati in grain
             make_raw_spec('grain_duration', 'grain.duration', default=0.05),
             make_raw_spec('grain_envelope', 'grain.envelope',
@@ -520,7 +520,7 @@ def make_bridge_with_stream_keys():
                           exclusive_group='density_mode', group_priority=2),
             make_raw_spec('fill_factor', 'fill_factor', default=2,
                           exclusive_group='density_mode', group_priority=1),
-            make_raw_spec('volume', 'volume', default=-6.0),
+            make_raw_spec('volume', 'volume', default=0.0),
             make_raw_spec('grain_duration', 'grain.duration', default=0.05),
             make_raw_spec('grain_envelope', 'grain.envelope',
                           default='hanning', is_smart=False),
@@ -537,7 +537,7 @@ def make_bridge_with_stream_keys():
             },
             {
                 'name': 'volume_param', 'yaml_path': 'volume',
-                'default': -6.0, 'is_smart': True, 'exclusive_group': None,
+                'default': 0.0, 'is_smart': True, 'exclusive_group': None,
                 'group_priority': 99, 'range_path': None, 'dephase_key': 'volume',
             },
         ],
@@ -1214,3 +1214,242 @@ class TestVoiceStrategySnippet:
         # Il snippet deve contenere normalized con scelta true/false
         assert 'normalized' in linear_items[0].insert_text
         assert 'true' in linear_items[0].insert_text
+
+
+# =============================================================================
+# BLOCCO PITCH UNIT-DRIVEN (issue #9)
+# =============================================================================
+
+_PITCH_DOC_BASE = (
+    "streams:\n"
+    "  - stream_id: s1\n"
+    "    onset: 0.0\n"
+    "    duration: 10.0\n"
+    "    sample: f.wav\n"
+)
+
+
+class TestPitchBlockCompletions:
+    """Completion delle chiavi del blocco pitch (registry pitch_units)."""
+
+    def _ctx(self, cursor_line, current_text='', context_type='key',
+             current_key=''):
+        return make_context(
+            context_type=context_type,
+            current_text=current_text,
+            current_key=current_key,
+            parent_path=['pitch'],
+            indent_level=3,
+            leading_spaces=6,
+            cursor_line=cursor_line,
+        )
+
+    def test_blocco_vuoto_suggerisce_unita_e_range(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + "    pitch:\n      \n"
+        items = provider.get_completions(self._ctx(6), document)
+        labels = {it.label for it in items}
+        for key in ('semitones', 'cents', 'quarter_tone',
+                    'eighth_tone', 'edo', 'ratio', 'range'):
+            assert key in labels, f'{key} mancante in {labels}'
+        # value solo con edo nel blocco
+        assert 'value' not in labels
+
+    def test_edo_inserisce_coppia_con_value(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + "    pitch:\n      \n"
+        items = provider.get_completions(self._ctx(6), document)
+        edo = [it for it in items if it.label == 'edo'][0]
+        assert 'edo: ' in edo.insert_text
+        assert 'value: ' in edo.insert_text
+
+    def test_unita_presente_esclude_le_altre(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + "    pitch:\n      semitones: 3\n      \n"
+        items = provider.get_completions(self._ctx(7), document)
+        labels = {it.label for it in items}
+        for key in ('semitones', 'cents', 'quarter_tone',
+                    'eighth_tone', 'edo', 'ratio'):
+            assert key not in labels
+        assert 'range' in labels
+
+    def test_edo_presente_suggerisce_value(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + "    pitch:\n      edo: 31\n      \n"
+        items = provider.get_completions(self._ctx(7), document)
+        labels = {it.label for it in items}
+        assert 'value' in labels
+        value_item = [it for it in items if it.label == 'value'][0]
+        assert '93' in value_item.detail  # bounds dinamici ±3·31
+
+    def test_prefisso_filtra_le_unita(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + "    pitch:\n      qu\n"
+        items = provider.get_completions(
+            self._ctx(6, current_text='qu'), document
+        )
+        labels = {it.label for it in items}
+        assert labels == {'quarter_tone'}
+
+    def test_value_context_semitones_da_envelope_con_bounds_unita(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + "    pitch:\n      semitones: \n"
+        ctx = self._ctx(6, context_type='value', current_key='semitones')
+        items = provider.get_completions(ctx, document)
+        assert len(items) > 0
+        joined = ' '.join(it.insert_text or '' for it in items)
+        assert '-36' in joined  # y_min dell'unità semitones
+
+    def test_value_context_edo_nessun_envelope(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + "    pitch:\n      edo: \n"
+        ctx = self._ctx(6, context_type='value', current_key='edo')
+        assert provider.get_completions(ctx, document) == []
+
+    def test_value_context_value_usa_bounds_da_edo(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + (
+            "    pitch:\n      edo: 31\n      value: \n"
+        )
+        ctx = self._ctx(7, context_type='value', current_key='value')
+        items = provider.get_completions(ctx, document)
+        assert len(items) > 0
+        joined = ' '.join(it.insert_text or '' for it in items)
+        assert '-93' in joined
+
+    def test_value_context_range_con_ratio(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + (
+            "    pitch:\n      ratio: 1.5\n      range: \n"
+        )
+        ctx = self._ctx(7, context_type='value', current_key='range')
+        items = provider.get_completions(ctx, document)
+        assert len(items) > 0
+        joined = ' '.join(it.insert_text or '' for it in items)
+        assert '2' in joined  # max_range dell'unità ratio
+
+    def test_stream_level_offre_blocco_pitch(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = _PITCH_DOC_BASE + "    \n"
+        ctx = make_context(
+            context_type='key', current_text='',
+            parent_path=[], indent_level=2,
+            in_stream_element=True, leading_spaces=4, cursor_line=5,
+        )
+        items = provider.get_completions(ctx, document)
+        pitch_items = [it for it in items if it.label == 'pitch']
+        assert len(pitch_items) == 1
+        doc_value = pitch_items[0].documentation.value
+        assert 'unit-driven' in doc_value or 'chiave-unit' in doc_value.lower()
+
+
+class TestVoicePitchUnitCompletions:
+    """Completion di `unit` e dei suoi valori in voices.pitch (issue #9/#10)."""
+
+    def _voices_doc(self, body):
+        return _PITCH_DOC_BASE + "    voices:\n      num_voices: 4\n" + body
+
+    def test_kwargs_di_step_includono_unit(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = self._voices_doc(
+            "      pitch:\n        strategy: step\n        \n"
+        )
+        ctx = make_context(
+            context_type='key', current_text='',
+            parent_path=['voices', 'pitch'], indent_level=4,
+            leading_spaces=8, cursor_line=8,
+        )
+        items = provider.get_completions(ctx, document)
+        labels = {it.label for it in items}
+        assert 'unit' in labels
+        assert 'step' in labels
+
+    def test_kwargs_di_range_usano_pitch_range(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = self._voices_doc(
+            "      pitch:\n        strategy: range\n        \n"
+        )
+        ctx = make_context(
+            context_type='key', current_text='',
+            parent_path=['voices', 'pitch'], indent_level=4,
+            leading_spaces=8, cursor_line=8,
+        )
+        items = provider.get_completions(ctx, document)
+        labels = {it.label for it in items}
+        assert 'pitch_range' in labels
+        assert 'semitone_range' not in labels
+
+    def test_kwargs_di_chord_senza_unit_ma_con_inversion(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = self._voices_doc(
+            "      pitch:\n        strategy: chord\n        \n"
+        )
+        ctx = make_context(
+            context_type='key', current_text='',
+            parent_path=['voices', 'pitch'], indent_level=4,
+            leading_spaces=8, cursor_line=8,
+        )
+        items = provider.get_completions(ctx, document)
+        labels = {it.label for it in items}
+        assert 'unit' not in labels      # semitone-locked
+        assert 'inversion' in labels
+
+    def test_valori_unit_block_style(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = self._voices_doc(
+            "      pitch:\n        strategy: step\n        unit: \n"
+        )
+        ctx = make_context(
+            context_type='value', current_text='', current_key='unit',
+            parent_path=['voices', 'pitch'], indent_level=4,
+            leading_spaces=8, cursor_line=8,
+        )
+        items = provider.get_completions(ctx, document)
+        labels = {it.label for it in items}
+        for nome in ('semitones', 'cents', 'quarter_tone',
+                     'eighth_tone', 'ratio'):
+            assert nome in labels
+        assert '{edo: N}' in labels
+
+    def test_valori_unit_filtrati_dal_prefisso(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = self._voices_doc(
+            "      pitch:\n        strategy: step\n        unit: ce\n"
+        )
+        ctx = make_context(
+            context_type='value', current_text='ce', current_key='unit',
+            parent_path=['voices', 'pitch'], indent_level=4,
+            leading_spaces=8, cursor_line=8,
+        )
+        items = provider.get_completions(ctx, document)
+        labels = {it.label for it in items}
+        assert 'cents' in labels
+        assert 'semitones' not in labels
+
+    def test_valori_unit_inline_dict(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = self._voices_doc(
+            "      pitch: {strategy: step, step: 3.0, unit: \n"
+        )
+        ctx = make_context(
+            context_type='value', current_text='', current_key='pitch',
+            parent_path=['voices'], indent_level=3,
+            leading_spaces=6, cursor_line=7,
+        )
+        items = provider.get_completions(ctx, document)
+        labels = {it.label for it in items}
+        assert 'ratio' in labels
+        assert '{edo: N}' in labels
+
+    def test_inline_snippet_step_include_unit_choices(self, bridge):
+        provider = CompletionProvider(bridge)
+        document = self._voices_doc("      pitch: {strategy: \n")
+        ctx = make_context(
+            context_type='value', current_text='', current_key='pitch',
+            parent_path=['voices'], indent_level=3,
+            leading_spaces=6, cursor_line=7,
+        )
+        items = provider.get_completions(ctx, document)
+        step_item = [it for it in items if it.label == 'step'][0]
+        assert 'unit:' in step_item.insert_text
+        assert 'semitones' in step_item.insert_text

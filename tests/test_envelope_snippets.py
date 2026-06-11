@@ -56,7 +56,7 @@ def bridge():
     raw = {
         'specs': [
             make_raw_spec('density', 'density', default=None),
-            make_raw_spec('volume', 'volume', default=-6.0),
+            make_raw_spec('volume', 'volume', default=0.0),
             make_raw_spec('grain_duration', 'grain.duration', default=0.05),
             make_raw_spec('grain_envelope', 'grain.envelope',
                           default='hanning', is_smart=False),
@@ -474,7 +474,7 @@ class TestGetSnippetsWithBounds:
                 {'name':'pan','yaml_path':'pan','default':0.0,'is_smart':True,
                  'exclusive_group':None,'group_priority':99,
                  'range_path':None,'dephase_key':'pan'},
-                {'name':'volume','yaml_path':'volume','default':-6.0,'is_smart':True,
+                {'name':'volume','yaml_path':'volume','default':0.0,'is_smart':True,
                  'exclusive_group':None,'group_priority':99,
                  'range_path':None,'dephase_key':'volume'},
             ],

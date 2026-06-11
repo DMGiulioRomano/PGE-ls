@@ -76,6 +76,17 @@ from granular_ls.voice_strategies import (
     find_kwarg_in_dimension,
     get_top_level_doc,
 )
+from granular_ls.pitch_units import (
+    PITCH_UNIT_KEYS,
+    PITCH_UNIT_PRESETS,
+    VOICE_PITCH_UNIT_VALUES,
+    PITCH_KEY_DOCS,
+    PITCH_BLOCK_DOC,
+    VOICE_UNIT_VALUE_DOCS,
+    get_unit_info,
+    get_pitch_block_entries,
+    parse_edo_divisions,
+)
 
 def _build_gui_editor_item(context) -> CompletionItem:
     """
@@ -252,6 +263,13 @@ class CompletionProvider:
                     return self._get_voice_strategy_inline_completions(
                         m.group(1), m.group(2)
                     )
+                # Valore di 'unit' dentro l'inline dict di voices.pitch:
+                # 'pitch: {strategy: step, ..., unit: <prefix>'
+                m = re.match(
+                    r'^\s*pitch\s*:\s*\{.*\bunit:\s*(\w*)$', cur_line
+                )
+                if m and context.current_key == 'pitch':
+                    return self._get_pitch_unit_value_completions(m.group(1))
 
         # Contesto 'value' su num_voices o scatter dentro voices: (envelope-capable)
         if (context.context_type == 'value'
@@ -288,6 +306,12 @@ class CompletionProvider:
                 and context.parent_path == ['grain']):
             return self._get_grain_envelope_completions(context)
 
+        # Contesto 'value' dentro il blocco pitch: il blocco e' unit-driven
+        # (nessun ParameterSpec nel bridge), bounds dalle PitchUnitInfo.
+        if (context.context_type == 'value'
+                and context.parent_path == ['pitch']):
+            return self._get_pitch_value_completions(context, document_text)
+
         # Contesto 'value': suggerisce snippet envelope se il parametro
         # e' numerico (is_smart=True, non-interno).
         # DEVE stare prima del gate root level altrimenti viene bloccato
@@ -313,7 +337,12 @@ class CompletionProvider:
         if context.parent_path and context.parent_path[0] == 'voices':
             return self._get_voice_completions(context, document_text)
 
-        # DENTRO UN BLOCCO (grain, pointer, pitch, ...)
+        # DENTRO IL BLOCCO PITCH: superficie unit-driven, gestita dal
+        # registry pitch_units (il bridge non ha piu' spec per il pitch).
+        if context.parent_path == ['pitch']:
+            return self._get_pitch_block_completions(context, document_text)
+
+        # DENTRO UN BLOCCO (grain, pointer, ...)
         if context.parent_path:
             # Verifica che il blocco abbia effettivamente parametri nel bridge.
             # Se non ne ha (es. mute:, solo: trattati come blocchi dall'analizzatore
@@ -470,6 +499,10 @@ class CompletionProvider:
             block_keys.append('dephase')
         if 'voices' not in block_keys:
             block_keys.append('voices')
+        # 'pitch' e' unit-driven: nessun ParameterSpec nel bridge, quindi
+        # get_block_keys() non lo deriva. Aggiunto qui come voices/dephase.
+        if 'pitch' not in block_keys:
+            block_keys.append('pitch')
 
         inserted_labels = {item.label for item in items}
 
@@ -482,6 +515,8 @@ class CompletionProvider:
                 continue
             if key == 'voices':
                 block_doc = VOICES_BLOCK_DOC
+            elif key == 'pitch':
+                block_doc = PITCH_BLOCK_DOC
             else:
                 block_doc = f'**{key}**\n\nBlocco di parametri annidati.'
             items.append(CompletionItem(
@@ -705,6 +740,223 @@ class CompletionProvider:
                     value=f'**{key}**\n\nControllo dephase per `{key}`.',
                 ),
                 command=TRIGGER_SUGGEST,
+            ))
+        return items
+
+    # -------------------------------------------------------------------------
+    # DENTRO IL BLOCCO PITCH (superficie unit-driven, registry pitch_units)
+    # -------------------------------------------------------------------------
+
+    def _get_pitch_block_entries(self, document_text: str,
+                                  context: YamlContext) -> dict:
+        """Chiavi e valori del blocco pitch: dello stream corrente."""
+        return get_pitch_block_entries(document_text, context.cursor_line)
+
+    def _get_pitch_block_completions(self, context: YamlContext,
+                                      document_text: str) -> List[CompletionItem]:
+        """
+        Chiavi del blocco pitch: una sola chiave-unità per blocco.
+
+        - Nessuna unità presente: suggerisce le 6 chiavi-unità (edo come
+          coppia 'edo: N + value: X') e 'range'.
+        - Unità già presente: niente altre unità; con 'edo' senza 'value'
+          suggerisce 'value'.
+        """
+        entries = self._get_pitch_block_entries(document_text, context)
+        present = set(entries)
+        text_prefix = context.current_text.lower()
+        present_units = [k for k in PITCH_UNIT_KEYS if k in present]
+        items: List[CompletionItem] = []
+
+        def _matches(key: str) -> bool:
+            return not text_prefix or key.startswith(text_prefix)
+
+        if not present_units:
+            for key in PITCH_UNIT_KEYS:
+                if not _matches(key):
+                    continue
+                if key == 'edo':
+                    items.append(self._build_pitch_edo_item(present))
+                else:
+                    items.append(self._build_pitch_unit_key_item(key))
+        elif ('edo' in present_units and 'value' not in present
+                and _matches('value')):
+            divisions = parse_edo_divisions(entries.get('edo', ''))
+            items.append(self._build_pitch_value_item(divisions))
+
+        if 'range' not in present and _matches('range'):
+            items.append(self._build_pitch_range_item(entries, present_units))
+
+        return items
+
+    def _build_pitch_unit_key_item(self, key: str) -> CompletionItem:
+        """Item per una chiave-unità preset (semitones, cents, ..., ratio)."""
+        info = PITCH_UNIT_PRESETS[key]
+        return CompletionItem(
+            label=key,
+            insert_text=key + ': ',
+            kind=CompletionItemKind.Field,
+            detail=f'[{info.min_val:g}, {info.max_val:g}] {info.symbol}',
+            documentation=MarkupContent(
+                kind=MarkupKind.Markdown,
+                value=PITCH_KEY_DOCS[key],
+            ),
+            command=TRIGGER_SUGGEST,
+        )
+
+    def _build_pitch_edo_item(self, present: set) -> CompletionItem:
+        """
+        Item per 'edo'. Se 'value' non e' ancora nel blocco inserisce la
+        coppia 'edo: N' + 'value: X' (la grammatica appiattita le richiede
+        entrambe); altrimenti solo 'edo: '.
+        """
+        if 'value' in present:
+            insert_text = 'edo: '
+            insert_format = InsertTextFormat.PlainText
+            detail = 'divisioni/ottava (int > 0)'
+        else:
+            insert_text = 'edo: ${1:31}\nvalue: ${2:0}'
+            insert_format = InsertTextFormat.Snippet
+            detail = 'edo: N + value: X'
+        return CompletionItem(
+            label='edo',
+            insert_text=insert_text,
+            insert_text_format=insert_format,
+            kind=CompletionItemKind.Field,
+            detail=detail,
+            documentation=MarkupContent(
+                kind=MarkupKind.Markdown,
+                value=PITCH_KEY_DOCS['edo'],
+            ),
+        )
+
+    def _build_pitch_value_item(self,
+                                 divisions: Optional[int]) -> CompletionItem:
+        """Item per 'value' (solo con edo: N nel blocco)."""
+        if divisions:
+            lo, hi = -3.0 * divisions, 3.0 * divisions
+            detail = f'[{lo:g}, {hi:g}] gradi di {divisions}-EDO'
+        else:
+            detail = '[-3·N, 3·N] gradi della griglia EDO'
+        return CompletionItem(
+            label='value',
+            insert_text='value: ',
+            kind=CompletionItemKind.Field,
+            detail=detail,
+            documentation=MarkupContent(
+                kind=MarkupKind.Markdown,
+                value=PITCH_KEY_DOCS['value'],
+            ),
+            command=TRIGGER_SUGGEST,
+        )
+
+    def _build_pitch_range_item(self, entries: dict,
+                                 present_units: List[str]) -> CompletionItem:
+        """Item per 'range': bounds dipendenti dall'unità attiva."""
+        max_range = 36.0  # default: semitones (3 · 12)
+        if present_units:
+            unit_key = present_units[0]
+            divisions = (parse_edo_divisions(entries.get('edo', ''))
+                         if unit_key == 'edo' else None)
+            info = get_unit_info(unit_key, divisions)
+            if info is not None:
+                max_range = info.max_range
+        return CompletionItem(
+            label='range',
+            insert_text='range: ',
+            kind=CompletionItemKind.Field,
+            detail=f'[0, {max_range:g}] nell\'unità attiva',
+            documentation=MarkupContent(
+                kind=MarkupKind.Markdown,
+                value=PITCH_KEY_DOCS['range'],
+            ),
+            command=TRIGGER_SUGGEST,
+        )
+
+    def _get_pitch_value_completions(self, context: YamlContext,
+                                      document_text: str) -> List[CompletionItem]:
+        """
+        Snippet envelope per i valori del blocco pitch.
+
+        Bounds derivati dall'unità (PitchUnitInfo), non dal bridge:
+        - chiave-unità preset: bounds dell'unità
+        - 'value': ±3·N dalla chiave 'edo' del blocco
+        - 'range': [0, max_range] dell'unità attiva
+        - 'edo': nessun envelope (intero scalare)
+        """
+        key = context.current_key
+        if not key or key == 'edo':
+            return []
+
+        entries = self._get_pitch_block_entries(document_text, context)
+
+        if key in PITCH_UNIT_PRESETS:
+            info = PITCH_UNIT_PRESETS[key]
+            y_min, y_max = info.min_val, info.max_val
+        elif key == 'value':
+            divisions = parse_edo_divisions(entries.get('edo', ''))
+            if divisions is None:
+                return []
+            y_min, y_max = -3.0 * divisions, 3.0 * divisions
+        elif key == 'range':
+            y_min, y_max = 0.0, 36.0  # default: semitones
+            present_units = [k for k in PITCH_UNIT_KEYS if k in entries]
+            if present_units:
+                unit_key = present_units[0]
+                divisions = (parse_edo_divisions(entries.get('edo', ''))
+                             if unit_key == 'edo' else None)
+                info = get_unit_info(unit_key, divisions)
+                if info is not None:
+                    y_min, y_max = 0.0, info.max_range
+        else:
+            return []
+
+        end_time = self._get_end_time_from_context(context, document_text)
+        return self._envelope_provider.get_snippets_with_bounds_and_end_time(
+            y_min=y_min, y_max=y_max, end_time=end_time,
+        ) + [_build_n_points_item(context), _build_gui_editor_item(context)]
+
+    def _get_pitch_unit_value_completions(self,
+                                           prefix: str) -> List[CompletionItem]:
+        """
+        Valori per voices.pitch.unit: i 5 preset + la forma '{edo: N}'.
+        """
+        prefix = (prefix or '').lower().strip().strip('"\'')
+        items: List[CompletionItem] = []
+        for name in VOICE_PITCH_UNIT_VALUES:
+            if prefix and not name.startswith(prefix):
+                continue
+            info = PITCH_UNIT_PRESETS[name]
+            if info.divisions is not None:
+                detail = f'{info.divisions}-EDO ({info.symbol})'
+            else:
+                detail = 'moltiplicatore (geometrica)'
+            doc = VOICE_UNIT_VALUE_DOCS[name]
+            items.append(CompletionItem(
+                label=name,
+                insert_text=name,
+                kind=CompletionItemKind.EnumMember,
+                detail=detail,
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown, value=doc,
+                ),
+            ))
+        if not prefix or 'edo'.startswith(prefix) or prefix.startswith('{'):
+            items.append(CompletionItem(
+                label='{edo: N}',
+                insert_text='{edo: ${1:24}}',
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.Snippet,
+                detail='griglia EDO arbitraria',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=(
+                        '**{edo: N}** — famiglia EDO con N divisioni/ottava '
+                        '(intero > 0).\n\nEs. `unit: {edo: 24}` equivale a '
+                        'quarti di tono.'
+                    ),
+                ),
+                filter_text='edo',
             ))
         return items
 
@@ -1204,6 +1456,11 @@ class CompletionProvider:
                     placeholder = f'${{{tab_idx}|{choices}|}}'
                 elif kwarg_spec.type == 'bool':
                     placeholder = f'${{{tab_idx}|true,false|}}'
+                elif kwarg_spec.type == 'pitch_unit':
+                    # la forma {edo: N} non puo' stare in un choice placeholder
+                    # (le scelte sono separate da virgole): solo i preset.
+                    choices = ','.join(VOICE_PITCH_UNIT_VALUES)
+                    placeholder = f'${{{tab_idx}|{choices}|}}'
                 else:
                     placeholder = f'${{{tab_idx}:0}}'
                 kwargs_parts.append(f'{kwarg_name}: {placeholder}')
@@ -1268,7 +1525,12 @@ class CompletionProvider:
             return None
         dim = context.parent_path[1]
         kwarg_spec = find_kwarg_in_dimension(dim, context.current_key)
-        if kwarg_spec is None or kwarg_spec.type != 'enum':
+        if kwarg_spec is None:
+            return None
+        # unit di voices.pitch: preset + forma {edo: N}, non un enum puro
+        if kwarg_spec.type == 'pitch_unit':
+            return self._get_pitch_unit_value_completions(context.current_text)
+        if kwarg_spec.type != 'enum':
             return None
         if kwarg_spec.enum_values is None:
             return None
@@ -1300,7 +1562,11 @@ class CompletionProvider:
             detail = ' | '.join(kwarg_spec.enum_values[:5])
             if len(kwarg_spec.enum_values) > 5:
                 detail += ' …'
-        trigger = TRIGGER_SUGGEST if kwarg_spec.type == 'enum' else None
+        if kwarg_spec.type == 'pitch_unit':
+            detail = ' | '.join(VOICE_PITCH_UNIT_VALUES[:3]) + ' | … | {edo: N}'
+        # enum e pitch_unit aprono il menu dei valori dopo l'inserimento
+        trigger = (TRIGGER_SUGGEST
+                   if kwarg_spec.type in ('enum', 'pitch_unit') else None)
         return CompletionItem(
             label=kwarg_spec.name,
             insert_text=kwarg_spec.name + ': ',
