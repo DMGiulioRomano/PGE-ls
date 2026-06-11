@@ -300,6 +300,11 @@ class SchemaBridge:
         Ritorna le chiavi valide del blocco dephase:, derivate dai
         valori unici di dephase_key negli ParameterSpec degli schema.
         Non hardcoded: si aggiorna automaticamente con nuovi parametri.
+
+        Eccezione: 'pitch'. Dal refactor unit-driven di PGE il pitch non ha
+        piu' ParameterSpec (PITCH_PARAMETER_SCHEMA vuoto), ma il motore
+        continua a supportare dephase sul pitch (PitchController passa
+        dephase_key='pitch'). Viene garantito qui se lo schema e' popolato.
         """
         seen = set()
         keys = []
@@ -308,6 +313,8 @@ class SchemaBridge:
             if dk and dk not in seen:
                 seen.add(dk)
                 keys.append(dk)
+        if keys and 'pitch' not in seen:
+            keys.append('pitch')
         return keys
 
     def get_distribution_modes(self) -> List[str]:

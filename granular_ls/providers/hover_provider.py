@@ -26,6 +26,18 @@ from typing import Optional, Tuple
 
 from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
+from granular_ls.pitch_units import (
+    PITCH_BLOCK_KEYS,
+    PITCH_UNIT_KEYS,
+    PITCH_KEY_DOCS,
+    PITCH_BLOCK_DOC,
+    VOICE_PITCH_UNIT_VALUES,
+    VOICE_UNIT_VALUE_DOCS,
+    get_unit_info,
+    get_pitch_block_entries,
+    parse_edo_divisions,
+)
+
 # Documentazione statica per le stream context keys e le dephase keys.
 # Importata anche dal CompletionProvider per coerenza.
 _STREAM_CONTEXT_DOCS = {
@@ -93,15 +105,8 @@ _BLOCK_KEY_DOCS = {
         "> Tutti i parametri accettano envelope `[[t, v], ...]` tranne\n"
         "> `loop_unit` (meta-parametro) e `start` (valore raw)."
     ),
-    'pitch': (
-        "**pitch** — Intonazione dei grani\n\n"
-        "Controlla l'altezza percepita dei grani sintetizzati.\n\n"
-        "**Parametri (mutuamente esclusivi):**\n"
-        "- `ratio` — Rapporto di pitch (1.0 = originale, 2.0 = ottava sopra)\n"
-        "- `semitones` — Trasposizione in semitoni\n\n"
-        "**Variazione stocastica:**\n"
-        "- `range` — Ampiezza della deviazione casuale (condivisa tra `ratio` e `semitones`)"
-    ),
+    # Superficie unit-driven: la doc vive nel registry pitch_units.
+    'pitch': PITCH_BLOCK_DOC,
     'grain': (
         "**grain** — Parametri dei grani\n\n"
         "Controlla le caratteristiche dei singoli grani audio generati.\n\n"
@@ -392,6 +397,13 @@ class HoverProvider:
             if grain_hover is not None:
                 return grain_hover
 
+        # Contesto pitch: superficie unit-driven, doc dal registry
+        # pitch_units (il bridge non ha piu' spec per il blocco pitch).
+        if context.parent_path == ['pitch']:
+            return self._build_pitch_key_hover(
+                context.current_text, document_text, context.cursor_line
+            )
+
         # Usa la parola COMPLETA alla posizione cursore, non solo il prefisso.
         # Necessario perche' YamlAnalyzer taglia a line_up_to_cursor,
         # quindi se il cursore e' a meta' di 'density' current_text='den'.
@@ -507,6 +519,51 @@ class HoverProvider:
             )
         )
 
+    def _build_pitch_key_hover(self, word: str, document_text: str,
+                                cursor_line: int) -> 'Optional[Hover]':
+        """
+        Hover per una chiave del blocco pitch (unit-driven).
+
+        Per 'value' e 'range' i bounds dipendono dal blocco corrente
+        (edo: N / unità attiva): viene aggiunta una nota dinamica.
+        Chiavi fuori da PITCH_BLOCK_KEYS: None (il blocco e' strict).
+        """
+        if word not in PITCH_BLOCK_KEYS:
+            return None
+        doc = PITCH_KEY_DOCS[word]
+
+        if word in ('value', 'range'):
+            entries = get_pitch_block_entries(document_text, cursor_line)
+            note = self._pitch_dynamic_bounds_note(word, entries)
+            if note:
+                doc = doc + note
+
+        return Hover(
+            contents=MarkupContent(kind=MarkupKind.Markdown, value=doc)
+        )
+
+    @staticmethod
+    def _pitch_dynamic_bounds_note(word: str, entries: dict) -> str:
+        """Nota Markdown con i bounds effettivi di value/range nel blocco."""
+        present_units = [k for k in PITCH_UNIT_KEYS if k in entries]
+        unit_key = present_units[0] if present_units else 'semitones'
+        divisions = (parse_edo_divisions(entries.get('edo', ''))
+                     if unit_key == 'edo' else None)
+        info = get_unit_info(unit_key, divisions)
+        if info is None:
+            return ''
+        if word == 'value':
+            if unit_key != 'edo':
+                return ''
+            return (
+                f"\n\n---\n**Blocco corrente:** `edo: {info.divisions}` → "
+                f"bounds `[{info.min_val:g}, {info.max_val:g}]`."
+            )
+        return (
+            f"\n\n---\n**Unità attiva:** `{unit_key}` → "
+            f"bounds `[0, {info.max_range:g}]`."
+        )
+
     def _build_grain_envelope_hover(self, word: str) -> 'Optional[Hover]':
         """
         Hover per grain.envelope: chiave o nome di finestratura.
@@ -601,6 +658,12 @@ class HoverProvider:
             # Nome di strategy valido
             if word in get_strategies_for_dimension(dim):
                 return self._build_voice_strategy_value_hover(dim, word)
+            # Valore di 'unit' in voices.pitch (es. cursore su 'cents')
+            if dim == 'pitch' and word in VOICE_PITCH_UNIT_VALUES:
+                return Hover(contents=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=VOICE_UNIT_VALUE_DOCS[word],
+                ))
             # Kwarg di una strategy
             return self._build_voice_kwarg_hover(dim, word)
 
@@ -710,6 +773,12 @@ class HoverProvider:
         valid_strategies = get_strategies_for_dimension(dim)
         if word in valid_strategies:
             return self._build_voice_strategy_value_hover(dim, word)
+        # Parola è un valore di 'unit' in voices.pitch
+        if dim == 'pitch' and word in VOICE_PITCH_UNIT_VALUES:
+            return Hover(contents=MarkupContent(
+                kind=MarkupKind.Markdown,
+                value=VOICE_UNIT_VALUE_DOCS[word],
+            ))
         # Parola è un kwarg
         return self._build_voice_kwarg_hover(dim, word)
 

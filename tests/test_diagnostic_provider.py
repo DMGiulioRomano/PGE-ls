@@ -87,7 +87,7 @@ def bridge():
             make_raw_spec('fill_factor', 'fill_factor', default=2,
                           exclusive_group='density_mode', group_priority=1),
             make_raw_spec('distribution', 'distribution', default=0.0),
-            make_raw_spec('volume', 'volume', default=-6.0),
+            make_raw_spec('volume', 'volume', default=0.0),
             make_raw_spec('grain_duration', 'grain.duration', default=0.05),
             make_raw_spec('pitch_semitones', 'pitch.semitones', default=None,
                           exclusive_group='pitch_mode', group_priority=1),
@@ -220,13 +220,22 @@ class TestGetDiagnosticsExclusiveGroup:
         messages = ' '.join(d.message for d in warnings)
         assert 'fill_factor' in messages or 'density' in messages
 
-    def test_pitch_semitones_e_ratio_insieme_produce_warning(self, bridge):
+    def test_pitch_semitones_e_ratio_insieme_produce_error(self, bridge):
+        # Superficie unit-driven: piu' chiavi-unità nello stesso blocco
+        # pitch e' un Error del motore (non piu' Warning da pitch_mode).
         provider = DiagnosticProvider(bridge)
-        yaml = "pitch:\n  semitones: 12\n  ratio: 2.0\n"
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    pitch:\n"
+            "      semitones: 12\n"
+            "      ratio: 2.0\n"
+        )
         result = provider.get_diagnostics(yaml)
-        warnings = [d for d in result
-                    if d.severity == DiagnosticSeverity.Warning]
-        assert len(warnings) >= 1
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'sola unit' in d.message.lower()]
+        assert len(errors) == 2  # uno per ciascuna chiave-unità
 
     def test_un_solo_membro_del_gruppo_nessun_warning(self, bridge):
         provider = DiagnosticProvider(bridge)
@@ -1410,3 +1419,455 @@ class TestCheckMissingValues:
         result = provider.get_diagnostics(yaml)
         normalized_warnings = [d for d in result if 'normalized' in d.message]
         assert normalized_warnings == []
+
+
+# =============================================================================
+# BLOCCO PITCH UNIT-DRIVEN (issue #9) - validazione strict
+# =============================================================================
+
+def _stream_yaml(body: str) -> str:
+    """Costruisce uno stream completo con il corpo indicato (indent 4)."""
+    return (
+        "streams:\n"
+        "  - stream_id: s1\n"
+        "    onset: 0.0\n"
+        "    duration: 10.0\n"
+        "    sample: f.wav\n"
+        + body
+    )
+
+
+def _pitch_errors(result):
+    return [d for d in result
+            if d.severity == DiagnosticSeverity.Error
+            and 'pitch' in d.message.lower()]
+
+
+class TestPitchBlockStrict:
+    """Validazione strict del blocco pitch (speculare a _select_unit di PGE)."""
+
+    def test_blocco_valido_semitones_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      semitones: 12\n")
+        assert _pitch_errors(provider.get_diagnostics(yaml)) == []
+
+    def test_pitch_vuoto_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert len(errors) == 1
+        assert 'ometti' in errors[0].message
+
+    def test_pitch_scalare_non_mapping_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch: 3.0\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert len(errors) == 1
+        assert 'mapping' in errors[0].message
+
+    def test_pitch_lista_non_mapping_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch: [[0, -12], [10, 12]]\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert len(errors) == 1
+
+    def test_pitch_mapping_vuoto_valido(self, bridge):
+        # pitch: {} -> default semitoni neutro, indistinguibile da assente
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch: {}\n")
+        assert _pitch_errors(provider.get_diagnostics(yaml)) == []
+
+    def test_chiave_sconosciuta_produce_errore(self, bridge):
+        # refuso tipico: semitone invece di semitones
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      semitone: 12\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('sconosciuta' in e.message.lower() for e in errors)
+        assert any('semitone' in e.message for e in errors)
+
+    def test_chiave_sconosciuta_inline_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch: {semitone: 12}\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('sconosciuta' in e.message.lower() for e in errors)
+
+    def test_value_senza_edo_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      semitones: 3\n      value: 5\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('solo con `edo' in e.message for e in errors)
+
+    def test_solo_range_senza_unita_valido(self, bridge):
+        # 0 chiavi-unità + modificatore: default semitoni, valido
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      range: 6\n")
+        assert _pitch_errors(provider.get_diagnostics(yaml)) == []
+
+
+class TestPitchBlockEdo:
+    """Grammatica appiattita: edo: N + value: X a fianco."""
+
+    def test_edo_valido_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      edo: 31\n      value: 18\n")
+        assert _pitch_errors(provider.get_diagnostics(yaml)) == []
+
+    def test_forma_annidata_inline_hard_break(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    pitch:\n      edo: {divisions: 31, value: 18}\n"
+        )
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('annidata' in e.message for e in errors)
+
+    def test_forma_annidata_block_style_hard_break(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    pitch:\n      edo:\n        divisions: 31\n        value: 18\n"
+        )
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('annidata' in e.message for e in errors)
+
+    def test_edo_non_intero_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      edo: 2.5\n      value: 1\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('intero > 0' in e.message for e in errors)
+
+    def test_edo_zero_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      edo: 0\n      value: 1\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('intero > 0' in e.message for e in errors)
+
+    def test_edo_senza_value_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      edo: 31\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('serve `value' in e.message for e in errors)
+
+    def test_value_fuori_bounds_dinamici(self, bridge):
+        # edo: 31 -> bounds ±93
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      edo: 31\n      value: 94\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('fuori range' in e.message
+                   and '93' in e.message for e in errors)
+
+    def test_value_envelope_dentro_bounds(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    pitch:\n      edo: 31\n      value: [[0, -93], [10, 93]]\n"
+        )
+        assert _pitch_errors(provider.get_diagnostics(yaml)) == []
+
+
+class TestPitchBlockBounds:
+    """Bounds per-unità: scalari ed envelope."""
+
+    @pytest.mark.parametrize('chiave, valore, limite', [
+        ('semitones', '37', '36'),
+        ('semitones', '-37', '36'),
+        ('cents', '3700', '3600'),
+        ('quarter_tone', '73', '72'),
+        ('eighth_tone', '-145', '144'),
+        ('ratio', '9', '8'),
+        ('ratio', '0.05', '0.125'),
+    ])
+    def test_scalare_fuori_bounds(self, bridge, chiave, valore, limite):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    pitch:\n      {chiave}: {valore}\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('fuori range' in e.message and limite in e.message
+                   for e in errors), errors
+
+    @pytest.mark.parametrize('chiave, valore', [
+        ('semitones', '36'),
+        ('semitones', '-36'),
+        ('cents', '50'),
+        ('ratio', '1.5'),
+    ])
+    def test_scalare_dentro_bounds(self, bridge, chiave, valore):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    pitch:\n      {chiave}: {valore}\n")
+        assert _pitch_errors(provider.get_diagnostics(yaml)) == []
+
+    def test_envelope_inline_y_fuori_bounds(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    pitch:\n      semitones: [[0, -50], [10, 50]]\n"
+        )
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert len(errors) == 2  # entrambi gli Y fuori da [-36, 36]
+
+    def test_envelope_block_style_y_fuori_bounds(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    pitch:\n"
+            "      semitones:\n"
+            "        - [0, -50]\n"
+            "        - [10, 12]\n"
+        )
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert len(errors) == 1
+        assert '-50' in errors[0].message
+
+    def test_envelope_compact_y_fuori_bounds(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    pitch:\n      semitones: [[[0, 0], [50, -48], [100, 0]], 10, 3]\n"
+        )
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('-48' in e.message for e in errors)
+
+    def test_unita_senza_valore_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      semitones:\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('richiede un valore' in e.message for e in errors)
+
+    def test_range_con_ratio_fuori_bounds(self, bridge):
+        # max_range dell'unità ratio: 2.0
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      ratio: 1.5\n      range: 3\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('pitch.range' in e.message for e in errors)
+
+    def test_range_default_semitoni(self, bridge):
+        # senza unità: default semitones, max_range 36
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      range: 40\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('pitch.range' in e.message and '36' in e.message
+                   for e in errors)
+
+    def test_legacy_snapshot_pitch_spec_ignorate(self, bridge):
+        # il bridge fixture ha ancora pitch_semitones [-48, 48] (snapshot
+        # legacy): i bounds validi sono quelli dell'unità ([-36, 36])
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    pitch:\n      semitones: 40\n")
+        errors = _pitch_errors(provider.get_diagnostics(yaml))
+        assert any('36' in e.message for e in errors)
+
+
+# =============================================================================
+# VOICES.PITCH UNIT-AWARE (issue #10)
+# =============================================================================
+
+def _voices_yaml(body: str) -> str:
+    return _stream_yaml(
+        "    voices:\n      num_voices: 4\n      pitch:\n" + body
+    )
+
+
+class TestVoicePitchUnit:
+    """Validazione di voices.pitch: unit, lock semitoni, pitch_range."""
+
+    def test_semitone_range_produce_errore_rename(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: range\n        semitone_range: 12\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'pitch_range' in d.message]
+        assert len(errors) == 1
+        # nessun warning ridondante 'richiede il kwarg pitch_range'
+        warnings = [d for d in result
+                    if d.severity == DiagnosticSeverity.Warning
+                    and 'pitch_range' in d.message]
+        assert warnings == []
+
+    def test_pitch_range_valido_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: range\n        pitch_range: 12\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert [d for d in result
+                if d.severity == DiagnosticSeverity.Error] == []
+
+    def test_range_con_unit_ratio_valido(self, bridge):
+        # issue #10: range/stochastic VALIDI con unit: ratio
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: range\n"
+            "        pitch_range: 2.0\n"
+            "        unit: ratio\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert [d for d in result
+                if d.severity == DiagnosticSeverity.Error] == []
+
+    def test_ampiezza_zero_con_ratio_produce_warning(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: range\n"
+            "        pitch_range: 0\n"
+            "        unit: ratio\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        warnings = [d for d in result
+                    if d.severity == DiagnosticSeverity.Warning
+                    and 'identit' in d.message]
+        assert len(warnings) == 1
+
+    def test_step_negativo_con_ratio_produce_warning(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: step\n"
+            "        step: -1.0\n"
+            "        unit: ratio\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        warnings = [d for d in result
+                    if d.severity == DiagnosticSeverity.Warning
+                    and 'identit' in d.message]
+        assert len(warnings) == 1
+
+    def test_step_negativo_senza_ratio_nessun_warning(self, bridge):
+        # con la famiglia EDO step negativo e' una progressione discendente
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: step\n        step: -1.0\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        warnings = [d for d in result
+                    if d.severity == DiagnosticSeverity.Warning
+                    and 'identit' in d.message]
+        assert warnings == []
+
+    @pytest.mark.parametrize('strategy, extra', [
+        ('chord', '        chord: dom7\n'),
+        ('spectral', ''),
+    ])
+    def test_semitone_locked_con_unit_diversa(self, bridge, strategy, extra):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            f"        strategy: {strategy}\n{extra}        unit: cents\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'semiton' in d.message]
+        assert len(errors) == 1
+        assert 'ometti `unit`' in errors[0].message
+
+    def test_semitone_locked_con_edo_dict(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord\n"
+            "        chord: maj\n"
+            "        unit: {edo: 24}\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'semiton' in d.message]
+        assert len(errors) == 1
+
+    def test_chord_con_unit_semitones_valido(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord\n"
+            "        chord: dom7\n"
+            "        unit: semitones\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert [d for d in result
+                if d.severity == DiagnosticSeverity.Error] == []
+
+    def test_unit_refuso_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: step\n        step: 3\n        unit: semitone\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'voices.pitch.unit' in d.message]
+        assert len(errors) == 1
+        assert '{edo: N}' in errors[0].message
+
+    def test_unit_edo_nudo_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: step\n        step: 3\n        unit: edo\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'voices.pitch.unit' in d.message]
+        assert len(errors) == 1
+
+    def test_unit_edo_dict_valido(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: stochastic\n"
+            "        pitch_range: 6\n"
+            "        unit: {edo: 24}\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert [d for d in result
+                if d.severity == DiagnosticSeverity.Error] == []
+
+    def test_unit_edo_zero_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: step\n        step: 3\n        unit: {edo: 0}\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'voices.pitch.unit' in d.message]
+        assert len(errors) == 1
+
+    def test_accordo_esteso_dom9_valido(self, bridge):
+        # registry accordi allineato a PGE (22 accordi)
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord\n        chord: dom9\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert [d for d in result
+                if d.severity == DiagnosticSeverity.Error] == []
+
+    def test_inversion_valida_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord\n"
+            "        chord: dom7\n"
+            "        inversion: 3\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert [d for d in result
+                if d.severity == DiagnosticSeverity.Error] == []
+
+    def test_inversion_fuori_range_produce_errore(self, bridge):
+        # maj ha 3 note: inversion valida in [0, 2]
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord\n"
+            "        chord: maj\n"
+            "        inversion: 3\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'inversion' in d.message]
+        assert len(errors) == 1
+        assert '[0, 2]' in errors[0].message
+
+    def test_inversion_non_intera_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord\n"
+            "        chord: maj\n"
+            "        inversion: x\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'inversion' in d.message]
+        assert len(errors) == 1

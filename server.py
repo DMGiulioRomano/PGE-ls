@@ -802,6 +802,38 @@ def handle_did_save(params: DidSaveTextDocumentParams) -> None:
     _publish_diagnostics(params.text_document.uri)
 
 
+def _resolve_pitch_bounds(current_key: str, text: str, line: int):
+    """
+    Bounds (y_min, y_max) per una chiave del blocco pitch unit-driven.
+    None se la chiave non ha envelope (edo) o non e' risolvibile.
+    """
+    from granular_ls.pitch_units import (
+        PITCH_UNIT_KEYS, PITCH_UNIT_PRESETS,
+        get_unit_info, get_pitch_block_entries, parse_edo_divisions,
+    )
+    if current_key == 'edo':
+        return None
+    if current_key in PITCH_UNIT_PRESETS:
+        info = PITCH_UNIT_PRESETS[current_key]
+        return (info.min_val, info.max_val)
+    entries = get_pitch_block_entries(text, line)
+    if current_key == 'value':
+        divisions = parse_edo_divisions(entries.get('edo', ''))
+        if divisions is None:
+            return None
+        return (-3.0 * divisions, 3.0 * divisions)
+    if current_key == 'range':
+        present = [k for k in PITCH_UNIT_KEYS if k in entries]
+        unit_key = present[0] if present else 'semitones'
+        divisions = (parse_edo_divisions(entries.get('edo', ''))
+                     if unit_key == 'edo' else None)
+        info = get_unit_info(unit_key, divisions)
+        if info is None:
+            return None
+        return (0.0, info.max_range)
+    return None
+
+
 def _resolve_envelope_context(
     text: str,
     line: int,
@@ -820,7 +852,13 @@ def _resolve_envelope_context(
     context = YamlAnalyzer.get_context(text, line, character)
 
     y_min, y_max = 0.0, 1.0
-    if context.current_key and _completion_provider:
+    if context.current_key and context.parent_path == ['pitch']:
+        # Blocco pitch unit-driven: bounds dal registry pitch_units,
+        # non dal bridge (che non ha piu' spec per il pitch).
+        bounds = _resolve_pitch_bounds(context.current_key, text, line)
+        if bounds is not None:
+            y_min, y_max = bounds
+    elif context.current_key and _completion_provider:
         bridge = _completion_provider._bridge
         for p in bridge.get_all_parameters():
             local_key = p.yaml_path.split('.')[-1]

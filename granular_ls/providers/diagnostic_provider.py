@@ -39,12 +39,30 @@ from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
     VOICE_DIMENSIONS,
     VOICE_ENVELOPE_KEYS,
+    CHORD_INTERVALS,
     get_strategy_spec,
+)
+from granular_ls.pitch_units import (
+    PITCH_UNIT_KEYS,
+    PITCH_UNIT_PRESETS,
+    PITCH_BLOCK_KEYS,
+    SEMITONE_LOCKED_STRATEGIES,
+    VOICE_PITCH_UNIT_VALUES,
+    get_unit_info,
+    parse_edo_divisions,
+    parse_voice_unit_value,
+    split_inline_mapping,
 )
 
 # Identificatore del nostro Language Server nei diagnostici.
 # VSCode lo mostra accanto al messaggio per indicare la fonte.
 SOURCE = 'granular-ls'
+
+# Il blocco pitch e' unit-driven (PGE PR #84): la sua superficie non vive
+# piu' nello schema del bridge ma nel registry pitch_units, e la validazione
+# in _check_pitch_block. Le spec 'pitch.*' di snapshot legacy vengono escluse
+# dai controlli generici per evitare doppie segnalazioni con bounds obsoleti.
+_PITCH_OWNED_PREFIX = 'pitch.'
 
 
 class DiagnosticProvider:
@@ -64,10 +82,12 @@ class DiagnosticProvider:
 
         # Indice yaml_path -> ParameterInfo per lookup O(1).
         # Costruito una volta in __init__, non a ogni chiamata.
+        # I parametri 'pitch.*' sono esclusi: il blocco e' unit-driven.
         self._params_by_yaml_path: Dict[str, ParameterInfo] = {
             p.yaml_path: p
             for p in bridge.get_all_parameters()
             if not p.is_internal
+            and not p.yaml_path.startswith(_PITCH_OWNED_PREFIX)
         }
 
     def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
@@ -116,6 +136,9 @@ class DiagnosticProvider:
 
         # Fase 5b: validazione grain.envelope (finestratura del grano).
         diagnostics.extend(self._check_grain_envelope(document_text))
+
+        # Fase 5c: validazione del blocco pitch (superficie unit-driven).
+        diagnostics.extend(self._check_pitch_block(document_text))
 
         # Fase 6: validazione del blocco voices (strategy, kwargs, enum).
         diagnostics.extend(self._check_voice_strategies(document_text))
@@ -384,11 +407,12 @@ class DiagnosticProvider:
         # Esempio: 'grain.reverse:' senza valore → forzato sempre reverse.
         NULL_VALID_PATHS: frozenset = frozenset({'grain.reverse'})
 
-        # 1. Parametri numerici del bridge
+        # 1. Parametri numerici del bridge (pitch.* escluso: unit-driven)
         numeric_yaml_paths: set = {
             p.yaml_path
             for p in self._bridge.get_all_parameters()
             if p.min_val is not None and not p.is_internal
+            and not p.yaml_path.startswith(_PITCH_OWNED_PREFIX)
         }
 
         # 2. voices.num_voices e voices.scatter (bounds via get_raw_bounds)
@@ -536,10 +560,12 @@ class DiagnosticProvider:
         diagnostics = []
         lines = document_text.split('\n')
 
-        # Costruisce mappa yaml_path -> (min_val, max_val)
+        # Costruisce mappa yaml_path -> (min_val, max_val).
+        # pitch.* escluso: bounds per-unità validati da _check_pitch_block.
         params_bounds = {}
         for p in self._bridge.get_all_parameters():
-            if p.min_val is not None and p.max_val is not None and not p.is_internal:
+            if p.min_val is not None and p.max_val is not None and not p.is_internal \
+                    and not p.yaml_path.startswith(_PITCH_OWNED_PREFIX):
                 params_bounds[p.yaml_path] = (p.min_val, p.max_val)
 
         # Scansione: tiene traccia del parametro corrente e del suo path
@@ -1070,6 +1096,348 @@ class DiagnosticProvider:
     # CONTROLLO VOICES
     # -------------------------------------------------------------------------
 
+    # -------------------------------------------------------------------------
+    # FASE 5c: BLOCCO PITCH (superficie unit-driven)
+    # -------------------------------------------------------------------------
+
+    def _check_pitch_block(self, document_text: str) -> List[Diagnostic]:
+        """
+        Valida il blocco pitch: di ogni stream, speculare alla validazione
+        strict di PitchController._select_unit del motore:
+
+          1. `pitch:` vuoto (null) o non-mapping (lista/scalare) -> Error.
+          2. Chiavi fuori da PITCH_BLOCK_KEYS (refusi) -> Error.
+          3. Piu' di una chiave-unita' nello stesso blocco -> Error.
+          4. `value` senza `edo` -> Error.
+          5. `edo`: intero > 0; forma annidata {divisions, value} -> Error
+             (hard break); `value` mancante -> Error.
+          6. Bounds per-unita' su scalari ed envelope Y:
+             preset da PitchUnitInfo, `value` in ±3·N, `range` in
+             [0, max_range dell'unita' attiva].
+
+        `pitch: {}` e blocco assente restano validi (default semitoni neutro).
+        """
+        diagnostics: List[Diagnostic] = []
+        if not document_text:
+            return diagnostics
+
+        lines = document_text.split('\n')
+
+        for stream_start, stream_end, _keys in self._find_stream_blocks(lines):
+            pitch_line = None
+            for n in range(stream_start, stream_end + 1):
+                raw = lines[n]
+                leading = len(raw) - len(raw.lstrip())
+                if leading == 4 and raw.strip().startswith('pitch:'):
+                    pitch_line = n
+                    break
+            if pitch_line is None:
+                continue
+            diagnostics.extend(
+                self._check_single_pitch_block(lines, pitch_line, stream_end + 1)
+            )
+
+        return diagnostics
+
+    _PITCH_EMPTY_HINT = (
+        "il blocco pitch deve specificare un'unità (es. semitones: 7, "
+        "ratio: 1.5, oppure edo: 31 + value: 18). Per nessuna trasposizione, "
+        "ometti del tutto il blocco pitch."
+    )
+
+    def _check_single_pitch_block(self, lines: List[str], pitch_line: int,
+                                   stream_end: int) -> List[Diagnostic]:
+        """Applica le regole strict a un singolo blocco pitch:."""
+        diagnostics: List[Diagnostic] = []
+
+        inline_val = lines[pitch_line].strip()[len('pitch:'):].strip()
+        if '#' in inline_val:
+            inline_val = inline_val[:inline_val.find('#')].rstrip()
+
+        # entries: chiave -> (valore_str, n_riga)
+        entries: Dict[str, Tuple[str, int]] = {}
+
+        if inline_val:
+            if inline_val.startswith('{'):
+                inner = inline_val.strip().strip('{}').strip()
+                if not inner:
+                    return diagnostics  # pitch: {} -> default neutro valido
+                for key, value in split_inline_mapping(inner):
+                    entries[key] = (value, pitch_line)
+            else:
+                # non-mapping: scalare o lista inline (pitch: 3.0 / pitch: [[...]])
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(pitch_line),
+                    message=(
+                        "`pitch` deve essere un mapping di chiavi-unità, "
+                        f"non un valore diretto: {self._PITCH_EMPTY_HINT}"
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                return diagnostics
+        else:
+            # Forma block: chiavi a 6 spazi fino a indent <= 4
+            block_end = stream_end
+            for n in range(pitch_line + 1, stream_end):
+                raw = lines[n]
+                if not raw.strip():
+                    continue
+                if (len(raw) - len(raw.lstrip())) <= 4:
+                    block_end = n
+                    break
+            has_children = False
+            for n in range(pitch_line + 1, block_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                has_children = True
+                if (len(raw) - len(raw.lstrip())) != 6:
+                    continue  # righe più profonde: envelope/figli di una chiave
+                if '#' in stripped:
+                    stripped = stripped[:stripped.find('#')].rstrip()
+                m = re.match(r'^([a-zA-Z_]\w*)\s*:\s*(.*)$', stripped)
+                if m:
+                    entries[m.group(1)] = (m.group(2).strip(), n)
+
+            if not has_children:
+                # pitch: presente ma vuoto (null)
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(pitch_line),
+                    message=f"`pitch:` è vuoto: {self._PITCH_EMPTY_HINT}",
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                return diagnostics
+            if not entries:
+                # figli presenti ma nessuna coppia chiave: valore
+                # (es. lista di breakpoints direttamente sotto pitch:)
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(pitch_line),
+                    message=(
+                        "`pitch` deve essere un mapping di chiavi-unità: "
+                        + self._PITCH_EMPTY_HINT
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                return diagnostics
+
+        # --- Regola 2: chiavi sconosciute (validazione strict) ---
+        for key, (_val, n) in entries.items():
+            if key not in PITCH_BLOCK_KEYS:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(n),
+                    message=(
+                        f"Chiave sconosciuta nel blocco pitch: `{key}`. "
+                        f"Chiavi valide: {sorted(PITCH_BLOCK_KEYS)}."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+        # --- Regola 3: una sola chiave-unità per blocco ---
+        present_units = [k for k in PITCH_UNIT_KEYS if k in entries]
+        if len(present_units) > 1:
+            for k in present_units:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(entries[k][1]),
+                    message=(
+                        f"Una sola unità per blocco pitch; trovate: "
+                        f"{present_units}. Unità disponibili: "
+                        f"{sorted(PITCH_UNIT_KEYS)}."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+        unit_key = present_units[0] if present_units else None
+
+        # --- Regola 4: value solo con edo ---
+        if 'value' in entries and unit_key != 'edo':
+            diagnostics.append(Diagnostic(
+                range=self._line_range(entries['value'][1]),
+                message=(
+                    "`pitch.value` è ammesso solo con `edo: N`; per i preset "
+                    "il valore sta nella chiave (es. semitones: 7)."
+                ),
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+
+        # --- Regola 5: grammatica edo ---
+        divisions = None
+        if 'edo' in entries:
+            edo_val, edo_line = entries['edo']
+            nested = edo_val.startswith('{')
+            if not nested and not edo_val:
+                # edo: senza valore inline: figli più profondi?
+                # La vecchia forma annidata (divisions:/value: sotto edo:)
+                # è un hard break con hint di migrazione.
+                nested = any(
+                    (len(lines[j]) - len(lines[j].lstrip())) > 6
+                    and lines[j].strip()
+                    for j in range(edo_line + 1, min(edo_line + 4, len(lines)))
+                )
+            if nested:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(edo_line),
+                    message=(
+                        "`pitch.edo`: forma cambiata — ora `edo: N` con "
+                        "`value: X` a fianco (es. edo: 31, value: 18). La "
+                        "forma annidata {divisions, value} non è più valida."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+            else:
+                divisions = parse_edo_divisions(edo_val)
+                if divisions is None:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(edo_line),
+                        message=(
+                            "`pitch.edo` richiede le divisioni per ottava: "
+                            "un intero > 0 (es. 12, 24, 31)."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+            if 'value' not in entries:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(edo_line),
+                    message=(
+                        "`pitch.edo`: con `edo: N` serve `value: X` a "
+                        "fianco (es. edo: 31, value: 18)."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+        # --- Regola 6: bounds per-unità (scalari ed envelope Y) ---
+        if unit_key and unit_key != 'edo':
+            info = PITCH_UNIT_PRESETS[unit_key]
+            diagnostics.extend(self._check_pitch_value_bounds(
+                lines, entries[unit_key], f'pitch.{unit_key}',
+                info.min_val, info.max_val,
+            ))
+        if 'value' in entries and unit_key == 'edo' and divisions:
+            diagnostics.extend(self._check_pitch_value_bounds(
+                lines, entries['value'], 'pitch.value',
+                -3.0 * divisions, 3.0 * divisions,
+            ))
+        if 'range' in entries:
+            info = get_unit_info(unit_key or 'semitones', divisions)
+            if info is not None:
+                diagnostics.extend(self._check_pitch_value_bounds(
+                    lines, entries['range'], 'pitch.range',
+                    0.0, info.max_range,
+                ))
+
+        return diagnostics
+
+    def _check_pitch_value_bounds(self, lines: List[str],
+                                   entry: Tuple[str, int], label: str,
+                                   min_val: float,
+                                   max_val: float) -> List[Diagnostic]:
+        """
+        Bounds di una chiave del blocco pitch: scalare, envelope inline
+        ([[t, v], ...] o compact sulla stessa riga) o envelope block-style
+        (righe '- [...]' più indentate sotto la chiave).
+        """
+        diagnostics: List[Diagnostic] = []
+        value_str, line_no = entry
+
+        def _check_y(y_val, n_riga):
+            if isinstance(y_val, (int, float)) and not isinstance(y_val, bool):
+                if y_val < min_val or y_val > max_val:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(n_riga),
+                        message=(
+                            f"'{label}': valore {y_val} fuori range "
+                            f"[{min_val:g}, {max_val:g}]."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+
+        if value_str:
+            numeric = self._try_parse_number(value_str)
+            if numeric is not None:
+                _check_y(numeric, line_no)
+                return diagnostics
+            if value_str.startswith('['):
+                for y in self._extract_envelope_y_values(value_str):
+                    _check_y(y, line_no)
+            return diagnostics
+
+        # Chiave senza valore inline: cerca envelope block-style nei figli
+        key_leading = len(lines[line_no]) - len(lines[line_no].lstrip())
+        has_value = False
+        for n in range(line_no + 1, len(lines)):
+            raw = lines[n]
+            stripped = raw.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            leading = len(raw) - len(raw.lstrip())
+            if leading <= key_leading:
+                break
+            has_value = True
+            if stripped.startswith('- ['):
+                for y in self._extract_envelope_y_values(stripped[2:].strip()):
+                    _check_y(y, n)
+
+        if not has_value:
+            diagnostics.append(Diagnostic(
+                range=self._line_range(line_no),
+                message=(
+                    f"'{label}' richiede un valore "
+                    f"(float o envelope [[t, v], ...]) ma non ne ha uno."
+                ),
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+        return diagnostics
+
+    @staticmethod
+    def _extract_envelope_y_values(value_str: str) -> List[float]:
+        """
+        Estrae i valori Y da un envelope serializzato.
+
+        Formati riconosciuti (stessi di _check_envelope_bounds):
+          - breakpoints standard: [[t, y], ...] oppure il singolo [t, y]
+          - compact loop: [[[x_pct, y], ...], end_time, ...]
+        Formati non riconosciuti: lista vuota (tolleranza).
+        """
+        import ast
+        ys: List[float] = []
+        try:
+            parsed = ast.literal_eval(value_str)
+        except Exception:
+            return ys
+        if not isinstance(parsed, list) or not parsed:
+            return ys
+
+        def _is_num(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        # Formato compact: [pattern, end_time, ...] con pattern = [[x, y], ...]
+        if (len(parsed) >= 2
+                and isinstance(parsed[0], list) and parsed[0]
+                and all(isinstance(pt, list) for pt in parsed[0])):
+            return [pt[1] for pt in parsed[0]
+                    if len(pt) >= 2 and _is_num(pt[1])]
+
+        # Singolo breakpoint [t, y]
+        if len(parsed) >= 2 and _is_num(parsed[0]) and _is_num(parsed[1]):
+            return [parsed[1]]
+
+        # Breakpoints standard [[t, y], ...]
+        for item in parsed:
+            if (isinstance(item, list) and len(item) >= 2
+                    and _is_num(item[0]) and _is_num(item[1])):
+                ys.append(item[1])
+        return ys
+
     def _check_voice_strategies(self, document_text: str) -> List[Diagnostic]:
         """
         Valida il blocco voices: di ogni stream.
@@ -1213,6 +1581,22 @@ class DiagnosticProvider:
                         if m:
                             dim_keys[m.group(1)] = (m.group(2).strip().strip('"\''), n)
 
+                # Hard break PGE: voices.pitch.semitone_range -> pitch_range.
+                # Segnalato prima dei check di strategy: la chiave e' un
+                # errore indipendentemente dalla strategy attiva.
+                if dim == 'pitch' and 'semitone_range' in dim_keys:
+                    _sr_val, sr_line = dim_keys['semitone_range']
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(sr_line),
+                        message=(
+                            "`semitone_range` non esiste più: rinominato in "
+                            "`pitch_range` (stesso valore, letto nell'unità "
+                            "attiva: semitones/cents/edo/ratio…)."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+
                 # 1. Controlla che 'strategy' sia presente
                 if 'strategy' not in dim_keys:
                     diagnostics.append(Diagnostic(
@@ -1251,10 +1635,22 @@ class DiagnosticProvider:
                 if spec is None:
                     continue
 
+                # 2b. Validazioni pitch unit-aware (unit, lock semitoni,
+                # ampiezza con ratio, inversion degli accordi).
+                if dim == 'pitch':
+                    diagnostics.extend(
+                        self._check_voice_pitch_unit(dim_keys, strategy_val)
+                    )
+
                 # 3. Controlla i kwargs richiesti e i valori enum
                 for kwarg_name, kwarg_spec in spec.kwargs.items():
                     if kwarg_name not in dim_keys:
                         if kwarg_spec.required:
+                            # pitch_range mancante ma semitone_range presente:
+                            # l'Error di rename sopra e' gia' la diagnosi giusta.
+                            if (kwarg_name == 'pitch_range'
+                                    and 'semitone_range' in dim_keys):
+                                continue
                             diagnostics.append(Diagnostic(
                                 range=self._line_range(dim_line),
                                 message=(
@@ -1303,6 +1699,107 @@ class DiagnosticProvider:
                             severity=DiagnosticSeverity.Error,
                             source=SOURCE,
                         ))
+
+        return diagnostics
+
+    def _check_voice_pitch_unit(self, dim_keys: Dict[str, Tuple[str, int]],
+                                 strategy_val: str) -> List[Diagnostic]:
+        """
+        Validazioni unit-aware del blocco voices.pitch (issue #9/#10):
+
+          1. `unit` deve essere un preset valido o `{edo: N}` (N intero > 0).
+          2. chord/spectral sono semitone-locked: `unit` diverso da
+             `semitones` -> Error (speculare a InvalidStrategyConfigError).
+          3. Con `unit: ratio` l'ampiezza (`step`/`pitch_range`) deve essere
+             > 0: con valore <= 0 il motore produce identità -> Warning.
+          4. `inversion` di chord: intero in [0, n_note-1] dell'accordo.
+        """
+        diagnostics: List[Diagnostic] = []
+
+        unit_kind = None
+        unit_payload = None
+        if 'unit' in dim_keys:
+            unit_val, unit_line = dim_keys['unit']
+            if unit_val:
+                kind, payload = parse_voice_unit_value(unit_val)
+                if kind == 'invalid':
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(unit_line),
+                        message=(
+                            f"Valore `{payload}` non valido per "
+                            "`voices.pitch.unit`. Unità disponibili: "
+                            + ', '.join(f'`{u}`' for u in VOICE_PITCH_UNIT_VALUES)
+                            + " oppure `{edo: N}`."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+                else:
+                    unit_kind, unit_payload = kind, payload
+                    if (strategy_val in SEMITONE_LOCKED_STRATEGIES
+                            and not (kind == 'preset'
+                                     and payload == 'semitones')):
+                        diagnostics.append(Diagnostic(
+                            range=self._line_range(unit_line),
+                            message=(
+                                f"La strategia `{strategy_val}` è definita "
+                                "in semitoni: ometti `unit` oppure usa "
+                                "`semitones`."
+                            ),
+                            severity=DiagnosticSeverity.Error,
+                            source=SOURCE,
+                        ))
+
+        # Ampiezza > 0 con unit: ratio (amount <= 0 -> identità nel motore)
+        if unit_kind == 'preset' and unit_payload == 'ratio':
+            amp_key = ('step' if strategy_val == 'step'
+                       else 'pitch_range'
+                       if strategy_val in ('range', 'stochastic') else None)
+            if amp_key and amp_key in dim_keys:
+                amp_val, amp_line = dim_keys[amp_key]
+                numeric = self._try_parse_number(amp_val)
+                if numeric is not None and numeric <= 0:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(amp_line),
+                        message=(
+                            f"Con `unit: ratio` l'ampiezza `{amp_key}` deve "
+                            f"essere > 0: con {numeric} il motore produce "
+                            "identità (nessuna distribuzione)."
+                        ),
+                        severity=DiagnosticSeverity.Warning,
+                        source=SOURCE,
+                    ))
+
+        # inversion di chord: intero in [0, n_note-1]
+        if strategy_val == 'chord' and 'inversion' in dim_keys:
+            inv_val, inv_line = dim_keys['inversion']
+            if inv_val:
+                if not re.fullmatch(r'[+-]?\d+', inv_val):
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(inv_line),
+                        message=(
+                            f"`inversion` deve essere un intero ≥ 0, "
+                            f"trovato `{inv_val}`."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+                else:
+                    chord_name = dim_keys.get('chord', ('', 0))[0]
+                    if chord_name in CHORD_INTERVALS:
+                        n_note = len(CHORD_INTERVALS[chord_name])
+                        inversion = int(inv_val)
+                        if not (0 <= inversion < n_note):
+                            diagnostics.append(Diagnostic(
+                                range=self._line_range(inv_line),
+                                message=(
+                                    f"L'accordo `{chord_name}` ha {n_note} "
+                                    f"note: `inversion` deve essere in "
+                                    f"[0, {n_note - 1}]."
+                                ),
+                                severity=DiagnosticSeverity.Error,
+                                source=SOURCE,
+                            ))
 
         return diagnostics
 
