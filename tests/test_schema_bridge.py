@@ -157,7 +157,7 @@ def full_raw_data():
             make_raw_spec('loop_dur', 'loop_dur', default=None,
                           exclusive_group='loop_bounds', group_priority=99),
             make_raw_spec('grain_duration', 'grain.duration', default=0.05),
-            make_raw_spec('volume', 'volume', default=-6.0),
+            make_raw_spec('volume', 'volume', default=0.0),
             make_raw_spec('pointer_deviation', '_dummy_fixed_zero_',
                           default=0.0, range_path='offset_range'),
         ],
@@ -1005,7 +1005,7 @@ class TestGetDephaseKeys:
         # costruiamo manualmente
         raw2 = {
             'specs': [{
-                'name': 'volume', 'yaml_path': 'volume', 'default': -6.0,
+                'name': 'volume', 'yaml_path': 'volume', 'default': 0.0,
                 'is_smart': True, 'exclusive_group': None, 'group_priority': 99,
                 'range_path': None, 'dephase_key': 'volume',
             }],
@@ -1055,7 +1055,7 @@ class TestGetDephaseKeys:
         raw = {
             'specs': [
                 {
-                    'name': 'volume', 'yaml_path': 'volume', 'default': -6.0,
+                    'name': 'volume', 'yaml_path': 'volume', 'default': 0.0,
                     'is_smart': True, 'exclusive_group': None, 'group_priority': 99,
                     'range_path': None, 'dephase_key': 'volume',
                 },
