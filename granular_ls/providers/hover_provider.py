@@ -22,7 +22,7 @@ Risoluzione del nome chiave:
 """
 
 import re
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
@@ -345,6 +345,16 @@ class HoverProvider:
     def __init__(self, bridge: SchemaBridge):
         self._bridge = bridge
 
+        # Indice yaml_path -> ParameterInfo per lookup O(1), costruito una
+        # volta in __init__ (stesso pattern del DiagnosticProvider).
+        # Nessun filtro is_internal: get_hover lo gestisce gia' da solo,
+        # e filtrare qui cambierebbe il fallback sulle stream context keys.
+        # setdefault: a parita' di yaml_path vince il primo parametro,
+        # come la vecchia scansione lineare.
+        self._params_by_yaml_path: Dict[str, ParameterInfo] = {}
+        for p in bridge.get_all_parameters():
+            self._params_by_yaml_path.setdefault(p.yaml_path, p)
+
     def get_hover(self, context: YamlContext,
                   document_text: str = '') -> Optional[Hover]:
         """
@@ -619,10 +629,7 @@ class HoverProvider:
 
     def _find_by_yaml_path(self, yaml_path: str) -> Optional[ParameterInfo]:
         """Cerca un parametro per yaml_path, non per name Python."""
-        for param in self._bridge.get_all_parameters():
-            if param.yaml_path == yaml_path:
-                return param
-        return None
+        return self._params_by_yaml_path.get(yaml_path)
 
     # -------------------------------------------------------------------------
     # VOICES HOVER

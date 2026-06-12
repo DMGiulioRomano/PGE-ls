@@ -197,6 +197,15 @@ class SchemaBridge:
                     is_internal=False,
                 )
 
+        # Indice chiave -> ParameterInfo per get_parameter_by_key().
+        # Registra sia la chiave locale (ultimo segmento dello yaml_path)
+        # sia lo yaml_path completo; a parita' di chiave vince il primo
+        # parametro in ordine di registrazione (setdefault).
+        self._params_by_key: Dict[str, ParameterInfo] = {}
+        for p in self._params.values():
+            self._params_by_key.setdefault(p.yaml_path.split('.')[-1], p)
+            self._params_by_key.setdefault(p.yaml_path, p)
+
     # -------------------------------------------------------------------------
     # QUERY API
     # -------------------------------------------------------------------------
@@ -221,6 +230,17 @@ class SchemaBridge:
     def get_parameter(self, name: str) -> Optional[ParameterInfo]:
         """Accesso singolo per nome. Ritorna None se il nome non esiste."""
         return self._params.get(name)
+
+    def get_parameter_by_key(self, key: str) -> Optional[ParameterInfo]:
+        """
+        Lookup O(1) per chiave YAML: accetta sia la chiave locale
+        ('duration') sia lo yaml_path completo ('grain.duration').
+
+        A parita' di chiave (es. piu' parametri con la stessa chiave
+        locale) vince il primo in ordine di registrazione, replicando
+        la semantica della vecchia scansione lineare dei provider.
+        """
+        return self._params_by_key.get(key)
 
     def get_exclusive_groups(self) -> Dict[str, List[ParameterInfo]]:
         """

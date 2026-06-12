@@ -860,12 +860,13 @@ def _resolve_envelope_context(
             y_min, y_max = bounds
     elif context.current_key and _completion_provider:
         bridge = _completion_provider._bridge
-        for p in bridge.get_all_parameters():
-            local_key = p.yaml_path.split('.')[-1]
-            if local_key == context.current_key or p.yaml_path == context.current_key:
-                if p.min_val is not None and p.max_val is not None:
-                    y_min, y_max = p.min_val, p.max_val
-                break
+        # Lookup O(1) per chiave locale o yaml_path completo.
+        # Il fallback sui raw bounds scatta solo se NESSUN parametro
+        # corrisponde: un parametro trovato ma senza bounds tiene i default.
+        p = bridge.get_parameter_by_key(context.current_key)
+        if p is not None:
+            if p.min_val is not None and p.max_val is not None:
+                y_min, y_max = p.min_val, p.max_val
         else:
             raw = bridge.get_raw_bounds(context.current_key)
             if raw and raw.get('min_val') is not None and raw.get('max_val') is not None:
