@@ -520,19 +520,17 @@ class SchemaBridge:
             # Ogni ParameterSpec con range_path non-None definisce un parametro
             # aggiuntivo (es. volume_range, pan_range, grain.duration_range)
             # i cui bounds sono min_range/max_range del parametro principale.
-            for schema_list in parameter_schema.ALL_SCHEMAS.values():
+            spec_names = {s['name'] for s in specs}
+            for schema_name, schema_list in parameter_schema.ALL_SCHEMAS.items():
+                # Prefisso di blocco dello schema corrente
+                # (es. POINTER_PARAMETER_SCHEMA -> 'pointer.offset_range')
+                block_prefix = SCHEMA_BLOCK_PREFIXES.get(schema_name, '')
                 for spec in schema_list:
                     if not spec.range_path:
                         continue
                     # Costruisce lo yaml_path del range param
                     # range_path puo' essere 'volume_range' o 'grain.duration_range'
                     range_yaml_path = spec.range_path
-                    # Se lo schema ha un prefisso di blocco, aggiungilo
-                    # (es. POINTER_PARAMETER_SCHEMA -> 'pointer.offset_range')
-                    block_prefix = SCHEMA_BLOCK_PREFIXES.get(
-                        [k for k, v in parameter_schema.ALL_SCHEMAS.items()
-                         if spec in v][0], ''
-                    )
                     if (block_prefix
                             and not range_yaml_path.startswith('_')
                             and '.' not in range_yaml_path):
@@ -540,8 +538,9 @@ class SchemaBridge:
 
                     range_name = spec.name + '_range'
                     # Evita duplicati
-                    if any(s['name'] == range_name for s in specs):
+                    if range_name in spec_names:
                         continue
+                    spec_names.add(range_name)
 
                     specs.append({
                         'name': range_name,
