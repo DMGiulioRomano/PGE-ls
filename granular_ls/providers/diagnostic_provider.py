@@ -527,10 +527,12 @@ class DiagnosticProvider:
         """
         Controlla i valori Y dei breakpoints negli envelope standard.
 
-        Un envelope standard e' una lista YAML di breakpoints [t, y].
-        Per ogni y controlla che sia nei bounds del parametro padre.
+        Due forme riconosciute:
+          - block-style: chiave nuda seguita da righe '- [t, y]'
+          - inline: 'key: [[t, v], ...]' sulla riga della chiave
+            (anche breakpoint singolo [t, y] e formato compact loop)
 
-        Produce Error se un valore y e' fuori dai bounds.
+        Produce Error se un valore y e' fuori dai bounds del parametro.
         """
         import ast
         diagnostics = []
@@ -543,6 +545,14 @@ class DiagnosticProvider:
             if p.min_val is not None and p.max_val is not None and not p.is_internal \
                     and not p.yaml_path.startswith(_PITCH_OWNED_PREFIX):
                 params_bounds[p.yaml_path] = (p.min_val, p.max_val)
+
+        # Indice di risoluzione chiave -> yaml_path (chiave locale e path
+        # completo, primo match in ordine di registrazione): usato dal ramo
+        # block-style e da quello inline senza riscandire params_bounds.
+        key_to_path: Dict[str, str] = {}
+        for yp in params_bounds:
+            key_to_path.setdefault(yp.split('.')[-1], yp)
+            key_to_path.setdefault(yp, yp)
 
         # Scansione: tiene traccia del parametro corrente e del suo path
         current_param_path = None
@@ -559,13 +569,7 @@ class DiagnosticProvider:
             if ': ' not in stripped and stripped.endswith(':'):
                 key = stripped[:-1].strip()
                 if key and all(c.isalnum() or c == '_' for c in key):
-                    # Cerca il yaml_path corrispondente
-                    found = None
-                    for yp in params_bounds:
-                        if yp.split('.')[-1] == key or yp == key:
-                            found = yp
-                            break
-                    current_param_path = found
+                    current_param_path = key_to_path.get(key)
                     current_indent = leading
                 continue
 
@@ -628,6 +632,34 @@ class DiagnosticProvider:
                                 ))
                 except Exception:
                     pass
+                continue
+
+            # Envelope inline sulla riga della chiave: 'key: [[t, v], ...]',
+            # breakpoint singolo [t, y] o compact loop. Stessa risoluzione e
+            # stesso messaggio del ramo block-style; valori non parseabili
+            # vengono ignorati (tolleranza, come literal_eval sui breakpoint).
+            m_inline = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(\[.*)$',
+                                stripped)
+            if m_inline:
+                inline_path = key_to_path.get(m_inline.group(1))
+                if inline_path is None:
+                    continue
+                min_val, max_val = params_bounds[inline_path]
+                for y_val in self._extract_envelope_y_values(m_inline.group(2)):
+                    if y_val < min_val or y_val > max_val:
+                        diagnostics.append(Diagnostic(
+                            range=Range(
+                                start=Position(line=n, character=0),
+                                end=Position(line=n, character=len(line)),
+                            ),
+                            message=(
+                                f"Valore envelope {y_val} fuori dai bounds "
+                                f"del parametro '{inline_path}': "
+                                f"[{min_val}, {max_val}]."
+                            ),
+                            severity=DiagnosticSeverity.Error,
+                            source='pge-ls',
+                        ))
 
         return diagnostics
 
