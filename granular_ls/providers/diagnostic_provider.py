@@ -160,6 +160,9 @@ class DiagnosticProvider:
             document_text, lines, streams, self._refs_dir,
         ))
 
+        # Fase 10: loop_end <= loop_start (finestra di loop degenere).
+        diagnostics.extend(self._check_loop_end_le_loop_start(lines, streams))
+
         return diagnostics
 
 
@@ -1967,6 +1970,106 @@ class DiagnosticProvider:
                         'il motore usa `loop_end = loop_start + loop_dur`.'
                     ),
                     severity=DiagnosticSeverity.Warning,
+                    source=SOURCE,
+                ))
+
+        return diagnostics
+
+    def _check_loop_end_le_loop_start(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
+        """
+        Error quando loop_end <= loop_start (entrambi valori scalari) nello
+        stesso blocco pointer:.
+
+        Speculare all'InvalidFieldValueError che il motore solleva per una
+        finestra di loop statica degenere (PGE commit ec61242). Vale solo per
+        i bound statici: se loop_start o loop_end sono envelope (lista/dict)
+        gli endpoint sono dinamici e l'engine esenta il controllo.
+
+        loop_dur ha priorita' su loop_end: se loop_dur e' presente, loop_end
+        viene ignorato dal motore e non ha senso segnalare la degenerazione
+        (gia' coperto dal warning di _check_loop_dur_overrides_loop_end).
+        """
+        diagnostics = []
+
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            # Trova il blocco pointer: (header a 4 spazi)
+            pointer_start = None
+            for n in range(stream_start, stream_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                leading = len(raw) - len(raw.lstrip())
+                if leading == 4 and (stripped == 'pointer:' or stripped.startswith('pointer:')):
+                    pointer_start = n
+                    break
+            if pointer_start is None:
+                continue
+
+            # Trova la fine del blocco pointer
+            pointer_end = stream_end
+            for n in range(pointer_start + 1, stream_end):
+                raw = lines[n]
+                if not raw.strip():
+                    continue
+                if (len(raw) - len(raw.lstrip())) <= 4:
+                    pointer_end = n
+                    break
+
+            # Raccoglie i valori scalari di loop_start/loop_end (a 6 spazi) e
+            # rileva la presenza di loop_dur.
+            loop_start_val: Optional[float] = None
+            loop_end_val: Optional[float] = None
+            loop_end_line: Optional[int] = None
+            has_loop_dur = False
+
+            for n in range(pointer_start + 1, pointer_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                leading = len(raw) - len(raw.lstrip())
+                if not stripped or stripped.startswith('#') or leading != 6:
+                    continue
+                m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)', stripped)
+                if not m:
+                    continue
+                key, val_str = m.group(1), m.group(2).strip()
+                if key == 'loop_dur':
+                    has_loop_dur = True
+                    continue
+                if key not in ('loop_start', 'loop_end'):
+                    continue
+                # Envelope o valore vuoto: endpoint dinamici, esenti dal check.
+                if not val_str or val_str.startswith('[') or val_str.startswith('{') \
+                        or val_str.startswith('#'):
+                    continue
+                try:
+                    val = float(val_str)
+                except ValueError:
+                    continue
+                if key == 'loop_start':
+                    loop_start_val = val
+                else:
+                    loop_end_val = val
+                    loop_end_line = n
+
+            # loop_dur vince su loop_end: nessuna segnalazione di degenerazione.
+            if has_loop_dur:
+                continue
+
+            if (loop_start_val is not None and loop_end_val is not None
+                    and loop_end_val <= loop_start_val):
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(loop_end_line),
+                    message=(
+                        f'`loop_end` ({loop_end_val}) deve essere maggiore di '
+                        f'`loop_start` ({loop_start_val}): finestra di loop '
+                        'degenere. Per un loop a cavallo della fine del file usa '
+                        '`loop_dur` (`loop_end` resta confinato a '
+                        '[0, sample_dur]).'
+                    ),
+                    severity=DiagnosticSeverity.Error,
                     source=SOURCE,
                 ))
 

@@ -103,7 +103,15 @@ _BLOCK_KEY_DOCS = {
         "- `loop_dur` — Durata del loop — ha priorità su `loop_end`\n"
         "- `loop_unit` — Unità dei parametri loop: `absolute` \\| `normalized`\n\n"
         "> Tutti i parametri accettano envelope `[[t, v], ...]` tranne\n"
-        "> `loop_unit` (meta-parametro) e `start` (valore raw)."
+        "> `loop_unit` (meta-parametro) e `start` (valore raw).\n\n"
+        "**Confinamento al loop.** Con un loop attivo la posizione di lettura\n"
+        "del grano — base + `offset_range` + offset di pointer delle voci — viene\n"
+        "confinata in `[loop_start, loop_end)` con wrap modulare. Senza loop la\n"
+        "deviazione si distribuisce sull'intero file.\n\n"
+        "Un loop a cavallo della fine del file è esprimibile **solo** via\n"
+        "`loop_dur` (`loop_start + loop_dur > sample_dur`): `loop_end` resta\n"
+        "vincolato a `[0, sample_dur]`. Una finestra statica con\n"
+        "`loop_end <= loop_start` è rifiutata dal motore."
     ),
     # Superficie unit-driven: la doc vive nel registry pitch_units.
     'pitch': PITCH_BLOCK_DOC,

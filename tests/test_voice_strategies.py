@@ -42,6 +42,11 @@ class TestRegistryStructure:
         assert VOICES_BLOCK_DOC
         assert 'voices' in VOICES_BLOCK_DOC.lower()
 
+    def test_voices_block_doc_cita_eredita_time_mode(self):
+        # PGE #144: gli envelope sotto voices.* ereditano il time_mode dello stream.
+        assert 'time_mode' in VOICES_BLOCK_DOC
+        assert 'normalized' in VOICES_BLOCK_DOC
+
 
 class TestPitchStrategies:
     """Verifica le strategy della dimensione pitch."""
@@ -318,6 +323,12 @@ class TestAccessFunctions:
         doc = get_top_level_doc('num_voices')
         assert doc is not None
         assert 'num_voices' in doc.lower() or 'voci' in doc.lower()
+
+    def test_num_voices_doc_riporta_max_256(self):
+        # PGE #145: il bound massimo di num_voices e' 256, non piu' 64.
+        doc = get_top_level_doc('num_voices')
+        assert '256' in doc
+        assert '64' not in doc
 
     def test_get_top_level_doc_dimensioni(self):
         for dim in VOICE_DIMENSIONS:
