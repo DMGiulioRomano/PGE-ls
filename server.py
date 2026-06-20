@@ -11,21 +11,25 @@ Architettura:
 
 Il server e' stateless rispetto ai documenti: ogni richiesta riceve
 il testo completo del documento (LSP full sync mode) e lo processa
-da zero. Non c'e' stato condiviso tra richieste diverse.
+da zero. Unica eccezione: la diagnostica, che sul didChange e'
+debounced e mantiene una piccola cache per-uri (testo -> risultato)
+per evitare ricalcoli su testo identico (vedi sezione DIAGNOSTICA).
 """
 
 import argparse
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 from pygls.server import LanguageServer
 from lsprotocol.types import (
     TEXT_DOCUMENT_COMPLETION,
     TEXT_DOCUMENT_HOVER,
     TEXT_DOCUMENT_DID_CHANGE,
+    TEXT_DOCUMENT_DID_CLOSE,
     TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_DID_SAVE,
     TEXT_DOCUMENT_CODE_ACTION,
@@ -49,6 +53,7 @@ from lsprotocol.types import (
     CompletionOptions,
     CompletionParams,
     DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams,
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
     HoverParams,
@@ -749,25 +754,119 @@ def handle_definition(params: DefinitionParams):
     )
 
 
+# =============================================================================
+# DIAGNOSTICA: DEBOUNCE + CACHE
+# =============================================================================
+
+# Ritardo di pubblicazione dopo un didChange: una raffica di keystroke
+# produce un solo ricalcolo (col testo dell'ultimo evento). Con valore <= 0
+# la pubblicazione e' sincrona (niente timer): usato nei test per
+# determinismo, e comportamento identico al server pre-debounce.
+DIAGNOSTICS_DEBOUNCE_S = 0.2
+
+_diag_lock = threading.Lock()
+# Timer di debounce pendente per uri.
+_diag_timers: Dict[str, threading.Timer] = {}
+# Contatore per-uri: un timer pubblica solo se la sua generation e' ancora
+# quella corrente (sopprime i publish stale quando cancel() perde la corsa
+# con un timer gia' in esecuzione).
+_diag_generation: Dict[str, int] = {}
+# Cache per-uri: (testo, diagnostics). Hit per uguaglianza di stringa:
+# indipendente dalla semantica di version del client (e da version=None).
+_diag_cache: Dict[str, Tuple[str, list]] = {}
+
+
+def _cancel_pending_diagnostics(uri: str) -> None:
+    """Invalida (generation) e cancella il timer di debounce pendente."""
+    with _diag_lock:
+        _diag_generation[uri] = _diag_generation.get(uri, 0) + 1
+        timer = _diag_timers.pop(uri, None)
+    if timer is not None:
+        timer.cancel()
+
+
+def _compute_and_publish(uri: str, text: str, use_cache: bool) -> None:
+    """
+    Calcola (o riusa dalla cache) e pubblica i diagnostici per (uri, testo).
+
+    Chiamabile da qualsiasi thread: il testo e' gia' stato letto dal
+    workspace (che NON e' thread-safe) sul main thread, e
+    publish_diagnostics di pygls serializza sul transport.
+    """
+    if _diagnostic_provider is None:
+        return
+
+    if use_cache:
+        with _diag_lock:
+            cached = _diag_cache.get(uri)
+        if cached is not None and cached[0] == text:
+            server.publish_diagnostics(uri, cached[1])
+            return
+
+    diagnostics = _diagnostic_provider.get_diagnostics(text)
+    with _diag_lock:
+        _diag_cache[uri] = (text, diagnostics)
+
+    server.publish_diagnostics(uri, diagnostics)
+    logger.debug(f"Pubblicati {len(diagnostics)} diagnostici per {uri}")
+
+
 def _publish_diagnostics(uri: str) -> None:
     """
-    Analizza il documento e pubblica i diagnostici a VSCode.
+    Analizza il documento e pubblica SUBITO i diagnostici (didOpen/didSave).
 
-    Questo e' il meccanismo push: il server invia i diagnostici
-    senza che VSCode li abbia richiesti esplicitamente.
-    Viene chiamato ogni volta che il documento cambia.
+    Bypassa la cache: l'apertura e il salvataggio restano un refresh
+    autorevole — rileggono anche le durate WAV usate dai bounds pointer,
+    che possono cambiare su disco a testo YAML invariato.
     """
     if not is_pge_file(uri):
         return
+    if _diagnostic_provider is None:
+        return
 
+    _cancel_pending_diagnostics(uri)
+    text = _get_document_text(server, uri)
+    _compute_and_publish(uri, text, use_cache=False)
+
+
+def _schedule_diagnostics(uri: str) -> None:
+    """
+    Pubblicazione debounced per didChange.
+
+    Il testo viene letto SUBITO sul main thread (il Workspace pygls non e'
+    thread-safe): il timer riceve testo e generation gia' catturati.
+    La cache evita il ricalcolo quando il testo coincide (es. undo/redo).
+    """
+    if not is_pge_file(uri):
+        return
     if _diagnostic_provider is None:
         return
 
     text = _get_document_text(server, uri)
-    diagnostics = _diagnostic_provider.get_diagnostics(text)
 
-    server.publish_diagnostics(uri, diagnostics)
-    logger.debug(f"Pubblicati {len(diagnostics)} diagnostici per {uri}")
+    if DIAGNOSTICS_DEBOUNCE_S <= 0:
+        _compute_and_publish(uri, text, use_cache=True)
+        return
+
+    with _diag_lock:
+        generation = _diag_generation.get(uri, 0) + 1
+        _diag_generation[uri] = generation
+        previous = _diag_timers.pop(uri, None)
+    if previous is not None:
+        previous.cancel()
+
+    def _fire() -> None:
+        with _diag_lock:
+            if _diag_generation.get(uri) != generation:
+                return  # un evento successivo ha invalidato questo timer
+            _diag_timers.pop(uri, None)
+        _compute_and_publish(uri, text, use_cache=True)
+
+    timer = threading.Timer(DIAGNOSTICS_DEBOUNCE_S, _fire)
+    timer.daemon = True
+    with _diag_lock:
+        _diag_timers[uri] = timer
+    timer.start()
 
 
 @server.feature(
@@ -792,14 +891,23 @@ def handle_did_open(params: DidOpenTextDocumentParams) -> None:
 
 @server.feature(TEXT_DOCUMENT_DID_CHANGE)
 def handle_did_change(params: DidChangeTextDocumentParams) -> None:
-    """Documento modificato: ricalcola e pubblica i diagnostici."""
-    _publish_diagnostics(params.text_document.uri)
+    """Documento modificato: diagnostica debounced (vedi _schedule_diagnostics)."""
+    _schedule_diagnostics(params.text_document.uri)
 
 
 @server.feature(TEXT_DOCUMENT_DID_SAVE)
 def handle_did_save(params: DidSaveTextDocumentParams) -> None:
     """Documento salvato: ricalcola i diagnostici anche al salvataggio."""
     _publish_diagnostics(params.text_document.uri)
+
+
+@server.feature(TEXT_DOCUMENT_DID_CLOSE)
+def handle_did_close(params: DidCloseTextDocumentParams) -> None:
+    """Documento chiuso: cancella il debounce pendente ed evita la cache."""
+    uri = params.text_document.uri
+    _cancel_pending_diagnostics(uri)
+    with _diag_lock:
+        _diag_cache.pop(uri, None)
 
 
 def _resolve_pitch_bounds(current_key: str, text: str, line: int):
@@ -860,12 +968,13 @@ def _resolve_envelope_context(
             y_min, y_max = bounds
     elif context.current_key and _completion_provider:
         bridge = _completion_provider._bridge
-        for p in bridge.get_all_parameters():
-            local_key = p.yaml_path.split('.')[-1]
-            if local_key == context.current_key or p.yaml_path == context.current_key:
-                if p.min_val is not None and p.max_val is not None:
-                    y_min, y_max = p.min_val, p.max_val
-                break
+        # Lookup O(1) per chiave locale o yaml_path completo.
+        # Il fallback sui raw bounds scatta solo se NESSUN parametro
+        # corrisponde: un parametro trovato ma senza bounds tiene i default.
+        p = bridge.get_parameter_by_key(context.current_key)
+        if p is not None:
+            if p.min_val is not None and p.max_val is not None:
+                y_min, y_max = p.min_val, p.max_val
         else:
             raw = bridge.get_raw_bounds(context.current_key)
             if raw and raw.get('min_val') is not None and raw.get('max_val') is not None:

@@ -106,6 +106,12 @@ class DiagnosticProvider:
         if not document_text:
             return []
 
+        # Scansione UNICA dei confini stream: tutte le fasi per-stream
+        # ricevono questa lista invece di rifare in proprio la ricerca
+        # dei marcatori '- ' a indent 2.
+        lines = document_text.split('\n')
+        streams = self._find_stream_blocks(lines)
+
         # Fase 1: parsing riga per riga.
         # parsed = lista di (yaml_path, valore_str, n_riga, indent_level)
         parsed = self._parse_document(document_text)
@@ -113,17 +119,17 @@ class DiagnosticProvider:
         diagnostics = []
 
         # Fase 2: controllo chiavi duplicate nello stesso stream.
-        diagnostics.extend(self._check_duplicate_keys(document_text))
+        diagnostics.extend(self._check_duplicate_keys(lines, streams))
 
         # Fase 3: controllo campi obbligatori per ogni stream.
-        diagnostics.extend(self._check_mandatory_stream_fields(document_text))
+        diagnostics.extend(self._check_mandatory_stream_fields(lines, streams))
 
         # Fase 3b: parametri numerici senza valore.
         diagnostics.extend(self._check_missing_values(document_text))
 
         # Fase 3c: sbiadisce stream muted e stream non-solo.
-        diagnostics.extend(self._check_muted_streams(document_text))
-        diagnostics.extend(self._check_solo_streams(document_text))
+        diagnostics.extend(self._check_muted_streams(lines, streams))
+        diagnostics.extend(self._check_solo_streams(lines, streams))
 
         # Fase 3: controllo exclusive_group.
         diagnostics.extend(self._check_exclusive_groups(parsed))
@@ -138,25 +144,30 @@ class DiagnosticProvider:
         diagnostics.extend(self._check_grain_envelope(document_text))
 
         # Fase 5c: validazione del blocco pitch (superficie unit-driven).
-        diagnostics.extend(self._check_pitch_block(document_text))
+        diagnostics.extend(self._check_pitch_block(lines, streams))
 
         # Fase 6: validazione del blocco voices (strategy, kwargs, enum).
-        diagnostics.extend(self._check_voice_strategies(document_text))
+        diagnostics.extend(self._check_voice_strategies(lines, streams))
 
         # Fase 7: start bypassato da loop_start envelope.
-        diagnostics.extend(self._check_start_bypassed_by_loop_start(document_text))
+        diagnostics.extend(self._check_start_bypassed_by_loop_start(lines, streams))
 
         # Fase 8: loop_dur e loop_end presenti insieme (loop_dur ha priorita').
-        diagnostics.extend(self._check_loop_dur_overrides_loop_end(document_text))
+        diagnostics.extend(self._check_loop_dur_overrides_loop_end(lines, streams))
 
         # Fase 9: bounds dinamici per i parametri pointer (normalized vs absolute).
-        diagnostics.extend(self._check_pointer_param_bounds(document_text, self._refs_dir))
+        diagnostics.extend(self._check_pointer_param_bounds(
+            document_text, lines, streams, self._refs_dir,
+        ))
 
         return diagnostics
 
 
 
-    def _check_duplicate_keys(self, document_text: str) -> List[Diagnostic]:
+    def _check_duplicate_keys(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
         """
         Controlla chiavi duplicate nello stesso stream.
 
@@ -168,19 +179,8 @@ class DiagnosticProvider:
         Chiavi permesse in stream diversi: non sono duplicate.
         """
         diagnostics = []
-        lines = document_text.split('\n')
 
-        # Trova i confini di ogni stream
-        stream_starts = []
-        for n, line in enumerate(lines):
-            stripped = line.strip()
-            leading = len(line) - len(line.lstrip())
-            if (stripped.startswith('- ') or stripped == '-') and leading == 2:
-                stream_starts.append(n)
-
-        for idx, start in enumerate(stream_starts):
-            end = stream_starts[idx + 1] if idx + 1 < len(stream_starts) else len(lines)
-
+        for start, end, _keys in streams:
             # Raccoglie (path_completo, n_riga) per questo stream.
             # Il path include il blocco padre per evitare falsi positivi:
             # 'duration' a livello stream != 'dephase.duration' != 'grain.duration'
@@ -190,7 +190,7 @@ class DiagnosticProvider:
             current_block = None
             current_block_indent = -1
 
-            for n in range(start, end):
+            for n in range(start, end + 1):
                 raw = lines[n]
                 stripped = raw.strip()
                 leading = len(raw) - len(raw.lstrip())
@@ -286,7 +286,8 @@ class DiagnosticProvider:
     _MANDATORY_FIELDS = ['stream_id', 'onset', 'duration', 'sample']
 
     def _check_mandatory_stream_fields(
-        self, document_text: str
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
     ) -> List[Diagnostic]:
         """
         Controlla che ogni elemento della lista streams abbia i quattro
@@ -294,38 +295,13 @@ class DiagnosticProvider:
 
         Produce un Warning per ogni campo mancante, puntando alla riga
         del marcatore '- ' dello stream.
+
+        Le chiavi presenti vengono lette dal dict gia' raccolto da
+        _find_stream_blocks (stessa logica di estrazione).
         """
         diagnostics = []
-        lines = document_text.split('\n')
 
-        # Trova tutti gli stream: marcatori '- ' a indent 2 (2 spazi)
-        stream_starts = []
-        for n, line in enumerate(lines):
-            stripped = line.strip()
-            leading = len(line) - len(line.lstrip())
-            if (stripped.startswith('- ') or stripped == '-') and leading == 2:
-                stream_starts.append(n)
-
-        for idx, start_line in enumerate(stream_starts):
-            # Determina la fine dello stream (prossimo marcatore o EOF)
-            end_line = stream_starts[idx + 1] if idx + 1 < len(stream_starts)                        else len(lines)
-
-            # Raccoglie le chiavi presenti in questo stream
-            present_keys = set()
-            for n in range(start_line, end_line):
-                raw = lines[n]
-                stripped = raw.strip()
-
-                # Rimuovi marcatore lista sulla riga di inizio
-                if stripped.startswith('- '):
-                    stripped = stripped[2:].strip()
-
-                # Estrai chiave da 'chiave: valore' o 'chiave:'
-                if ':' in stripped:
-                    key = stripped[:stripped.index(':')].strip()
-                    if key and all(c.isalnum() or c == '_' for c in key):
-                        present_keys.add(key)
-
+        for start_line, _end, present_keys in streams:
             # Produce Warning per ogni campo mancante
             for field in self._MANDATORY_FIELDS:
                 if field not in present_keys:
@@ -551,10 +527,12 @@ class DiagnosticProvider:
         """
         Controlla i valori Y dei breakpoints negli envelope standard.
 
-        Un envelope standard e' una lista YAML di breakpoints [t, y].
-        Per ogni y controlla che sia nei bounds del parametro padre.
+        Due forme riconosciute:
+          - block-style: chiave nuda seguita da righe '- [t, y]'
+          - inline: 'key: [[t, v], ...]' sulla riga della chiave
+            (anche breakpoint singolo [t, y] e formato compact loop)
 
-        Produce Error se un valore y e' fuori dai bounds.
+        Produce Error se un valore y e' fuori dai bounds del parametro.
         """
         import ast
         diagnostics = []
@@ -567,6 +545,14 @@ class DiagnosticProvider:
             if p.min_val is not None and p.max_val is not None and not p.is_internal \
                     and not p.yaml_path.startswith(_PITCH_OWNED_PREFIX):
                 params_bounds[p.yaml_path] = (p.min_val, p.max_val)
+
+        # Indice di risoluzione chiave -> yaml_path (chiave locale e path
+        # completo, primo match in ordine di registrazione): usato dal ramo
+        # block-style e da quello inline senza riscandire params_bounds.
+        key_to_path: Dict[str, str] = {}
+        for yp in params_bounds:
+            key_to_path.setdefault(yp.split('.')[-1], yp)
+            key_to_path.setdefault(yp, yp)
 
         # Scansione: tiene traccia del parametro corrente e del suo path
         current_param_path = None
@@ -583,13 +569,7 @@ class DiagnosticProvider:
             if ': ' not in stripped and stripped.endswith(':'):
                 key = stripped[:-1].strip()
                 if key and all(c.isalnum() or c == '_' for c in key):
-                    # Cerca il yaml_path corrispondente
-                    found = None
-                    for yp in params_bounds:
-                        if yp.split('.')[-1] == key or yp == key:
-                            found = yp
-                            break
-                    current_param_path = found
+                    current_param_path = key_to_path.get(key)
                     current_indent = leading
                 continue
 
@@ -652,6 +632,34 @@ class DiagnosticProvider:
                                 ))
                 except Exception:
                     pass
+                continue
+
+            # Envelope inline sulla riga della chiave: 'key: [[t, v], ...]',
+            # breakpoint singolo [t, y] o compact loop. Stessa risoluzione e
+            # stesso messaggio del ramo block-style; valori non parseabili
+            # vengono ignorati (tolleranza, come literal_eval sui breakpoint).
+            m_inline = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(\[.*)$',
+                                stripped)
+            if m_inline:
+                inline_path = key_to_path.get(m_inline.group(1))
+                if inline_path is None:
+                    continue
+                min_val, max_val = params_bounds[inline_path]
+                for y_val in self._extract_envelope_y_values(m_inline.group(2)):
+                    if y_val < min_val or y_val > max_val:
+                        diagnostics.append(Diagnostic(
+                            range=Range(
+                                start=Position(line=n, character=0),
+                                end=Position(line=n, character=len(line)),
+                            ),
+                            message=(
+                                f"Valore envelope {y_val} fuori dai bounds "
+                                f"del parametro '{inline_path}': "
+                                f"[{min_val}, {max_val}]."
+                            ),
+                            severity=DiagnosticSeverity.Error,
+                            source='pge-ls',
+                        ))
 
         return diagnostics
 
@@ -921,13 +929,15 @@ class DiagnosticProvider:
             streams.append((start, end, keys))
         return streams
 
-    def _check_muted_streams(self, document_text: str) -> List[Diagnostic]:
+    def _check_muted_streams(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
         """
         Sbiadisce (DiagnosticTag.Unnecessary) ogni stream con muted: true.
         """
         diagnostics = []
-        lines = document_text.split('\n')
-        for start, end, keys in self._find_stream_blocks(lines):
+        for start, end, keys in streams:
             if 'mute' in keys:
                 end_char = len(lines[end]) if end < len(lines) else 0
                 diagnostics.append(Diagnostic(
@@ -942,15 +952,15 @@ class DiagnosticProvider:
                 ))
         return diagnostics
 
-    def _check_solo_streams(self, document_text: str) -> List[Diagnostic]:
+    def _check_solo_streams(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
         """
         Se almeno uno stream ha solo: true, sbiadisce tutti gli altri
         (che non hanno a loro volta solo: true).
         """
         diagnostics = []
-        lines = document_text.split('\n')
-        streams = self._find_stream_blocks(lines)
-
         solo_set = {
             i for i, (_, _, keys) in enumerate(streams)
             if 'solo' in keys
@@ -1100,7 +1110,10 @@ class DiagnosticProvider:
     # FASE 5c: BLOCCO PITCH (superficie unit-driven)
     # -------------------------------------------------------------------------
 
-    def _check_pitch_block(self, document_text: str) -> List[Diagnostic]:
+    def _check_pitch_block(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
         """
         Valida il blocco pitch: di ogni stream, speculare alla validazione
         strict di PitchController._select_unit del motore:
@@ -1118,12 +1131,8 @@ class DiagnosticProvider:
         `pitch: {}` e blocco assente restano validi (default semitoni neutro).
         """
         diagnostics: List[Diagnostic] = []
-        if not document_text:
-            return diagnostics
 
-        lines = document_text.split('\n')
-
-        for stream_start, stream_end, _keys in self._find_stream_blocks(lines):
+        for stream_start, stream_end, _keys in streams:
             pitch_line = None
             for n in range(stream_start, stream_end + 1):
                 raw = lines[n]
@@ -1438,7 +1447,10 @@ class DiagnosticProvider:
                 ys.append(item[1])
         return ys
 
-    def _check_voice_strategies(self, document_text: str) -> List[Diagnostic]:
+    def _check_voice_strategies(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
         """
         Valida il blocco voices: di ogni stream.
 
@@ -1449,23 +1461,10 @@ class DiagnosticProvider:
           3. I kwargs di tipo enum devono avere un valore nel set consentito.
         """
         diagnostics: List[Diagnostic] = []
-        if not document_text:
-            return diagnostics
 
-        lines = document_text.split('\n')
-        n_lines = len(lines)
-
-        # Trova tutti gli stream (marcatore '- ' a 2 spazi)
-        stream_starts: List[int] = []
-        for n, line in enumerate(lines):
-            stripped = line.strip()
-            leading = len(line) - len(line.lstrip())
-            if (stripped.startswith('- ') or stripped == '-') and leading == 2:
-                stream_starts.append(n)
-
-        for idx, stream_start in enumerate(stream_starts):
-            stream_end = (stream_starts[idx + 1] if idx + 1 < len(stream_starts)
-                          else n_lines)
+        for stream_start, stream_end_incl, _keys in streams:
+            # I range interni usano il confine esclusivo
+            stream_end = stream_end_incl + 1
 
             # Cerca il blocco voices: nello stream (a 4 spazi)
             voices_start = None
@@ -1803,7 +1802,10 @@ class DiagnosticProvider:
 
         return diagnostics
 
-    def _check_start_bypassed_by_loop_start(self, document_text: str) -> List[Diagnostic]:
+    def _check_start_bypassed_by_loop_start(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
         """
         Warning su 'start' quando 'loop_start' e' definito come envelope
         nello stesso blocco pointer:.
@@ -1818,20 +1820,9 @@ class DiagnosticProvider:
           e le righe successive sono piu' indentate (blocco lista o dict)
         """
         diagnostics = []
-        lines = document_text.split('\n')
 
-        # Trova i confini di ogni stream (marcatori '- ' a 2 spazi)
-        stream_starts = [
-            n for n, line in enumerate(lines)
-            if (line.strip().startswith('- ') or line.strip() == '-')
-            and (len(line) - len(line.lstrip())) == 2
-        ]
-        stream_ranges = [
-            (s, stream_starts[i + 1] if i + 1 < len(stream_starts) else len(lines))
-            for i, s in enumerate(stream_starts)
-        ]
-
-        for stream_start, stream_end in stream_ranges:
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
             # Trova il blocco pointer: (header a 4 spazi)
             pointer_start = None
             for n in range(stream_start, stream_end):
@@ -1901,7 +1892,10 @@ class DiagnosticProvider:
 
         return diagnostics
 
-    def _check_loop_dur_overrides_loop_end(self, document_text: str) -> List[Diagnostic]:
+    def _check_loop_dur_overrides_loop_end(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
         """
         Warning quando loop_dur e loop_end sono entrambi presenti nello stesso
         blocco pointer:.
@@ -1910,19 +1904,9 @@ class DiagnosticProvider:
         loop_end = loop_start + loop_dur, ignorando completamente loop_end.
         """
         diagnostics = []
-        lines = document_text.split('\n')
 
-        stream_starts = [
-            n for n, line in enumerate(lines)
-            if (line.strip().startswith('- ') or line.strip() == '-')
-            and (len(line) - len(line.lstrip())) == 2
-        ]
-        stream_ranges = [
-            (s, stream_starts[i + 1] if i + 1 < len(stream_starts) else len(lines))
-            for i, s in enumerate(stream_starts)
-        ]
-
-        for stream_start, stream_end in stream_ranges:
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
             # Trova il blocco pointer: (header a 4 spazi)
             pointer_start = None
             for n in range(stream_start, stream_end):
@@ -2041,7 +2025,8 @@ class DiagnosticProvider:
     _POINTER_SCALAR_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
 
     def _check_pointer_param_bounds(
-        self, document_text: str, refs_dir: str
+        self, document_text: str, lines: List[str],
+        streams: List[Tuple[int, int, dict]], refs_dir: str,
     ) -> List[Diagnostic]:
         """
         Valida i valori scalari di start, loop_start, loop_end, loop_dur
@@ -2055,23 +2040,16 @@ class DiagnosticProvider:
               altrimenti solo [0.0, +inf] (controlla solo limite inferiore)
 
         I valori envelope (che iniziano con '[') vengono ignorati.
+
+        document_text resta necessario per _get_effective_unit_mode
+        (helper condiviso con l'hover, lavora sul testo completo).
         """
         from granular_ls.providers.hover_provider import _get_effective_unit_mode
 
         diagnostics = []
-        lines = document_text.split('\n')
 
-        stream_starts = [
-            n for n, line in enumerate(lines)
-            if (line.strip().startswith('- ') or line.strip() == '-')
-            and (len(line) - len(line.lstrip())) == 2
-        ]
-        stream_ranges = [
-            (s, stream_starts[i + 1] if i + 1 < len(stream_starts) else len(lines))
-            for i, s in enumerate(stream_starts)
-        ]
-
-        for stream_start, stream_end in stream_ranges:
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
             # Estrai il path del sample da questo stream (chiave a indent 4)
             sample_path_raw = ''
             for n in range(stream_start, stream_end):

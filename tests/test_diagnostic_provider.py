@@ -809,6 +809,102 @@ class TestGetDiagnosticsEnvelopeBounds:
         assert errors == []
 
 
+class TestEnvelopeBoundsInline:
+    """
+    Envelope inline sulla riga della chiave: key: [[t, v], ...]
+
+    Prima di questo check venivano validati solo i breakpoint block-style
+    ('- [t, v]' su righe separate sotto una chiave nuda). L'estrazione dei
+    valori Y riusa _extract_envelope_y_values (stessi formati del check
+    pitch: breakpoints standard, breakpoint singolo [t, y], compact loop).
+    """
+
+    @staticmethod
+    def _stream(body: str) -> str:
+        return (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            + body
+        )
+
+    def test_inline_fuori_bounds_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream("    density: [[0.0, 100.0], [10.0, 9999.0]]\n")
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if d.severity == DiagnosticSeverity.Error
+                  and 'fuori dai bounds' in d.message]
+        assert len(errors) == 1
+        assert "'density'" in errors[0].message
+        assert '9999' in errors[0].message
+
+    def test_inline_errore_punta_alla_riga_della_chiave(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream("    density: [[0.0, 100.0], [10.0, 9999.0]]\n")
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if d.severity == DiagnosticSeverity.Error
+                  and 'fuori dai bounds' in d.message]
+        assert errors[0].range.start.line == 5
+
+    def test_inline_dentro_bounds_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream("    density: [[0.0, 100.0], [10.0, 500.0]]\n")
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if d.severity == DiagnosticSeverity.Error]
+        assert errors == []
+
+    def test_inline_compact_loop_valida_y_del_pattern(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        # Compact: [[[x_pct, y], ...], end_time, n_reps] — 9999 nel pattern
+        yaml = self._stream(
+            "    density: [[[0, 100.0], [50, 9999.0], [100, 100.0]], 10, 3]\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if d.severity == DiagnosticSeverity.Error
+                  and 'fuori dai bounds' in d.message]
+        assert len(errors) == 1
+        assert '9999' in errors[0].message
+
+    def test_inline_breakpoint_singolo(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream("    volume: [0.0, -80.0]\n")  # -80 < -60 (min)
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if d.severity == DiagnosticSeverity.Error
+                  and 'fuori dai bounds' in d.message]
+        assert len(errors) == 1
+        assert "'volume'" in errors[0].message
+
+    def test_inline_risoluzione_per_chiave_locale(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        # 'duration' dentro grain: risolve grain.duration (0.001, 10) per
+        # chiave locale, come gia' avviene per i breakpoint block-style.
+        yaml = self._stream(
+            "    grain:\n"
+            "      duration: [[0.0, 0.05], [10.0, 99.0]]\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if d.severity == DiagnosticSeverity.Error
+                  and 'fuori dai bounds' in d.message]
+        assert len(errors) == 1
+        assert "'grain.duration'" in errors[0].message
+
+    def test_inline_lista_non_numerica_ignorata(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        # Lista di nomi (grain.envelope) e lista non parseabile su chiave
+        # con bounds: entrambe ignorate (tolleranza, come il block-style).
+        yaml = self._stream(
+            "    grain:\n"
+            "      envelope: [hanning, hamming]\n"
+            "    density: [alto, basso]\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if d.severity == DiagnosticSeverity.Error
+                  and 'fuori dai bounds' in d.message]
+        assert errors == []
+
+
 # =============================================================================
 # Punto 3: exclusive group - errore su entrambe le righe con priorita'
 # =============================================================================

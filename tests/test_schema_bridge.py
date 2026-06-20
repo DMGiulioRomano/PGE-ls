@@ -391,6 +391,71 @@ class TestGetParameter:
 
 
 # =============================================================================
+# 5b. get_parameter_by_key()
+# =============================================================================
+
+class TestGetParameterByKey:
+    """
+    Lookup indicizzato per chiave YAML: sostituisce le vecchie scansioni
+    lineari di get_all_parameters() in server e provider. Deve replicarne
+    esattamente la semantica: match per chiave locale O yaml_path completo,
+    primo parametro vincente a parita' di chiave.
+    """
+
+    def test_match_per_yaml_path_completo(self, minimal_raw_data):
+        bridge = SchemaBridge(minimal_raw_data)
+        result = bridge.get_parameter_by_key('grain.duration')
+        assert result is not None
+        assert result.name == 'grain_duration'
+
+    def test_match_per_chiave_locale(self, minimal_raw_data):
+        bridge = SchemaBridge(minimal_raw_data)
+        result = bridge.get_parameter_by_key('duration')
+        assert result is not None
+        assert result.yaml_path == 'grain.duration'
+
+    def test_chiave_root_level(self, minimal_raw_data):
+        bridge = SchemaBridge(minimal_raw_data)
+        result = bridge.get_parameter_by_key('density')
+        assert result is not None
+        assert result.name == 'density'
+
+    def test_chiave_sconosciuta_ritorna_none(self, minimal_raw_data):
+        bridge = SchemaBridge(minimal_raw_data)
+        assert bridge.get_parameter_by_key('nonexistent') is None
+
+    def test_primo_parametro_vince_a_parita_di_chiave_locale(self):
+        """
+        Due parametri con la stessa chiave locale ('duration'): vince
+        quello registrato per primo, come la vecchia scansione lineare.
+        """
+        raw = {
+            'specs': [
+                make_raw_spec('grain_duration', 'grain.duration', default=0.05),
+                make_raw_spec('dephase_duration', 'dephase.duration', default=0.0),
+            ],
+            'bounds': {
+                'grain_duration': make_raw_bounds(0.001, 10.0),
+                'dephase_duration': make_raw_bounds(0.0, 1.0),
+            },
+        }
+        bridge = SchemaBridge(raw)
+        result = bridge.get_parameter_by_key('duration')
+        assert result is not None
+        assert result.name == 'grain_duration'
+        # I path completi restano entrambi raggiungibili
+        assert bridge.get_parameter_by_key('grain.duration').name == 'grain_duration'
+        assert bridge.get_parameter_by_key('dephase.duration').name == 'dephase_duration'
+
+    def test_include_solo_e_mute_iniettati(self, minimal_raw_data):
+        """solo/mute vengono iniettati dal costruttore e devono essere indicizzati."""
+        bridge = SchemaBridge(minimal_raw_data)
+        result = bridge.get_parameter_by_key('solo')
+        assert result is not None
+        assert result.min_val is None  # nessun bounds: nessun clamp envelope
+
+
+# =============================================================================
 # 6. get_exclusive_groups()
 # =============================================================================
 
