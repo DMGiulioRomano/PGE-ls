@@ -1320,13 +1320,13 @@ class TestCheckMissingValues:
         raw = {
             'specs': [],
             'bounds': {},
-            'extra_bounds': {'num_voices': {'min_val': 1.0, 'max_val': 64.0,
+            'extra_bounds': {'num_voices': {'min_val': 1.0, 'max_val': 256.0,
                                             'min_range': 0.0, 'max_range': 0.0,
                                             'default_jitter': 0.0, 'variation_mode': 'additive'}},
         }
         from granular_ls.schema_bridge import SchemaBridge
         b = SchemaBridge({'specs': [], 'bounds': {'num_voices': {
-            'min_val': 1.0, 'max_val': 64.0, 'min_range': 0.0,
+            'min_val': 1.0, 'max_val': 256.0, 'min_range': 0.0,
             'max_range': 0.0, 'default_jitter': 0.0, 'variation_mode': 'additive'}}})
         provider = DiagnosticProvider(b)
         yaml = (
@@ -1967,3 +1967,84 @@ class TestVoicePitchUnit:
                   if d.severity == DiagnosticSeverity.Error
                   and 'inversion' in d.message]
         assert len(errors) == 1
+
+
+# =============================================================================
+# loop_end <= loop_start (finestra di loop degenere) — PGE commit ec61242
+# =============================================================================
+
+class TestLoopEndLeLoopStart:
+    """Fase 10: loop_end <= loop_start (valori scalari) -> Error."""
+
+    def _stream(self, pointer_body: str) -> str:
+        return (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: a.wav\n"
+            "    pointer:\n"
+            + pointer_body
+        )
+
+    def test_loop_end_minore_di_loop_start_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "      loop_start: 2.0\n"
+            "      loop_end: 1.0\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'loop_end' in d.message]
+        assert len(errors) == 1
+
+    def test_loop_end_uguale_a_loop_start_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "      loop_start: 2.0\n"
+            "      loop_end: 2.0\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'loop_end' in d.message]
+        assert len(errors) == 1
+
+    def test_loop_end_maggiore_di_loop_start_ok(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "      loop_start: 1.0\n"
+            "      loop_end: 2.0\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'loop_end' in d.message]
+        assert len(errors) == 0
+
+    def test_loop_dur_presente_nessun_errore_degenere(self, bridge):
+        # loop_dur ha priorita': loop_end viene ignorato dal motore.
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "      loop_start: 2.0\n"
+            "      loop_end: 1.0\n"
+            "      loop_dur: 3.0\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'degenere' in d.message]
+        assert len(errors) == 0
+
+    def test_loop_end_envelope_esente(self, bridge):
+        # Endpoint dinamici (envelope): nessun controllo statico.
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "      loop_start: 2.0\n"
+            "      loop_end: [[0.0, 1.0], [1.0, 0.5]]\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'loop_end' in d.message and 'degenere' in d.message]
+        assert len(errors) == 0

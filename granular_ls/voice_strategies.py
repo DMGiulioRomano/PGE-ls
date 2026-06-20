@@ -521,7 +521,7 @@ VOICE_TOP_LEVEL_KEYS: List[str] = VOICE_ENVELOPE_KEYS + VOICE_DIMENSIONS
 _VOICE_TOP_LEVEL_DOCS: Dict[str, str] = {
     'num_voices': (
         "**num_voices** — Numero di voci attive per questo stream.\n\n"
-        "Range: `[1, 64]` · Variazione: `quantized` (intera)\n\n"
+        "Range: `[1, 256]` · Variazione: `quantized` (intera)\n\n"
         "Accetta envelope per variare il numero di voci nel tempo:\n"
         "```yaml\nnum_voices: [[0.0, 1], [4.0, 8], [8.0, 1]]\n```\n\n"
         "Ogni voce è una copia indipendente del generatore granulare "
@@ -580,7 +580,12 @@ VOICES_BLOCK_DOC = (
     "- `onset_offset` — sfasamento temporale di onset\n"
     "- `pointer` — offset di posizione di lettura\n"
     "- `pan` — posizionamento stereo\n\n"
-    "```yaml\nvoices:\n  num_voices: 4\n  pitch:\n    strategy: chord\n    chord: dom7\n```"
+    "```yaml\nvoices:\n  num_voices: 4\n  pitch:\n    strategy: chord\n    chord: dom7\n```\n\n"
+    "**Tempo degli envelope.** I breakpoint temporali `[t, v]` degli envelope "
+    "dentro `voices.*` (es. `pan.step`, `pointer.pointer_range`) **ereditano** il "
+    "`time_mode` dello stream, come gli envelope diretti: con `time_mode: normalized` "
+    "i tempi sono in `[0, 1]` e vengono scalati su `duration`. La forma dict con "
+    "`time_mode`/`time_unit` locale sovrascrive quello dello stream."
 )
 
 
