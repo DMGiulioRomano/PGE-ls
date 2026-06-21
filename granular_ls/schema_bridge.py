@@ -103,6 +103,7 @@ class SchemaBridge:
             'gaussian', 'kaiser', 'rectangle', 'sinc', 'half_sine',
             'expodec', 'expodec_strong', 'exporise', 'exporise_strong',
             'rexpodec', 'rexporise',
+            'triangle',  # alias di 'bartlett' (WindowRegistry.ALIASES)
         ]
         self._grain_envelope_names: List[str] = (
             raw_data.get('grain_envelope_names') or _STATIC_GRAIN_ENVELOPE_NAMES
@@ -575,7 +576,7 @@ class SchemaBridge:
 
             # Carica le modalita' di distribuzione da DistributionFactory
             try:
-                from parameters.distribution_factory import DistributionFactory
+                from shared.distribution_strategy import DistributionFactory
                 raw_data['distribution_modes'] = list(DistributionFactory._registry.keys())
             except Exception:
                 pass  # Usa il fallback statico nel costruttore
@@ -583,7 +584,9 @@ class SchemaBridge:
             # Carica i nomi delle finestrature del grano da WindowRegistry
             try:
                 from controllers.window_registry import WindowRegistry
-                raw_data['grain_envelope_names'] = list(WindowRegistry.WINDOWS.keys())
+                # all_names() include gli alias (es. 'triangle' -> 'bartlett'),
+                # che il motore accetta ma WINDOWS.keys() escluderebbe.
+                raw_data['grain_envelope_names'] = list(WindowRegistry.all_names())
             except Exception:
                 pass  # Usa il fallback statico nel costruttore
 
@@ -647,4 +650,6 @@ class SchemaBridge:
         raw = {'specs': specs, 'bounds': bounds}
         if 'distribution_modes' in data:
             raw['distribution_modes'] = data['distribution_modes']
+        if 'grain_envelope_names' in data:
+            raw['grain_envelope_names'] = data['grain_envelope_names']
         return cls(raw)

@@ -442,11 +442,14 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
     # PAN: posizionamento stereo per voce
     # -----------------------------------------------------------------------
     'pan': {
-        'linear': VoiceStrategySpec(
-            name='linear',
+        'range': VoiceStrategySpec(
+            name='range',
             description=(
                 "Distribuisce le voci equidistanti nello spazio stereo.\n\n"
-                "**Esempio:** `spread: 90.0` con 4 voci → pan `[−45°, −15°, +15°, +45°]`."
+                "Le voci coprono l'intervallo `[−spread/2, +spread/2]` a passo "
+                "costante.\n\n"
+                "**Esempio:** `spread: 90.0` con 4 voci → pan "
+                "`[−45°, −15°, +15°, +45°]`."
             ),
             kwargs={
                 'spread': VoiceKwargSpec(
@@ -457,17 +460,21 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
                     description=(
                         "Ampiezza totale della distribuzione stereo in gradi.\n\n"
                         "Le voci sono equidistanti da `−spread/2` a `+spread/2`.\n\n"
-                        "Deve essere ≥ 0. Valore tipico: 60–120."
+                        "Deve essere ≥ 0. Accetta scalare o envelope. "
+                        "Valore tipico: 60–120."
                     ),
                 ),
             },
         ),
 
-        'random': VoiceStrategySpec(
-            name='random',
+        'stochastic': VoiceStrategySpec(
+            name='stochastic',
             description=(
-                "Assegna posizioni pan casuali deterministiche.\n\n"
-                "Ogni voce riceve una posizione stereo uniforme in `[−spread/2, +spread/2]`."
+                "Assegna a ogni voce una posizione pan casuale, stabile entro "
+                "il run.\n\n"
+                "Ogni voce riceve una posizione stereo uniforme in "
+                "`[−spread/2, +spread/2]`, fissa per tutta la durata. La voce 0 "
+                "resta sul pan base."
             ),
             kwargs={
                 'spread': VoiceKwargSpec(
@@ -477,27 +484,32 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
                     min_val=0.0,
                     description=(
                         "Ampiezza totale della distribuzione stereo in gradi.\n\n"
-                        "Ogni voce riceve una posizione casuale in `[−spread/2, +spread/2]`.\n\n"
-                        "Deve essere ≥ 0."
+                        "Ogni voce riceve una posizione casuale in "
+                        "`[−spread/2, +spread/2]`.\n\n"
+                        "Deve essere ≥ 0. Accetta scalare o envelope."
                     ),
                 ),
             },
         ),
 
-        'additive': VoiceStrategySpec(
-            name='additive',
+        'step': VoiceStrategySpec(
+            name='step',
             description=(
-                "Applica un offset pan fisso a tutte le voci.\n\n"
-                "Tutte le voci ricevono lo stesso offset `spread` rispetto al pan base dello stream."
+                "Spaziatura lineare uniforme tra voci.\n\n"
+                "La voce `i` riceve un offset di `i × step` gradi rispetto al "
+                "pan base dello stream.\n\n"
+                "**Esempio:** `step: 15.0` con 4 voci → offset "
+                "`[0°, 15°, 30°, 45°]`."
             ),
             kwargs={
-                'spread': VoiceKwargSpec(
-                    name='spread',
+                'step': VoiceKwargSpec(
+                    name='step',
                     type='float',
                     required=True,
                     description=(
-                        "Offset pan fisso in gradi applicato a tutte le voci.\n\n"
-                        "Può essere negativo (sinistra) o positivo (destra)."
+                        "Passo in gradi tra voci adiacenti.\n\n"
+                        "Può essere negativo (pan verso sinistra). "
+                        "Accetta scalare o envelope."
                     ),
                 ),
             },
@@ -563,8 +575,8 @@ _VOICE_TOP_LEVEL_DOCS: Dict[str, str] = {
     'pan': (
         "**pan** — Strategy di posizionamento stereo per voce.\n\n"
         "Dimensione opzionale. Se assente, tutte le voci usano il pan base dello stream.\n\n"
-        "Strategy disponibili: `linear`, `random`, `additive`\n\n"
-        "```yaml\npan:\n  strategy: linear\n  spread: 90.0\n```"
+        "Strategy disponibili: `range`, `stochastic`, `step`\n\n"
+        "```yaml\npan:\n  strategy: range\n  spread: 90.0\n```"
     ),
 }
 

@@ -519,7 +519,7 @@ class TestGetHoverPitchUnits:
         ('cents', '[-3600, 3600]'),
         ('quarter_tone', '[-72, 72]'),
         ('eighth_tone', '[-144, 144]'),
-        ('ratio', '[0.125, 8.0]'),
+        ('ratio', '[0.001, 8.0]'),
     ])
     def test_unita_preset_mostrano_bounds(self, bridge, key, atteso):
         provider = HoverProvider(bridge)

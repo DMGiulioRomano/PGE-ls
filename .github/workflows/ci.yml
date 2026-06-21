@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: python tests (providers · schema bridge · parità con PGE)
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout PGE-ls
+        uses: actions/checkout@v4
+        with:
+          path: PGE-ls
+      # Il language server rispecchia la superficie pubblica di
+      # PythonGranularEngine (nomi strategy, accordi, bounds delle unità pitch,
+      # nomi finestra, bounds dei parametri). Il repo motore viene clonato come
+      # sibling così tests/test_pge_parity.py gira davvero invece di skippare.
+      # Se PythonGranularEngine è privato, aggiungere un secret ENGINE_REPO_TOKEN
+      # (PAT con accesso in lettura); per un repo pubblico basta il token di
+      # default.
+      - name: checkout PythonGranularEngine
+        uses: actions/checkout@v4
+        with:
+          repository: DMGiulioRomano/PythonGranularEngine
+          path: PythonGranularEngine
+          token: ${{ secrets.ENGINE_REPO_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Solo le dipendenze del language server, pinnate come in requirements.txt.
+      # matplotlib / mcp-pyautogui-server servono alla GUI envelope, non ai test,
+      # e non vengono installati per tenere la CI veloce e affidabile.
+      - name: install deps
+        run: pip install "pygls==1.3.1" "lsprotocol==2023.0.1" "PyYAML==6.0.3" "pytest==8.4.2"
+      - name: run test suite (incl. parità con PGE)
+        working-directory: PGE-ls
+        env:
+          PGE_SRC: ${{ github.workspace }}/PythonGranularEngine/src
+        run: python -m pytest tests/ -q

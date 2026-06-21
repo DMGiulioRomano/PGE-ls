@@ -6,7 +6,7 @@ set -e  # esci subito se un comando fallisce
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
-CLIENT_DIR="$PROJECT_DIR/vscode-client"
+CLIENT_DIR="$PROJECT_DIR/clients/vscode"
 VSCODE_DIR="$CLIENT_DIR/.vscode"
 
 echo "==> pge-ls setup"
@@ -108,7 +108,7 @@ echo "======================================"
 echo ""
 echo "  Prossimi passi:"
 echo ""
-echo "  1. Apri VSCode sulla cartella vscode-client:"
+echo "  1. Apri VSCode sulla cartella clients/vscode:"
 echo "     code $CLIENT_DIR"
 echo ""
 echo "  2. In VSCode verifica settings.json (Cmd+Shift+P -> Open User Settings JSON):"

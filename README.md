@@ -1,6 +1,6 @@
 # pge-ls
 
-Language server VSCode per i file di configurazione `PGE_*.yaml` del [Python Granular Engine](https://github.com/DMGiulioRomano/easy).
+Language server VSCode per i file di configurazione `PGE_*.yaml` del [Python Granular Engine](https://github.com/DMGiulioRomano/PythonGranularEngine).
 
 Fornisce autocompletamento intelligente, documentazione hover e diagnostica in tempo reale mentre scrivi le configurazioni di sintesi granulare.
 
@@ -26,28 +26,33 @@ pge-ls/
       diagnostic_provider.py
       hover_provider.py
     envelope_snippets.py
+    pitch_units.py
+    voice_strategies.py
     schema_bridge.py
     yaml_analyzer.py
-  tests/                # suite TDD (434 test)
+  tests/                # suite TDD (pytest)
   server.py             # entry point pygls
+  envelope_gui.py       # GUI envelope (matplotlib), lanciata dal client
   setup.sh              # installazione per sviluppo
-  vscode-client/        # estensione VSCode
-    extension.js        # client LSP
-    server.py           # copia bundled del server
-    granular_ls/        # copia bundled dei moduli
-    package.json        # manifesto estensione
-    icon.png
-    README.md
+  build.sh              # sync delle copie bundled + packaging del .vsix
+  clients/
+    vscode/             # estensione VSCode
+      extension.js      # client LSP
+      package.json      # manifesto estensione
+      icon.png
+      README.md
+      # server.py + granular_ls/ qui sono copie bundled generate da build.sh
+      # (gitignored): modifica sempre le copie root, mai queste.
 ```
 
 ---
 
 ## Installazione rapida
 
-Scarica il `.vsix` dalla pagina [Releases](../../releases):
+Scarica il `.vsix` dalla pagina [Releases](../../releases) (la versione segue `clients/vscode/package.json`, attualmente `0.3.0`):
 
 ```bash
-code --install-extension pge-ls-0.1.0.vsix
+code --install-extension pge-ls-0.3.0.vsix
 ```
 
 Installa le dipendenze Python:
@@ -61,28 +66,44 @@ Configura in `Preferences > Settings` → `pgeLs`:
 | Impostazione | Descrizione |
 |---|---|
 | `pgeLs.pythonPath` | Percorso a Python (es. `python3.11`) |
-| `pgeLs.granularSrcPath` | Percorso alla cartella `src` del progetto |
+| `pgeLs.granularSrcPath` | Percorso alla cartella `src` del progetto granulare (abilita la superficie schema-driven: density, grain, pointer, volume, ...) |
+
+> Senza `granularSrcPath` (o uno `snapshotPath`) il server parte con schema vuoto:
+> restano i metadati statici (pitch, voci), ma spariscono i parametri
+> schema-driven. Vedi `clients/vscode/package.json` per tutte le impostazioni.
 
 ---
 
 ## Sviluppo
 
 ```bash
-git clone https://github.com/TUO_USERNAME/pge-ls.git
-cd pge-ls
-pip install pygls lsprotocol pytest
+git clone https://github.com/DMGiulioRomano/PGE-ls.git
+cd PGE-ls
+pip install pygls lsprotocol pytest PyYAML
 python -m pytest tests/ -q
+```
+
+Il test di parità con PGE (`tests/test_pge_parity.py`) verifica che i mirror
+statici (nomi strategy, accordi, bounds delle unità pitch, nomi finestra) non
+divergano dal motore. Salta se PGE non è disponibile; per eseguirlo, clona
+`PythonGranularEngine` come sibling oppure imposta `PGE_SRC`:
+
+```bash
+PGE_SRC=/percorso/a/PythonGranularEngine/src python -m pytest tests/test_pge_parity.py -q
 ```
 
 ### Aggiornare e ri-pacchettizzare
 
+`build.sh` sincronizza le copie bundled (`server.py`, `envelope_gui.py`,
+`granular_ls/`) dentro `clients/vscode/` e pacchettizza il `.vsix`:
+
 ```bash
-cp server.py vscode-client/server.py
-cp -r granular_ls vscode-client/granular_ls
-cd vscode-client
-npm install
-npx @vscode/vsce package --no-dependencies
+bash build.sh             # build del client VSCode
+bash build.sh --install   # build e installazione diretta in VSCode
 ```
+
+Modifica sempre le copie nella root del repo, mai quelle sotto `clients/vscode/`
+(vengono sovrascritte da `build.sh`).
 
 ---
 
