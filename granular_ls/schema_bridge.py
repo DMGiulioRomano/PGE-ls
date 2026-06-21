@@ -83,6 +83,7 @@ class SchemaBridge:
             'stream_id', 'onset', 'duration', 'sample',   # StreamContext
             'dephase', 'range_always_active', 'time_mode', # StreamConfig
             'time_scale', 'distribution_mode',
+            'clip_strategy', 'clip_margin',
             'solo', 'mute',                                # Generator flags
         ]
         self._stream_context_keys: List[str] = (
@@ -111,6 +112,10 @@ class SchemaBridge:
 
         # Conserviamo gli spec raw per get_dephase_keys()
         self._raw_specs = specs
+
+        # Override esplicito delle dephase keys: usato in modalita' snapshot,
+        # dove gli spec non conservano dephase_key. None => calcolo dagli spec.
+        self._dephase_keys_override: Optional[List[str]] = raw_data.get('dephase_keys')
 
         # Costruiamo il registry interno: name -> ParameterInfo
         # Il registry e' un dict per accesso O(1) in get_parameter().
@@ -327,6 +332,8 @@ class SchemaBridge:
         continua a supportare dephase sul pitch (PitchController passa
         dephase_key='pitch'). Viene garantito qui se lo schema e' popolato.
         """
+        if self._dephase_keys_override is not None:
+            return list(self._dephase_keys_override)
         seen = set()
         keys = []
         for spec in self._raw_specs:
@@ -411,6 +418,8 @@ class SchemaBridge:
             'parameters': [asdict(p) for p in self._params.values()],
             'distribution_modes': self._distribution_modes,
             'grain_envelope_names': self._grain_envelope_names,
+            'stream_context_keys': self._stream_context_keys,
+            'dephase_keys': self.get_dephase_keys(),
             'extra_bounds': extra_bounds,
         }
         return json.dumps(data, indent=2)
@@ -652,4 +661,8 @@ class SchemaBridge:
             raw['distribution_modes'] = data['distribution_modes']
         if 'grain_envelope_names' in data:
             raw['grain_envelope_names'] = data['grain_envelope_names']
+        if 'stream_context_keys' in data:
+            raw['stream_context_keys'] = data['stream_context_keys']
+        if 'dephase_keys' in data:
+            raw['dephase_keys'] = data['dephase_keys']
         return cls(raw)

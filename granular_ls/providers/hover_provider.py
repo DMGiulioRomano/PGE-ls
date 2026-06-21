@@ -661,7 +661,7 @@ class HoverProvider:
             hover = self._build_voice_top_key_hover(word)
             if hover is not None:
                 return hover
-            # Fallback: potrebbe essere dentro un inline dict, es. "pan: {strategy: additive}"
+            # Fallback: potrebbe essere dentro un inline dict, es. "pan: {strategy: range}"
             return self._build_voice_inline_dict_hover(word, document_text,
                                                        context.cursor_line)
 
@@ -738,7 +738,7 @@ class HoverProvider:
 
     def _build_voice_strategy_value_hover(self, dim: str,
                                            strategy_name: str) -> 'Optional[Hover]':
-        """Hover sul valore di strategy (es. 'additive' in 'strategy: additive')."""
+        """Hover sul valore di strategy (es. 'range' in 'strategy: range')."""
         spec = get_strategy_spec(dim, strategy_name)
         if spec is None:
             return None
@@ -764,7 +764,7 @@ class HoverProvider:
                                         cursor_line: int) -> 'Optional[Hover]':
         """
         Hover per parole dentro un inline dict voices, es.:
-          pan: {strategy: additive, spread: 0}
+          pan: {strategy: range, spread: 90}
         YamlAnalyzer non parsifica gli inline dict, quindi usiamo
         il testo della riga per ricostruire il contesto.
         """

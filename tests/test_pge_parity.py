@@ -74,6 +74,15 @@ def pge():
     from parameters.pitch_unit import PITCH_UNIT_PRESETS
     from parameters.parameter_definitions import GRANULAR_PARAMETERS
     from controllers.window_registry import WindowRegistry
+    from core.stream_config import StreamContext, StreamConfig
+    from dataclasses import fields as dc_fields
+    # Chiavi stream-level attese: campi di StreamContext (meno sample_dur_sec)
+    # + campi di StreamConfig (meno il riferimento context) + flag del Generator.
+    expected_stream_keys = (
+        [f.name for f in dc_fields(StreamContext) if f.name != 'sample_dur_sec']
+        + [f.name for f in dc_fields(StreamConfig) if f.name != 'context']
+        + ['solo', 'mute']
+    )
     yield SimpleNamespace(
         voice_strategies={
             'pitch': VOICE_PITCH_STRATEGIES,
@@ -85,6 +94,7 @@ def pge():
         PITCH_UNIT_PRESETS=PITCH_UNIT_PRESETS,
         GRANULAR_PARAMETERS=GRANULAR_PARAMETERS,
         WindowRegistry=WindowRegistry,
+        expected_stream_keys=expected_stream_keys,
     )
     # Teardown: ripristina sys.modules/sys.path allo stato precedente.
     for name in set(sys.modules) - before:
@@ -189,3 +199,47 @@ def test_distribution_modes_match(pge):
     ls_modes = set(bridge.get_distribution_modes())
     pge_modes = set(DistributionFactory._registry.keys())
     assert ls_modes == pge_modes
+
+
+# =============================================================================
+# Stream context keys (StreamContext + StreamConfig + flag Generator)
+# =============================================================================
+
+def test_stream_context_keys_match(pge):
+    from granular_ls.schema_bridge import SchemaBridge
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    ls_keys = set(bridge.get_stream_context_keys())
+    pge_keys = set(pge.expected_stream_keys)
+    assert ls_keys == pge_keys, (
+        f"Drift stream context keys: solo-LS={ls_keys - pge_keys}, "
+        f"solo-PGE={pge_keys - ls_keys}"
+    )
+
+
+# =============================================================================
+# Fedeltà dello snapshot: la modalità distribuzione (.vsix) non deve perdere
+# superficie rispetto alla modalità --src.
+# =============================================================================
+
+def test_snapshot_roundtrip_preserves_surface(pge):
+    import os
+    import tempfile
+    from granular_ls.schema_bridge import SchemaBridge
+
+    src_bridge = SchemaBridge.from_python_path(PGE_SRC)
+    snap = src_bridge.generate_snapshot()
+    fd, path = tempfile.mkstemp(suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(snap)
+        snap_bridge = SchemaBridge.from_snapshot(path)
+    finally:
+        os.unlink(path)
+
+    for getter in ('get_dephase_keys', 'get_stream_context_keys',
+                   'get_grain_envelope_names', 'get_distribution_modes'):
+        assert set(getattr(snap_bridge, getter)()) == set(getattr(src_bridge, getter)()), (
+            f"Lo snapshot perde superficie su {getter}()"
+        )
+    # Regressione del bug snapshot: le dephase keys non devono essere vuote.
+    assert snap_bridge.get_dephase_keys()
