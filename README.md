@@ -1,6 +1,6 @@
 # pge-ls
 
-Language server VSCode per i file di configurazione `PGE_*.yaml` del [Python Granular Engine](https://github.com/DMGiulioRomano/PythonGranularEngine).
+Language server (client VSCode e Pulsar) per i file di configurazione `PGE_*.yaml` del [Python Granular Engine](https://github.com/DMGiulioRomano/PythonGranularEngine).
 
 Fornisce autocompletamento intelligente, documentazione hover e diagnostica in tempo reale mentre scrivi le configurazioni di sintesi granulare.
 
@@ -40,6 +40,12 @@ pge-ls/
       extension.js      # client LSP
       package.json      # manifesto estensione
       icon.png
+      README.md
+      # server.py + granular_ls/ qui sono copie bundled generate da build.sh
+      # (gitignored): modifica sempre le copie root, mai queste.
+    pulsar/             # pacchetto Pulsar
+      lib/main.js       # client LSP (AutoLanguageClient)
+      package.json      # manifesto pacchetto
       README.md
       # server.py + granular_ls/ qui sono copie bundled generate da build.sh
       # (gitignored): modifica sempre le copie root, mai queste.
@@ -95,11 +101,14 @@ PGE_SRC=/percorso/a/PythonGranularEngine/src python -m pytest tests/test_pge_par
 ### Aggiornare e ri-pacchettizzare
 
 `build.sh` sincronizza le copie bundled (`server.py`, `envelope_gui.py`,
-`granular_ls/`) dentro `clients/vscode/` e pacchettizza il `.vsix`:
+`granular_ls/`, lo `schema_snapshot.json`) dentro la cartella del client e
+pacchettizza:
 
 ```bash
-bash build.sh             # build del client VSCode
+bash build.sh             # build del client VSCode (.vsix)
 bash build.sh --install   # build e installazione diretta in VSCode
+bash build.sh --pulsar    # build del pacchetto Pulsar (clients/pulsar/)
+bash build.sh --all       # build di entrambi i client
 ```
 
 Modifica sempre le copie nella root del repo, mai quelle sotto `clients/vscode/`
