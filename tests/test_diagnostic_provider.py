@@ -1403,7 +1403,7 @@ class TestCheckMissingValues:
         assert bogus == []
 
     def test_voice_inline_dict_nessun_errore(self, bridge):
-        # pan: {strategy: additive, spread: 0} non deve produrre warning "richiede strategy"
+        # pan: {strategy: range, spread: 90} non deve produrre warning "richiede strategy"
         provider = DiagnosticProvider(bridge)
         yaml = (
             "streams:\n"
@@ -1413,7 +1413,7 @@ class TestCheckMissingValues:
             "    sample: f.wav\n"
             "    voices:\n"
             "      num_voices: 4\n"
-            "      pan: {strategy: additive, spread: 0}\n"
+            "      pan: {strategy: range, spread: 90}\n"
         )
         result = provider.get_diagnostics(yaml)
         strategy_warnings = [d for d in result if 'richiede la chiave `strategy`' in d.message]
@@ -1668,7 +1668,7 @@ class TestPitchBlockBounds:
         ('quarter_tone', '73', '72'),
         ('eighth_tone', '-145', '144'),
         ('ratio', '9', '8'),
-        ('ratio', '0.05', '0.125'),
+        ('ratio', '0.0005', '0.001'),
     ])
     def test_scalare_fuori_bounds(self, bridge, chiave, valore, limite):
         provider = DiagnosticProvider(bridge)
@@ -1682,6 +1682,7 @@ class TestPitchBlockBounds:
         ('semitones', '-36'),
         ('cents', '50'),
         ('ratio', '1.5'),
+        ('ratio', '0.05'),
     ])
     def test_scalare_dentro_bounds(self, bridge, chiave, valore):
         provider = DiagnosticProvider(bridge)

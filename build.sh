@@ -11,6 +11,32 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
+generate_snapshot() {
+  # Genera lo snapshot JSON dello schema accanto al server bundled, così il
+  # .vsix funziona anche senza pgeLs.granularSrcPath (server.py lo carica come
+  # default se presente accanto a sé). Richiede il src di PythonGranularEngine:
+  # env PGE_SRC o checkout sibling. Se assente, avvisa e prosegue (pacchetto
+  # degradato: schema vuoto finché l'utente non imposta granularSrcPath).
+  local dest="$1"
+  local pge_src="${PGE_SRC:-$ROOT/../PythonGranularEngine/src}"
+  if [ ! -d "$pge_src" ]; then
+    echo "==> ATTENZIONE: src di PythonGranularEngine non trovato ($pge_src)."
+    echo "    schema_snapshot.json NON generato: il .vsix avrà schema vuoto"
+    echo "    finché l'utente non imposta pgeLs.granularSrcPath."
+    echo "    Imposta PGE_SRC=/path/a/PythonGranularEngine/src per includerlo."
+    return 0
+  fi
+  echo "==> Genero schema_snapshot.json da $pge_src..."
+  PYTHONPATH="$ROOT" python3 - "$pge_src" "$dest/schema_snapshot.json" <<'PYEOF'
+import sys
+from granular_ls.schema_bridge import SchemaBridge
+src, out = sys.argv[1], sys.argv[2]
+with open(out, 'w') as fh:
+    fh.write(SchemaBridge.from_python_path(src).generate_snapshot())
+print(f"    scritto {out}")
+PYEOF
+}
+
 sync_python_files() {
   local dest="$1"
   echo "==> Sincronizzo file Python in $dest..."
@@ -20,6 +46,7 @@ sync_python_files() {
   cp -r "$ROOT/granular_ls" "$dest/granular_ls"
   find "$dest/granular_ls" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
   find "$dest/granular_ls" -name "*.pyc" -delete 2>/dev/null || true
+  generate_snapshot "$dest"
 }
 
 build_vscode() {

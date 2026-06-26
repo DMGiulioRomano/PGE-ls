@@ -61,7 +61,7 @@ class TestRegistry:
     def test_ratio_speculare_al_motore(self):
         info = PITCH_UNIT_PRESETS['ratio']
         assert info.divisions is None
-        assert info.min_val == 0.125
+        assert info.min_val == 0.001
         assert info.max_val == 8.0
         assert info.max_range == 2.0
         assert info.variation_mode == 'additive'

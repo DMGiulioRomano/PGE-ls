@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: python tests (providers · schema bridge · parità con PGE)
+    runs-on: ubuntu-latest
+    env:
+      # Mappiamo il secret in env per poterlo leggere nell'`if` dello step di
+      # checkout del motore (i secret non sono usabili direttamente in `if`).
+      ENGINE_REPO_TOKEN: ${{ secrets.ENGINE_REPO_TOKEN }}
+    steps:
+      - name: checkout PGE-ls
+        uses: actions/checkout@v4
+        with:
+          path: PGE-ls
+      # Il language server rispecchia la superficie pubblica di
+      # PythonGranularEngine (nomi strategy, accordi, bounds unità pitch, nomi
+      # finestra, bounds parametri). Clonarlo come sibling fa girare davvero
+      # tests/test_pge_parity.py; altrimenti la parità skippa.
+      #
+      # PythonGranularEngine è privato: il GITHUB_TOKEN di default è limitato a
+      # questo repo e NON può clonarlo (fallirebbe con "Not Found"). Serve un
+      # secret ENGINE_REPO_TOKEN (PAT con accesso in lettura al motore). Se il
+      # secret non è configurato lo step viene SALTATO — non fallito — così la
+      # suite del language server gira comunque verde e la parità skippa.
+      - name: checkout PythonGranularEngine
+        if: ${{ env.ENGINE_REPO_TOKEN != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: DMGiulioRomano/PythonGranularEngine
+          path: PythonGranularEngine
+          token: ${{ env.ENGINE_REPO_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Solo le dipendenze del language server, pinnate come in requirements.txt.
+      # matplotlib / mcp-pyautogui-server servono alla GUI envelope, non ai test,
+      # e non vengono installati per tenere la CI veloce e affidabile.
+      - name: install deps
+        run: pip install "pygls==1.3.1" "lsprotocol==2023.0.1" "PyYAML==6.0.3" "pytest==8.4.2"
+      # Se il motore non è stato clonato (secret assente), PGE_SRC punta a un
+      # path inesistente e test_pge_parity.py skippa da solo.
+      - name: run test suite (la parità con PGE skippa se il motore non è disponibile)
+        working-directory: PGE-ls
+        env:
+          PGE_SRC: ${{ github.workspace }}/PythonGranularEngine/src
+        run: python -m pytest tests/ -q

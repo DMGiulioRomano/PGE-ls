@@ -83,6 +83,7 @@ class SchemaBridge:
             'stream_id', 'onset', 'duration', 'sample',   # StreamContext
             'dephase', 'range_always_active', 'time_mode', # StreamConfig
             'time_scale', 'distribution_mode',
+            'clip_strategy', 'clip_margin',
             'solo', 'mute',                                # Generator flags
         ]
         self._stream_context_keys: List[str] = (
@@ -103,6 +104,7 @@ class SchemaBridge:
             'gaussian', 'kaiser', 'rectangle', 'sinc', 'half_sine',
             'expodec', 'expodec_strong', 'exporise', 'exporise_strong',
             'rexpodec', 'rexporise',
+            'triangle',  # alias di 'bartlett' (WindowRegistry.ALIASES)
         ]
         self._grain_envelope_names: List[str] = (
             raw_data.get('grain_envelope_names') or _STATIC_GRAIN_ENVELOPE_NAMES
@@ -110,6 +112,10 @@ class SchemaBridge:
 
         # Conserviamo gli spec raw per get_dephase_keys()
         self._raw_specs = specs
+
+        # Override esplicito delle dephase keys: usato in modalita' snapshot,
+        # dove gli spec non conservano dephase_key. None => calcolo dagli spec.
+        self._dephase_keys_override: Optional[List[str]] = raw_data.get('dephase_keys')
 
         # Costruiamo il registry interno: name -> ParameterInfo
         # Il registry e' un dict per accesso O(1) in get_parameter().
@@ -326,6 +332,8 @@ class SchemaBridge:
         continua a supportare dephase sul pitch (PitchController passa
         dephase_key='pitch'). Viene garantito qui se lo schema e' popolato.
         """
+        if self._dephase_keys_override is not None:
+            return list(self._dephase_keys_override)
         seen = set()
         keys = []
         for spec in self._raw_specs:
@@ -410,6 +418,8 @@ class SchemaBridge:
             'parameters': [asdict(p) for p in self._params.values()],
             'distribution_modes': self._distribution_modes,
             'grain_envelope_names': self._grain_envelope_names,
+            'stream_context_keys': self._stream_context_keys,
+            'dephase_keys': self.get_dephase_keys(),
             'extra_bounds': extra_bounds,
         }
         return json.dumps(data, indent=2)
@@ -575,7 +585,7 @@ class SchemaBridge:
 
             # Carica le modalita' di distribuzione da DistributionFactory
             try:
-                from parameters.distribution_factory import DistributionFactory
+                from shared.distribution_strategy import DistributionFactory
                 raw_data['distribution_modes'] = list(DistributionFactory._registry.keys())
             except Exception:
                 pass  # Usa il fallback statico nel costruttore
@@ -583,7 +593,9 @@ class SchemaBridge:
             # Carica i nomi delle finestrature del grano da WindowRegistry
             try:
                 from controllers.window_registry import WindowRegistry
-                raw_data['grain_envelope_names'] = list(WindowRegistry.WINDOWS.keys())
+                # all_names() include gli alias (es. 'triangle' -> 'bartlett'),
+                # che il motore accetta ma WINDOWS.keys() escluderebbe.
+                raw_data['grain_envelope_names'] = list(WindowRegistry.all_names())
             except Exception:
                 pass  # Usa il fallback statico nel costruttore
 
@@ -647,4 +659,10 @@ class SchemaBridge:
         raw = {'specs': specs, 'bounds': bounds}
         if 'distribution_modes' in data:
             raw['distribution_modes'] = data['distribution_modes']
+        if 'grain_envelope_names' in data:
+            raw['grain_envelope_names'] = data['grain_envelope_names']
+        if 'stream_context_keys' in data:
+            raw['stream_context_keys'] = data['stream_context_keys']
+        if 'dephase_keys' in data:
+            raw['dephase_keys'] = data['dephase_keys']
         return cls(raw)

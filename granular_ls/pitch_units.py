@@ -81,7 +81,7 @@ PITCH_UNIT_PRESETS: Dict[str, PitchUnitInfo] = {
     'eighth_tone':  _edo_info('eighth_tone', 48, 'et'),
     'ratio':        PitchUnitInfo(
         key='ratio', symbol='x', divisions=None,
-        min_val=0.125, max_val=8.0, max_range=2.0,
+        min_val=0.001, max_val=8.0, max_range=2.0,
         variation_mode='additive', neutral=1.0,
     ),
 }
@@ -298,7 +298,7 @@ PITCH_KEY_DOCS: Dict[str, str] = {
         PITCH_UNIT_PRESETS['eighth_tone'], 'ottavi di tono', 'eighth_tone: 6'),
     'ratio': (
         "**ratio** — Rapporto di trasposizione diretto\n\n"
-        "Range: `[0.125, 8.0]` · Variazione: `additive` · Default: `1.0`\n\n"
+        "Range: `[0.001, 8.0]` · Variazione: `additive` · Default: `1.0`\n\n"
         "Moltiplicatore di frequenza: `1.0` = originale, `2.0` = ottava sopra, "
         "`0.5` = ottava sotto. Accetta scalare o envelope `[[t, v], ...]`.\n\n"
         "```yaml\npitch:\n  ratio: 1.5\n```\n\n"
@@ -346,7 +346,7 @@ PITCH_BLOCK_DOC = (
     "| `quarter_tone` | quarti di tono (24-EDO) | `[-72, 72]` |\n"
     "| `eighth_tone` | ottavi di tono (48-EDO) | `[-144, 144]` |\n"
     "| `edo` + `value` | griglia EDO arbitraria | `[-3·N, 3·N]` |\n"
-    "| `ratio` | moltiplicatore diretto | `[0.125, 8]` |\n\n"
+    "| `ratio` | moltiplicatore diretto | `[0.001, 8]` |\n\n"
     "**Modificatori:** `range` — ±variazione casuale nell'unità attiva; "
     "`value` — valore in gradi, solo con `edo: N`.\n\n"
     "```yaml\npitch:\n  semitones: [[0, -12], [30, 12]]\n  range: 6\n```\n\n"

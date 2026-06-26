@@ -255,24 +255,34 @@ class TestPointerStrategies:
 class TestPanStrategies:
     """Verifica le strategy della dimensione pan."""
 
-    def test_strategy_linear_esiste(self):
-        assert 'linear' in VOICE_STRATEGY_REGISTRY['pan']
+    def test_strategy_range_esiste(self):
+        assert 'range' in VOICE_STRATEGY_REGISTRY['pan']
 
-    def test_strategy_random_esiste(self):
-        assert 'random' in VOICE_STRATEGY_REGISTRY['pan']
+    def test_strategy_stochastic_esiste(self):
+        assert 'stochastic' in VOICE_STRATEGY_REGISTRY['pan']
 
-    def test_strategy_additive_esiste(self):
-        assert 'additive' in VOICE_STRATEGY_REGISTRY['pan']
+    def test_strategy_step_esiste(self):
+        assert 'step' in VOICE_STRATEGY_REGISTRY['pan']
 
-    def test_tutte_le_pan_strategies_hanno_spread(self):
-        for strategy_name, spec in VOICE_STRATEGY_REGISTRY['pan'].items():
+    def test_vecchi_nomi_pan_rimossi(self):
+        # PGE 1845ad3: le pan strategy sono range/stochastic/step,
+        # non piu' linear/random/additive.
+        for vecchio in ('linear', 'random', 'additive'):
+            assert vecchio not in VOICE_STRATEGY_REGISTRY['pan']
+
+    def test_range_e_stochastic_hanno_spread(self):
+        for strategy_name in ('range', 'stochastic'):
+            spec = VOICE_STRATEGY_REGISTRY['pan'][strategy_name]
             assert 'spread' in spec.kwargs, (
                 f"Pan strategy '{strategy_name}' manca del kwarg 'spread'"
             )
+            assert spec.kwargs['spread'].min_val == 0.0
 
-    def test_linear_spread_min_val(self):
-        kwarg = VOICE_STRATEGY_REGISTRY['pan']['linear'].kwargs['spread']
-        assert kwarg.min_val == 0.0
+    def test_step_ha_kwarg_step(self):
+        spec = VOICE_STRATEGY_REGISTRY['pan']['step']
+        assert 'step' in spec.kwargs
+        # step pan puo' essere negativo: nessun min_val
+        assert spec.kwargs['step'].min_val is None
 
 
 class TestAccessFunctions:
@@ -307,13 +317,15 @@ class TestAccessFunctions:
         assert get_kwarg_spec('pitch', 'nonexistent', 'step') is None
 
     def test_find_kwarg_in_dimension_trovato(self):
-        # 'step' appare in pitch.step, onset_offset.linear, onset_offset.geometric, pointer.linear
+        # 'step' appare in pitch.step, onset_offset.linear/geometric,
+        # pointer.linear e pan.step
         kwarg = find_kwarg_in_dimension('pitch', 'step')
         assert kwarg is not None
         assert kwarg.name == 'step'
 
     def test_find_kwarg_in_dimension_non_trovato(self):
-        assert find_kwarg_in_dimension('pan', 'step') is None
+        # 'inversion' esiste solo in pitch.chord, non nella dimensione pan
+        assert find_kwarg_in_dimension('pan', 'inversion') is None
 
     def test_find_kwarg_chord_solo_in_pitch(self):
         assert find_kwarg_in_dimension('pitch', 'chord') is not None
