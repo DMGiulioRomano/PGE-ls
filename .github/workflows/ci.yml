@@ -120,3 +120,46 @@ jobs:
           # spec path = stessa posizione del pacchetto installato (no doppia
           # registrazione: discovery per nome e per path coincidono)
           xvfb-run -a pulsar --test "$HOME/.pulsar/packages/pge-ls/spec"
+
+  neovim-e2e:
+    name: neovim client e2e (headless)
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout PGE-ls
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # apt ha un Neovim troppo vecchio per vim.lsp.start (serve >= 0.8): si usa
+      # il tarball della release "stable" (>= 0.10). Il nome dell'asset è
+      # cambiato nel tempo (nvim-linux-x86_64.tar.gz → fallback nvim-linux64).
+      - name: install Neovim (stable)
+        run: |
+          set -e
+          cd /tmp
+          base="https://github.com/neovim/neovim/releases/download/stable"
+          if ! curl -fsSL -o nvim.tar.gz "$base/nvim-linux-x86_64.tar.gz"; then
+            curl -fsSL -o nvim.tar.gz "$base/nvim-linux64.tar.gz"
+          fi
+          tar xzf nvim.tar.gz
+          dir="$(tar tzf nvim.tar.gz | head -1 | cut -d/ -f1)"
+          echo "/tmp/$dir/bin" >> "$GITHUB_PATH"
+      - name: nvim version
+        run: nvim --version | head -1
+      # Provvediamo il .venv con le sole deps del language server (come il job
+      # python: niente matplotlib/mcp). setup.sh con PGE_DEPS=skip riusa questo
+      # venv invece di installare l'intero requirements.txt.
+      - name: provision LS deps
+        run: |
+          python -m venv .venv
+          ./.venv/bin/pip install --quiet "pygls==1.3.1" "lsprotocol==2023.0.1" "PyYAML==6.0.3"
+      # Esegue davvero l'installer: OS detection, version check, sed sul template,
+      # generazione di ~/.config/nvim/lua/pge-ls.lua e aggancio in init.lua.
+      - name: run Neovim installer (setup.sh)
+        env:
+          PGE_DEPS: skip
+        run: bash clients/neovim/setup.sh
+      # Lancia Neovim headless: il client 'pge-ls' deve attivarsi solo sui
+      # PGE_*.yaml e completare l'handshake LSP via stdio (degraded senza schema).
+      - name: headless e2e
+        run: bash clients/neovim/tests/run-e2e.sh
