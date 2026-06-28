@@ -28,6 +28,9 @@ SETUP = NVIM_DIR / "setup.sh"
 README = NVIM_DIR / "readme.md"  # case-insensitive lookup sotto
 BUILD = ROOT / "build.sh"
 CLAUDE_MD = ROOT / "CLAUDE.md"
+E2E_LUA = NVIM_DIR / "tests" / "e2e.lua"
+RUN_E2E = NVIM_DIR / "tests" / "run-e2e.sh"
+CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def _read(p: Path) -> str:
@@ -162,6 +165,53 @@ def test_setup_injects_require_idempotently():
     # R3: l'append avviene solo se il require non è già presente
     assert "grep -Eq" in txt
     assert "pge-ls" in txt
+
+
+def test_setup_supports_skip_deps():
+    # PGE_DEPS=skip salta il pip install (CI / venv già provvisto)
+    txt = _read(SETUP)
+    assert "PGE_DEPS" in txt
+    assert "skip" in txt
+
+
+# ---------------------------------------------------------------------------
+# Test end-to-end headless (artefatti) + job CI
+# ---------------------------------------------------------------------------
+
+def test_e2e_artifacts_exist():
+    assert E2E_LUA.exists(), "e2e.lua mancante"
+    assert RUN_E2E.exists(), "run-e2e.sh mancante"
+
+
+def test_run_e2e_is_executable():
+    assert RUN_E2E.stat().st_mode & 0o111, "run-e2e.sh non è eseguibile"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash non disponibile")
+def test_run_e2e_passes_bash_syntax_check():
+    res = subprocess.run(
+        ["bash", "-n", str(RUN_E2E)], capture_output=True, text=True
+    )
+    assert res.returncode == 0, res.stderr
+
+
+def test_e2e_lua_asserts_activation():
+    txt = _read(E2E_LUA)
+    # Verifica attivazione del client 'pge-ls' e handshake (server_capabilities)
+    assert "pge-ls" in txt
+    assert "server_capabilities" in txt
+    # API client con fallback per nvim < 0.10
+    assert "get_clients" in txt and "get_active_clients" in txt
+    # Esce con codice non-zero su fallimento
+    assert "cquit" in txt
+
+
+def test_ci_has_neovim_e2e_job():
+    txt = _read(CI_YML)
+    assert "neovim-e2e" in txt
+    assert "run-e2e.sh" in txt
+    # Neovim installato dal tarball stable (apt è troppo vecchio)
+    assert "neovim/releases/download/stable" in txt
 
 
 # ---------------------------------------------------------------------------

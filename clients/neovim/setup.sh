@@ -113,9 +113,13 @@ if [ ! -d "$VENV_DIR" ]; then
   "$PYTHON" -m venv "$VENV_DIR"
 fi
 PYTHON_BIN="$VENV_DIR/bin/python"
-echo "    Installazione dipendenze da requirements.txt..."
-"$VENV_DIR/bin/pip" install --quiet -r "$ROOT/requirements.txt"
-echo "    Dipendenze OK"
+if [ "${PGE_DEPS:-}" = "skip" ]; then
+  echo "    PGE_DEPS=skip: salto 'pip install' (venv già provvisto)"
+else
+  echo "    Installazione dipendenze da requirements.txt..."
+  "$VENV_DIR/bin/pip" install --quiet -r "$ROOT/requirements.txt"
+  echo "    Dipendenze OK"
+fi
 
 # -----------------------------------------------------------------------
 # 4. Risoluzione path assolute (schema)

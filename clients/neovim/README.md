@@ -65,6 +65,24 @@ In questo caso la config generata avvia il server con `--src <PGE_SRC>` (schema
 importato a runtime) invece di `--snapshot`. La distinzione è automatica nel
 template: una **directory** baked → `--src`, un **file `.json`** → `--snapshot`.
 
+`PGE_DEPS=skip` salta l'installazione delle dipendenze (`pip install -r
+requirements.txt`): utile per rilanciare velocemente il setup quando il `.venv/`
+è già pronto, o in CI dove le dipendenze sono pre-provviste.
+
+## Test end-to-end (headless)
+
+Dopo aver eseguito `setup.sh`, puoi verificare in modo automatico che il client
+si avvii correttamente:
+
+```bash
+bash clients/neovim/tests/run-e2e.sh
+```
+
+Lancia Neovim in modalità headless (`clients/neovim/tests/e2e.lua`) e verifica
+che il client LSP `pge-ls` si attivi **solo** sui file `PGE_*.yaml` e completi
+l'handshake LSP via stdio. È lo stesso test che gira in CI (job `neovim-e2e`),
+dove Neovim stable viene installato dal tarball ufficiale.
+
 ## Disinstallazione
 
 ```bash
@@ -109,6 +127,7 @@ configurare Neovim su Windows a mano:
 |------|------|
 | `pge-ls.lua.template` | Template Lua versionato; placeholder `%%PYTHON%%`, `%%SERVER%%`, `%%SNAPSHOT%%` sostituiti dallo script. Autocmd su `PGE_*.yaml` → `vim.lsp.start`. |
 | `setup.sh` | Script di automazione macOS/Linux idempotente. |
+| `tests/run-e2e.sh` + `tests/e2e.lua` | Test end-to-end headless (anche in CI). |
 | `README.md` | Questo file. |
 
 Il file generato `~/.config/nvim/lua/pge-ls.lua` **non** è versionato nel repo:
