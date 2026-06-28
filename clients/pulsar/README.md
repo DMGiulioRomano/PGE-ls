@@ -54,3 +54,25 @@ In `Settings > Packages > pge-ls`:
 
 Il server parte solo sui file il cui nome inizia con `PGE_` e termina in
 `.yaml` o `.yml`, esattamente come il client VSCode.
+
+## Test (e2e)
+
+Due livelli, entrambi eseguiti dal job `pulsar-e2e` in CI
+(`.github/workflows/ci.yml`):
+
+- **`e2e/lsp-protocol-e2e.js`** (Node, senza GUI) — carica `lib/main.js`, usa
+  il suo `startServerProcess()` per lanciare `server.py` come farebbe l'editor e
+  fa un handshake LSP reale (`initialize` → `didOpen` di un `PGE_*.yaml` →
+  `completion` nel blocco `pitch`), verificando le unità pitch statiche. Veloce,
+  deterministico, indipendente dal motore. Richiede il bundle
+  (`bash build.sh --pulsar`) e `pygls`/`lsprotocol`:
+
+  ```bash
+  bash ../../build.sh --pulsar
+  PGE_PYTHON=python3 node e2e/lsp-protocol-e2e.js
+  ```
+
+- **`spec/pge-ls-spec.js`** (Jasmine, dentro Pulsar) — attiva il pacchetto, apre
+  un `PGE_*.yaml` e verifica che il language server venga avviato dall'editor;
+  controlla anche che NON parta per un `.yaml` non-PGE. In CI gira headless via
+  `xvfb-run pulsar --test`.

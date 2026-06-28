@@ -49,7 +49,9 @@ class PGELanguageClient extends AutoLanguageClient {
     const snapshotPath = atom.config.get('pge-ls.snapshotPath');
     if (snapshotPath) args.push('--snapshot', snapshotPath);
 
-    this.logger.debug(`PGE LS: ${pythonPath} ${args.join(' ')}`);
+    // logger e' impostato da activate() prima di questo metodo nel flow reale;
+    // l'optional chaining lo rende invocabile anche in isolamento (e2e).
+    this.logger?.debug(`PGE LS: ${pythonPath} ${args.join(' ')}`);
 
     const childProcess = cp.spawn(pythonPath, args, {
       cwd: projectPath || path.join(__dirname, '..'),
