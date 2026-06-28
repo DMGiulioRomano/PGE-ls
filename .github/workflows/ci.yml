@@ -50,6 +50,77 @@ jobs:
           PGE_SRC: ${{ github.workspace }}/PythonGranularEngine/src
         run: python -m pytest tests/ -q
 
+  pulsar-e2e:
+    name: e2e client Pulsar (protocollo LSP + editor headless)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: checkout PGE-ls
+        uses: actions/checkout@v4
+        with:
+          path: PGE-ls
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Solo le dipendenze runtime del language server (il bundle Python che il
+      # client Pulsar lancia). Niente engine: la superficie testata (unità pitch
+      # statiche, avvio del server) non dipende da PythonGranularEngine, quindi
+      # l'e2e è deterministico anche senza il secret ENGINE_REPO_TOKEN.
+      - name: install python deps (language server)
+        run: pip install "pygls==1.3.1" "lsprotocol==2023.0.1" "PyYAML==6.0.3"
+      # Sincronizza server.py + granular_ls/ dentro clients/pulsar/ e installa le
+      # dipendenze npm (@savetheclocktower/atom-languageclient). Senza PGE_SRC lo
+      # snapshot non viene generato (avviso, non errore): lo schema resta vuoto
+      # ma la superficie pitch statica basta all'e2e.
+      - name: build client Pulsar (sync bundle + npm install)
+        working-directory: PGE-ls
+        run: bash build.sh --pulsar
+      # e2e 1 — protocollo LSP, senza GUI. Lancia server.py ESATTAMENTE come fa
+      # il client (lib/main.js::startServerProcess) e fa un handshake LSP reale
+      # (initialize → didOpen PGE_*.yaml → completion nel blocco pitch). Gate
+      # veloce e deterministico, indipendente da Electron/Pulsar.
+      - name: e2e protocollo LSP
+        working-directory: PGE-ls/clients/pulsar
+        env:
+          PGE_PYTHON: python3
+        run: node e2e/lsp-protocol-e2e.js
+      # Scarica e installa l'ultimo .deb stabile di Pulsar; apt risolve le
+      # dipendenze Electron del pacchetto. xvfb serve per il display headless.
+      - name: install Pulsar + xvfb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          url=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            https://api.github.com/repos/pulsar-edit/pulsar/releases/latest \
+            | grep -oE '"browser_download_url": *"[^"]+amd64\.deb"' \
+            | grep -vi arm | head -1 | sed -E 's/.*"(https[^"]+)".*/\1/')
+          test -n "$url"
+          echo "Pulsar .deb: $url"
+          curl -fsSL -o "$RUNNER_TEMP/pulsar.deb" "$url"
+          sudo apt-get update
+          sudo apt-get install -y xvfb "$RUNNER_TEMP/pulsar.deb"
+          pulsar --version || true
+      # e2e 2 — dentro Pulsar reale. Collega il pacchetto, poi `pulsar --test`
+      # headless: attiva pge-ls, apre un PGE_*.yaml e attende l'avvio effettivo
+      # del language server (ServerManager._activeServers). Il sysctl riabilita
+      # gli user namespace non privilegiati (sandbox Electron su Ubuntu 24.04).
+      - name: e2e editor headless (pulsar --test)
+        working-directory: PGE-ls
+        run: |
+          set -euxo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          mkdir -p "$HOME/.pulsar/packages"
+          ln -sfn "$PWD/clients/pulsar" "$HOME/.pulsar/packages/pge-ls"
+          export PGE_PYTHON="$(command -v python3)"
+          python3 -c "import pygls, lsprotocol"
+          # spec path = stessa posizione del pacchetto installato (no doppia
+          # registrazione: discovery per nome e per path coincidono)
+          xvfb-run -a pulsar --test "$HOME/.pulsar/packages/pge-ls/spec"
+
   neovim-e2e:
     name: neovim client e2e (headless)
     runs-on: ubuntu-latest
