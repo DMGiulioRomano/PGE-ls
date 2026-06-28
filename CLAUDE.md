@@ -25,6 +25,7 @@ python -m pytest tests/test_yaml_analyzer.py -k "test_name"  # single test
 bash build.sh             # syncs server.py + granular_ls/ into clients/vscode/, packages .vsix
 bash build.sh --install   # build and install directly into VSCode
 bash build.sh --all       # build both VSCode and Pulsar clients
+bash build.sh --neovim    # install the Neovim client (runs clients/neovim/setup.sh)
 ```
 
 > `build.sh` copies `server.py` and `granular_ls/` into `clients/vscode/` before packaging — always edit the root copies, not the bundled ones.
@@ -32,7 +33,7 @@ bash build.sh --all       # build both VSCode and Pulsar clients
 ## Architecture
 
 ```
-VSCode extension (clients/vscode/extension.js)
+VSCode extension (clients/vscode/extension.js) / Neovim (clients/neovim/pge-ls.lua)
     ↓  stdio
 server.py  (pygls LanguageServer, handles LSP lifecycle)
     ↓
@@ -43,6 +44,13 @@ Three stateless providers (each request receives full document text):
   HoverProvider      → YamlAnalyzer → Hover
   DiagnosticProvider → YamlAnalyzer → Diagnostic[]
 ```
+
+### Clients (`clients/`)
+
+| Dir | Ruolo |
+|------|------|
+| `clients/vscode/` | Estensione VSCode. **Bundla** una copia di `server.py` + `granular_ls/` + `schema_snapshot.json` (sync via `build.sh`), pacchettizzata in `.vsix`. |
+| `clients/neovim/` | Client Neovim (macOS/Linux). **Non bundla**: punta direttamente a `server.py` nella root via il `.venv/` locale. `pge-ls.lua.template` (placeholder `%%PYTHON%%`/`%%SERVER%%`/`%%SNAPSHOT%%`) + `setup.sh` idempotente che genera `~/.config/nvim/lua/pge-ls.lua` con path assolute. Installa con `bash clients/neovim/setup.sh` o `bash build.sh --neovim`. Windows: solo setup manuale documentato nel README. |
 
 ### Key modules (`granular_ls/`)
 
