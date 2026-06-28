@@ -5,6 +5,7 @@
 #   bash build.sh                  # build solo VSCode
 #   bash build.sh --all            # build VSCode + Pulsar
 #   bash build.sh --pulsar         # build solo Pulsar
+#   bash build.sh --neovim         # installa il client Neovim (setup.sh)
 #   bash build.sh --install        # build VSCode e installa in VSCode
 #
 set -e
@@ -66,6 +67,13 @@ build_vscode() {
   fi
 }
 
+build_neovim() {
+  # Il client Neovim non bundla il server: punta direttamente a server.py nella
+  # root. Qui deleghiamo allo script di setup, che è già idempotente.
+  echo "==> Setup client Neovim..."
+  bash "$ROOT/clients/neovim/setup.sh"
+}
+
 build_pulsar() {
   local client="$ROOT/clients/pulsar"
   sync_python_files "$client"
@@ -84,6 +92,9 @@ case "$1" in
     ;;
   --pulsar)
     build_pulsar
+    ;;
+  --neovim)
+    build_neovim
     ;;
   --install)
     build_vscode --install

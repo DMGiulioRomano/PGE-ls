@@ -1,0 +1,57 @@
+-- pge-ls.lua — client Neovim per il PGE Language Server
+--
+-- GENERATO da clients/neovim/setup.sh: NON editare a mano questo file una volta
+-- installato in ~/.config/nvim/lua/pge-ls.lua. Per rigenerarlo:
+--     bash clients/neovim/setup.sh        (oppure: bash build.sh --neovim)
+--
+-- I tre placeholder %%PYTHON%%, %%SERVER%% e %%SNAPSHOT%% vengono sostituiti
+-- con path assolute risolte a runtime dallo script di setup. Le path sono
+-- racchiuse in literal Lua [[ ]] così spazi e backslash (Windows) non rompono.
+
+local python = [[%%PYTHON%%]]
+local server = [[%%SERVER%%]]
+local schema = [[%%SNAPSHOT%%]]
+
+-- Costruisce la command line del server LSP (stdio).
+local function build_cmd()
+  local cmd = { python, server }
+  if schema ~= '' then
+    -- Una directory => schema live (--src, sviluppo); un file .json => snapshot
+    -- pre-generato (--snapshot, default). Lo script bake-a una dir solo quando
+    -- l'utente esporta PGE_SRC (vedi README, "configurazione avanzata").
+    local flag = (vim.fn.isdirectory(schema) == 1) and '--src' or '--snapshot'
+    table.insert(cmd, flag)
+    table.insert(cmd, schema)
+  end
+  return cmd
+end
+
+-- Avvia (o riusa) il client LSP per il buffer corrente.
+local function start_pge_ls()
+  local opts = {
+    name = 'pge-ls',
+    cmd = build_cmd(),
+    -- Radice di progetto = cwd di Neovim, coerente col workspace folder VSCode.
+    root_dir = vim.fn.getcwd(),
+  }
+
+  -- reuse_client come funzione esplicita è affidabile solo da Nvim 0.10+.
+  -- Su versioni precedenti vim.lsp.start riusa comunque il client quando
+  -- (cmd, root_dir) coincidono, quindi il fallback è non passare la funzione.
+  if vim.fn.has('nvim-0.10') == 1 then
+    opts.reuse_client = function(client, config)
+      return client.name == config.name and client.config.root_dir == config.root_dir
+    end
+  end
+
+  vim.lsp.start(opts)
+end
+
+-- Attiva l'LSP SOLO sui file PGE_*.yaml / PGE_*.yml, non su tutto lo YAML.
+vim.api.nvim_create_autocmd({ 'BufReadPre', 'BufNewFile' }, {
+  pattern = { 'PGE_*.yaml', 'PGE_*.yml' },
+  callback = start_pge_ls,
+  desc = 'Avvia il PGE Language Server sui file PGE_*.yaml',
+})
+
+return {}
