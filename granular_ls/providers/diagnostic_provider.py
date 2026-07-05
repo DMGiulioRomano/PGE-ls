@@ -66,6 +66,13 @@ SOURCE = 'granular-ls'
 # dai controlli generici per evitare doppie segnalazioni con bounds obsoleti.
 _PITCH_OWNED_PREFIX = 'pitch.'
 
+# grain.duration_unit (PGE #158): unità di misura di grain.duration e
+# grain.duration_range. Meta-parametro, mirror di loop_unit del pointer.
+# output_sr è una config globale del motore (48000 Hz), non impostabile
+# per-stream: qui è una costante statica come lato PGE (DEFAULT_OUTPUT_SR).
+_GRAIN_DURATION_UNITS = ('seconds', 'samples')
+_OUTPUT_SR = 48000
+
 
 class DiagnosticProvider:
     """
@@ -136,11 +143,23 @@ class DiagnosticProvider:
         # Fase 3: controllo exclusive_group.
         diagnostics.extend(self._check_exclusive_groups(parsed))
 
+        # Blocchi grain (PGE #158): scansione unica riusata da fase 4, 5 e 11.
+        grain_blocks = self._scan_grain_blocks(lines, streams)
+        # Righe di grain.duration/duration_range in unità samples: i loro
+        # valori sono campioni, non secondi → esclusi dai bound generici.
+        samples_lines = self._samples_suppressed_lines(grain_blocks)
+
         # Fase 4: controllo bounds numerici (valori scalari).
-        diagnostics.extend(self._check_bounds(parsed))
+        diagnostics.extend(
+            d for d in self._check_bounds(parsed)
+            if d.range.start.line not in samples_lines
+        )
 
         # Fase 5: controllo bounds nei valori envelope (breakpoints Y).
-        diagnostics.extend(self._check_envelope_bounds(document_text))
+        diagnostics.extend(
+            d for d in self._check_envelope_bounds(document_text)
+            if d.range.start.line not in samples_lines
+        )
 
         # Fase 5b: validazione grain.envelope (finestratura del grano).
         diagnostics.extend(self._check_grain_envelope(document_text))
@@ -164,6 +183,9 @@ class DiagnosticProvider:
 
         # Fase 10: loop_end <= loop_start (finestra di loop degenere).
         diagnostics.extend(self._check_loop_end_le_loop_start(lines, streams))
+
+        # Fase 11: grain.duration_unit (PGE #158).
+        diagnostics.extend(self._check_grain_duration_unit(grain_blocks))
 
         return diagnostics
 
@@ -335,6 +357,7 @@ class DiagnosticProvider:
     _STRING_REQUIRED_KEYS = frozenset({
         'time_mode',
         'loop_unit',
+        'duration_unit',
         'distribution_mode',
     })
 
@@ -2461,6 +2484,193 @@ class DiagnosticProvider:
                     diagnostics.append(Diagnostic(
                         range=self._line_range(n),
                         message=msg,
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+
+        return diagnostics
+
+    # -------------------------------------------------------------------------
+    # FASE 11: grain.duration_unit (PGE #158)
+    # -------------------------------------------------------------------------
+
+    def _scan_grain_blocks(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[dict]:
+        """
+        Scansiona il blocco grain: (indent 4) di ogni stream e ne estrae
+        la superficie di duration_unit.
+
+        Ritorna una lista di dict, uno per blocco grain trovato:
+          - unit:            valore di duration_unit (str) o None se assente
+          - unit_present:    True se la chiave duration_unit è scritta
+          - unit_line:       riga della chiave duration_unit (o None)
+          - has_duration:    True se grain.duration è presente con un valore
+          - duration_scalar: valore scalare di duration (str) se numerico inline
+          - duration_line:   riga della chiave duration (o None)
+          - value_lines:     set di righe che portano valori di duration /
+                             duration_range (scalare + breakpoint envelope),
+                             usato per sopprimere i falsi positivi dei bound
+                             generici quando l'unità è samples.
+        """
+        blocks: List[dict] = []
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            grain_start = None
+            for n in range(stream_start, stream_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                leading = len(raw) - len(raw.lstrip())
+                if leading == 4 and stripped == 'grain:':
+                    grain_start = n
+                    break
+            if grain_start is None:
+                continue
+
+            grain_end = stream_end
+            for n in range(grain_start + 1, stream_end):
+                raw = lines[n]
+                if not raw.strip():
+                    continue
+                if (len(raw) - len(raw.lstrip())) <= 4:
+                    grain_end = n
+                    break
+
+            info = {
+                'start': grain_start, 'end': grain_end,
+                'unit': None, 'unit_present': False, 'unit_line': None,
+                'has_duration': False, 'duration_scalar': None,
+                'duration_line': None, 'value_lines': set(),
+            }
+
+            n = grain_start + 1
+            while n < grain_end:
+                raw = lines[n]
+                stripped = raw.strip()
+                leading = len(raw) - len(raw.lstrip())
+                if not stripped or stripped.startswith('#') or leading != 6:
+                    n += 1
+                    continue
+                m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)', stripped)
+                if not m:
+                    n += 1
+                    continue
+                key, val = m.group(1), m.group(2).strip()
+
+                if key == 'duration_unit':
+                    info['unit_present'] = True
+                    info['unit_line'] = n
+                    info['unit'] = val.strip('"\'') if val else None
+                elif key in ('duration', 'duration_range'):
+                    info['value_lines'].add(n)
+                    if key == 'duration':
+                        info['duration_line'] = n
+                        # Valore presente: inline (scalare/lista) o envelope
+                        # block-style sulle righe seguenti (indent > 6).
+                        if val:
+                            info['has_duration'] = True
+                            if not val.startswith('['):
+                                info['duration_scalar'] = val
+                    # Raccoglie le righe breakpoint dell'envelope block-style.
+                    if not val:
+                        m2 = n + 1
+                        while m2 < grain_end:
+                            r2 = lines[m2]
+                            if not r2.strip():
+                                m2 += 1
+                                continue
+                            if (len(r2) - len(r2.lstrip())) <= 6:
+                                break
+                            info['value_lines'].add(m2)
+                            if key == 'duration':
+                                info['has_duration'] = True
+                            m2 += 1
+                n += 1
+
+            blocks.append(info)
+        return blocks
+
+    def _samples_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
+        """Righe di duration/duration_range dentro un blocco grain in samples:
+        i loro valori sono campioni, non secondi — vanno esclusi dai bound
+        generici (in secondi) per non produrre falsi positivi."""
+        suppressed: set = set()
+        for b in grain_blocks:
+            if b['unit'] == 'samples':
+                suppressed |= b['value_lines']
+        return frozenset(suppressed)
+
+    def _check_grain_duration_unit(self, grain_blocks: List[dict]) -> List[Diagnostic]:
+        """
+        Valida grain.duration_unit (PGE #158):
+          - unità non in {seconds, samples} → Error;
+          - con samples, grain.duration deve essere esplicita (il default
+            0.05 è in secondi e non viene convertito) → Error;
+          - con samples, valida i valori scalari di duration in [1, max]
+            campioni (max = bound massimo in secondi × output_sr).
+        """
+        diagnostics: List[Diagnostic] = []
+        grain_dur = self._params_by_yaml_path.get('grain.duration')
+        max_samples = (
+            round(grain_dur.max_val * _OUTPUT_SR)
+            if grain_dur is not None and grain_dur.max_val is not None
+            else None
+        )
+
+        for b in grain_blocks:
+            unit = b['unit']
+            # Unità presente con valore ma non valida (vuota → _check_missing_values)
+            if unit is not None and unit not in _GRAIN_DURATION_UNITS:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(b['unit_line']),
+                    message=(
+                        f"`grain.duration_unit`: valore `{unit}` non valido. "
+                        f"Unità disponibili: {', '.join(_GRAIN_DURATION_UNITS)}."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                continue
+
+            if unit != 'samples':
+                continue
+
+            # samples richiede grain.duration esplicita.
+            if not b['has_duration']:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(b['unit_line']),
+                    message=(
+                        "`grain.duration_unit: samples` richiede una "
+                        "`grain.duration` esplicita: il default 0.05 è in "
+                        "secondi e non verrebbe convertito in campioni."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+            # Bound in campioni per il valore scalare di duration.
+            scalar = self._try_parse_number(b['duration_scalar']) \
+                if b['duration_scalar'] is not None else None
+            if scalar is not None:
+                if scalar < 1:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(b['duration_line']),
+                        message=(
+                            f"`grain.duration` = {b['duration_scalar']} campioni: "
+                            f"la durata minima è 1 campione."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+                elif max_samples is not None and scalar > max_samples:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(b['duration_line']),
+                        message=(
+                            f"`grain.duration` = {b['duration_scalar']} campioni "
+                            f"fuori range [1, {max_samples}] (max = "
+                            f"{grain_dur.max_val}s × {_OUTPUT_SR})."
+                        ),
                         severity=DiagnosticSeverity.Error,
                         source=SOURCE,
                     ))

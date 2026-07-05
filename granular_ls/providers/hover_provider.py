@@ -85,6 +85,19 @@ _STREAM_CONTEXT_DOCS = {
         "> **Non e' un parametro sintetizzabile.** Non accetta envelope o range.\n"
         "> E' un meta-parametro che modifica l'interpretazione degli altri."
     ),
+    'duration_unit': (
+        "**Meta-parametro: unita di misura della durata del grano.**\n\n"
+        "Controlla come vengono interpretati `grain.duration` e `grain.duration_range`.\n\n"
+        "Valori accettati:\n"
+        "- `seconds` (default): i valori sono in **secondi**.\n"
+        "- `samples`: i valori sono in **campioni** alla frequenza di output del\n"
+        "  motore (48000 Hz), convertiti in secondi al parse (scalari ed envelope,\n"
+        "  solo i valori Y).\n\n"
+        "Con `samples` la `grain.duration` va indicata **esplicitamente**: il\n"
+        "default `0.05` e' in secondi e non verrebbe convertito. La durata minima\n"
+        "e' **1 campione** (`1/48000` s, ~20.8 µs) per entrambe le unita'.\n\n"
+        "> **Non e' un parametro sintetizzabile.** Non accetta envelope o range."
+    ),
 }
 
 # Parametri del blocco pointer che dipendono da loop_unit / time_mode
@@ -119,9 +132,12 @@ _BLOCK_KEY_DOCS = {
         "**grain** — Parametri dei grani\n\n"
         "Controlla le caratteristiche dei singoli grani audio generati.\n\n"
         "**Parametri:**\n"
-        "- `duration` — Durata del grano in secondi (default: `0.05`)\n"
+        "- `duration` — Durata del grano (default: `0.05` s; min 1 campione)\n"
+        "- `duration_unit` — Unità di `duration`/`duration_range`: `seconds` \\| `samples`\n"
         "- `envelope` — Forma dell'inviluppo del grano (default: `hanning`)\n"
-        "- `reverse` — Probabilità di inversione del grano (0.0–1.0)"
+        "- `reverse` — Probabilità di inversione del grano (0.0–1.0)\n\n"
+        "> Con `duration_unit: samples` i valori sono in campioni (48000 Hz) e\n"
+        "> `duration` va indicata esplicitamente (il default 0.05 è in secondi)."
     ),
     'dephase': (
         "**dephase** — Randomizzazione inter-grano\n\n"

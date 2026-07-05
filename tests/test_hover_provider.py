@@ -623,3 +623,26 @@ class TestGetHoverVoicesPitchUnit:
         result = provider.get_hover(ctx)
         assert result is not None
         assert 'semitone_range' in result.contents.value  # nota hard break
+
+
+# =============================================================================
+# grain.duration_unit (PGE #158): hover della meta-chiave
+# =============================================================================
+
+class TestGrainDurationUnitHover:
+    def test_duration_unit_hover_in_grain(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        hover = provider.get_hover(ctx)
+        assert hover is not None
+        text = hover.contents.value
+        assert 'samples' in text and 'seconds' in text
+
+    def test_duration_unit_hover_mentions_explicit_duration(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        hover = provider.get_hover(ctx)
+        assert hover is not None
+        assert 'esplicit' in hover.contents.value.lower()

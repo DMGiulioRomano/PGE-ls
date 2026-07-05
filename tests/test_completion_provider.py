@@ -1511,3 +1511,48 @@ class TestVoicePitchUnitCompletions:
         step_item = [it for it in items if it.label == 'step'][0]
         assert 'unit:' in step_item.insert_text
         assert 'semitones' in step_item.insert_text
+
+
+# =============================================================================
+# grain.duration_unit (PGE #158): meta-chiave del blocco grain
+# =============================================================================
+
+class TestGrainDurationUnitCompletion:
+    """duration_unit dentro grain: (mirror di loop_unit per pointer)."""
+
+    def test_duration_unit_suggested_in_grain_block(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='key', current_text='',
+                           parent_path=['grain'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="grain:\n  ")
+        labels = [item.label for item in result]
+        assert 'duration_unit' in labels
+
+    def test_duration_unit_not_suggested_if_present(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='key', current_text='',
+                           parent_path=['grain'], indent_level=3)
+        doc = ("streams:\n  - stream_id: s\n    grain:\n"
+               "      duration_unit: samples\n      ")
+        result = provider.get_completions(ctx, document_text=doc)
+        labels = [item.label for item in result]
+        assert 'duration_unit' not in labels
+
+    def test_duration_unit_value_completions(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='value', current_text='',
+                           current_key='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="grain:\n  duration_unit: ")
+        labels = [item.label for item in result]
+        assert 'seconds' in labels
+        assert 'samples' in labels
+
+    def test_duration_unit_value_prefix_filter(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='value', current_text='sam',
+                           current_key='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="grain:\n  duration_unit: sam")
+        labels = [item.label for item in result]
+        assert labels == ['samples']
