@@ -75,7 +75,9 @@ class TestRegistry:
         }
 
     def test_semitone_locked(self):
-        assert SEMITONE_LOCKED_STRATEGIES == {'chord', 'spectral'}
+        assert SEMITONE_LOCKED_STRATEGIES == {
+            'chord', 'chord_progression', 'spectral'
+        }
 
 
 class TestEdoBounds:

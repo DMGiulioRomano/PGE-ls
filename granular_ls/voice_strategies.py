@@ -229,6 +229,86 @@ VOICE_STRATEGY_REGISTRY: Dict[str, Dict[str, VoiceStrategySpec]] = {
             },
         ),
 
+        'chord_progression': VoiceStrategySpec(
+            name='chord_progression',
+            description=(
+                "Progressione armonica: l'accordo diventa funzione del tempo.\n\n"
+                "Per ogni voce un envelope di offset in semitoni interpola tra "
+                "i voicing della progressione. La voce 0 resta riferimento "
+                "(offset 0); il moto di radice va nell'envelope `pitch` dello "
+                "stream — la progressione codifica solo il voicing relativo.\n\n"
+                "**Transizione (`interp`):** `linear`/`cubic` → glissando "
+                "(interpolazione continua in semitoni); `step` → blocchi "
+                "(cambio istantaneo all'onset di ogni accordo).\n\n"
+                "**Voice leading (`voice_leading`):** `nearest` (default) "
+                "riabbina le voci 1..N-1 per minimizzare il movimento totale "
+                "in semitoni (octave-folding, note comuni tenute; la voce 0 "
+                "resta pinnata a 0); `positional` assegna la voce `i` "
+                "all'`i`-esima nota dell'accordo (extend/inversion come "
+                "`chord`).\n\n"
+                "**Sintassi `progression`** (lista non vuota di "
+                "`[tempo, accordo]`):\n"
+                "```yaml\nprogression:\n  - [0,  maj7]\n"
+                "  - [8,  min7, 1]        # [t, chord, inversion]\n"
+                "  - [16, {chord: dom7, inversion: 0}]\n```\n"
+                "I tempi seguono il `time_mode` dello stream (secondi con "
+                "`absolute`, `0..1` con `normalized`) e devono essere non "
+                "decrescenti.\n\n"
+                "> Strategy **semitone-locked**: accetta solo "
+                "`unit: semitones` (o `unit` assente)."
+            ),
+            kwargs={
+                'progression': VoiceKwargSpec(
+                    name='progression',
+                    type='list',
+                    required=True,
+                    description=(
+                        "Sequenza ordinata di step `[tempo, accordo]`. Gli "
+                        "accordi usano la stessa tabella di `chord`.\n\n"
+                        "Forme accettate per lo step:\n"
+                        "- `[t, \"maj7\"]` — accordo nominale\n"
+                        "- `[t, \"min7\", 1]` — forma compatta "
+                        "`[t, chord, inversion]`\n"
+                        "- `[t, {chord: dom7, inversion: 0}]` — forma "
+                        "esplicita\n\n"
+                        "Vincoli: lista non vuota, tempi non decrescenti, "
+                        "`inversion` in `[0, n_note − 1]` dell'accordo.\n\n"
+                        + _chord_table()
+                    ),
+                ),
+                'interp': VoiceKwargSpec(
+                    name='interp',
+                    type='enum',
+                    required=False,
+                    enum_values=('linear', 'cubic', 'step'),
+                    description=(
+                        "Tipo di transizione tra i voicing consecutivi.\n\n"
+                        "- `linear` (default) — glissando lineare in semitoni\n"
+                        "- `cubic` — glissando con interpolazione cubica "
+                        "(smoothstep)\n"
+                        "- `step` — cambio istantaneo (blocchi) all'onset di "
+                        "ogni accordo"
+                    ),
+                ),
+                'voice_leading': VoiceKwargSpec(
+                    name='voice_leading',
+                    type='enum',
+                    required=False,
+                    enum_values=('nearest', 'positional'),
+                    description=(
+                        "Criterio di condotta delle voci tra voicing "
+                        "consecutivi.\n\n"
+                        "- `nearest` (default) — riabbina le voci 1..N-1 per "
+                        "minimizzare il movimento totale in semitoni "
+                        "(octave-folding, note comuni tenute); la voce 0 resta "
+                        "a 0. Non fa mai peggio di `positional`\n"
+                        "- `positional` — la voce `i` prende l'`i`-esima nota "
+                        "dell'accordo (extend/inversion come `chord`)"
+                    ),
+                ),
+            },
+        ),
+
         'stochastic': VoiceStrategySpec(
             name='stochastic',
             description=(
@@ -550,11 +630,13 @@ _VOICE_TOP_LEVEL_DOCS: Dict[str, str] = {
     'pitch': (
         "**pitch** — Strategy di distribuzione pitch per voce.\n\n"
         "Dimensione opzionale. Se assente, tutte le voci usano lo stesso pitch.\n\n"
-        "Strategy disponibili: `step`, `range`, `chord`, `stochastic`, `spectral`\n\n"
+        "Strategy disponibili: `step`, `range`, `chord`, `chord_progression`, "
+        "`stochastic`, `spectral`\n\n"
         "La chiave opzionale `unit` definisce la geometria della "
         "distribuzione: `semitones` (default) | `cents` | `quarter_tone` | "
         "`eighth_tone` | `{edo: N}` | `ratio` (geometrica). "
-        "`chord` e `spectral` accettano solo `semitones`.\n\n"
+        "`chord`, `chord_progression` e `spectral` accettano solo "
+        "`semitones`.\n\n"
         "```yaml\npitch:\n  strategy: range\n  pitch_range: 12.0\n  unit: semitones\n```"
     ),
     'onset_offset': (

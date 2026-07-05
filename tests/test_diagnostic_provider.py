@@ -2049,3 +2049,125 @@ class TestLoopEndLeLoopStart:
                   if d.severity == DiagnosticSeverity.Error
                   and 'loop_end' in d.message and 'degenere' in d.message]
         assert len(errors) == 0
+
+
+# =============================================================================
+# VOICES.PITCH chord_progression (PGE issue #86 / PGE-ls #28)
+# =============================================================================
+
+class TestChordProgression:
+    """Validazione della strategy pitch `chord_progression`."""
+
+    @staticmethod
+    def _errors(result):
+        return [d for d in result if d.severity == DiagnosticSeverity.Error]
+
+    def test_progression_valida_a_blocco(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "          - [0, maj7]\n"
+            "          - [8, min7, 1]\n"
+            "          - [16, {chord: dom7, inversion: 0}]\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert errors == []
+
+    def test_progression_valida_inline(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression: [[0, maj7], [8, min7]]\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert errors == []
+
+    def test_progression_vuota_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "        interp: linear\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert any('vuota' in e.message for e in errors)
+
+    def test_tempi_non_decrescenti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "          - [0, maj7]\n"
+            "          - [4, min7]\n"
+            "          - [2, dom7]\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert any('decrescenti' in e.message for e in errors)
+
+    def test_accordo_non_valido(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "          - [0, nonexistent]\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert any('nonexistent' in e.message and 'non valido' in e.message
+                   for e in errors)
+
+    def test_inversion_fuori_range(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        # maj ha 3 note: inversion valido [0, 2]
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "          - [0, maj, 5]\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert any('inversion' in e.message for e in errors)
+
+    def test_step_malformato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "          - [0]\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert any('tempo, accordo' in e.message for e in errors)
+
+    def test_interp_enum_non_valido(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "          - [0, maj7]\n"
+            "        interp: parabolic\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert any('parabolic' in e.message for e in errors)
+
+    def test_voice_leading_enum_non_valido(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "          - [0, maj7]\n"
+            "        voice_leading: random\n"
+        )
+        errors = self._errors(provider.get_diagnostics(yaml))
+        assert any('random' in e.message for e in errors)
+
+    def test_semitone_locked_unit_diversa(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _voices_yaml(
+            "        strategy: chord_progression\n"
+            "        progression:\n"
+            "          - [0, maj7]\n"
+            "        unit: cents\n"
+        )
+        errors = [d for d in provider.get_diagnostics(yaml)
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'semiton' in d.message]
+        assert len(errors) == 1

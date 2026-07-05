@@ -1175,6 +1175,64 @@ class TestVoiceStrategySnippet:
             assert '\n' not in (it.insert_text or '')
             assert not (it.insert_text or '').endswith('}')
 
+    def test_chord_progression_tra_le_strategy_pitch(self, bridge):
+        # chord_progression deve comparire tra i valori di strategy per pitch
+        provider = CompletionProvider(bridge)
+        ctx = make_context(
+            context_type='value',
+            current_text='',
+            current_key='strategy',
+            parent_path=['voices', 'pitch'],
+            indent_level=4,
+            leading_spaces=8,
+        )
+        items = provider.get_completions(ctx, '')
+        assert 'chord_progression' in [it.label for it in items]
+
+    def test_chord_progression_kwargs_suggeriti(self, bridge):
+        # Con strategy: chord_progression, i kwarg progression/interp/
+        # voice_leading vengono suggeriti come chiavi.
+        provider = CompletionProvider(bridge)
+        document = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    voices:\n"
+            "      num_voices: 4\n"
+            "      pitch:\n"
+            "        strategy: chord_progression\n"
+            "        \n"  # cursore qui
+        )
+        ctx = make_context(
+            context_type='key',
+            current_text='',
+            parent_path=['voices', 'pitch'],
+            indent_level=4,
+            leading_spaces=8,
+            cursor_line=9,
+        )
+        labels = [it.label for it in provider.get_completions(ctx, document)]
+        assert 'progression' in labels
+        assert 'interp' in labels
+        assert 'voice_leading' in labels
+
+    def test_interp_enum_value_completion(self, bridge):
+        # Valori enum di interp: linear/cubic/step
+        provider = CompletionProvider(bridge)
+        ctx = make_context(
+            context_type='value',
+            current_text='',
+            current_key='interp',
+            parent_path=['voices', 'pitch'],
+            indent_level=4,
+            leading_spaces=8,
+        )
+        items = provider.get_completions(ctx, '')
+        labels = [it.label for it in items]
+        assert {'linear', 'cubic', 'step'} <= set(labels)
+
     def test_pointer_dimension_suggerisce_normalized(self, bridge):
         # Dentro voices.pointer block style, normalized deve essere suggerito
         provider = CompletionProvider(bridge)
