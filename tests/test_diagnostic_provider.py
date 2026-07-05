@@ -2171,3 +2171,98 @@ class TestChordProgression:
                   if d.severity == DiagnosticSeverity.Error
                   and 'semiton' in d.message]
         assert len(errors) == 1
+
+
+# =============================================================================
+# grain.duration_unit (PGE #158): unità samples/seconds del blocco grain
+# =============================================================================
+
+class TestGrainDurationUnit:
+    """Diagnostica per grain.duration_unit (mirror di loop_unit del pointer)."""
+
+    @staticmethod
+    def _grain(body: str) -> str:
+        return _stream_yaml("    grain:\n" + body)
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    def test_invalid_unit_flagged(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 480\n"
+            "      duration_unit: frames\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert any('duration_unit' in e.message and 'frames' in e.message
+                   for e in errs)
+
+    def test_valid_units_not_flagged(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        for unit in ('seconds', 'samples'):
+            body = "      duration: 0.05\n" if unit == 'seconds' else "      duration: 480\n"
+            yaml = self._grain(body + f"      duration_unit: {unit}\n")
+            errs = self._errors(provider, yaml)
+            assert not any('duration_unit' in e.message for e in errs), unit
+
+    def test_samples_requires_explicit_duration(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 64\n"
+            "      duration_unit: samples\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert any('duration' in e.message for e in errs)
+
+    def test_samples_with_duration_ok(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 480\n"
+            "      duration_range: 64\n"
+            "      duration_unit: samples\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert errs == []
+
+    def test_samples_scalar_not_flagged_against_seconds_bound(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        # 480 campioni: NON deve essere segnalato come > 10 (bound in secondi)
+        yaml = self._grain(
+            "      duration: 480\n"
+            "      duration_unit: samples\n"
+        )
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert bad == []
+
+    def test_samples_envelope_not_flagged(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: [[0.0, 48], [10.0, 4800]]\n"
+            "      duration_unit: samples\n"
+        )
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert bad == []
+
+    def test_samples_below_one_flagged(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 0.5\n"
+            "      duration_unit: samples\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert any('grain.duration' in e.message or 'campione' in e.message
+                   for e in errs)
+
+    def test_seconds_bound_still_enforced(self, bridge):
+        """Nessuna regressione: in secondi il bound massimo resta attivo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain("      duration: 999\n")  # default seconds, > 10
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert len(bad) == 1

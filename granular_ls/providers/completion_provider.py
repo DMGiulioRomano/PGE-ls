@@ -173,7 +173,8 @@ def _build_n_points_item(context) -> CompletionItem:
 _FLAG_KEYS = {'mute', 'solo', 'range_always_active'}
 
 # Chiavi con completions sul valore: aprono il menu automaticamente dopo ': '
-_VALUE_TRIGGER_KEYS = {'sample', 'distribution_mode', 'time_mode', 'loop_unit'}
+_VALUE_TRIGGER_KEYS = {'sample', 'distribution_mode', 'time_mode', 'loop_unit',
+                       'duration_unit'}
 
 # Documentazione statica per le stream context keys
 _STREAM_CONTEXT_DOCS = {
@@ -212,6 +213,17 @@ _STREAM_CONTEXT_DOCS = {
         "Se assente, eredita il comportamento da time_mode dello stream. "
         "Non e' un parametro sintetizzabile: non accetta envelope."
     ),
+    'duration_unit': (
+        "Meta-parametro che controlla l'unita' di misura di grain.duration e "
+        "grain.duration_range.\n\n"
+        "Valori accettati:\n"
+        "- 'seconds' (default): i valori sono in secondi.\n"
+        "- 'samples': i valori sono in campioni alla frequenza di output del "
+        "motore (48000 Hz), convertiti in secondi al parse (scalari ed "
+        "envelope, solo i valori Y).\n\n"
+        "Con 'samples' la grain.duration va indicata esplicitamente (il "
+        "default 0.05 e' in secondi). Non e' un parametro sintetizzabile."
+    ),
 }
 
 
@@ -247,6 +259,10 @@ class CompletionProvider:
         # Contesto 'value' su chiave 'time_mode': mostra i valori disponibili
         if context.context_type == 'value' and context.current_key == 'time_mode':
             return self._get_time_mode_completions(context.current_text)
+
+        # Contesto 'value' su chiave 'duration_unit': seconds | samples
+        if context.context_type == 'value' and context.current_key == 'duration_unit':
+            return self._get_duration_unit_completions(context.current_text)
 
         # Contesto inline dict: 'dim: {strategy: <prefix>'
         # Rilevato quando la riga corrente matcha '<dim>: {strategy: <word>$'
@@ -1193,6 +1209,38 @@ class CompletionProvider:
             if not prefix or mode.startswith(prefix)
         ]
 
+    def _get_duration_unit_completions(self, current_text: str) -> List[CompletionItem]:
+        """Valori disponibili per grain.duration_unit: seconds (default) | samples."""
+        _UNITS = {
+            'seconds': (
+                'Durata del grano in **secondi** (default).\n\n'
+                '`grain.duration` e `grain.duration_range` sono in secondi.'
+            ),
+            'samples': (
+                'Durata del grano in **campioni** alla frequenza di output '
+                '(48000 Hz), convertiti in secondi al parse.\n\n'
+                'Richiede una `grain.duration` esplicita (il default 0.05 e\' '
+                'in secondi). Minimo 1 campione.'
+            ),
+        }
+        prefix = current_text.strip().strip('"\'').lower()
+        return [
+            CompletionItem(
+                label=unit,
+                insert_text=f'"{unit}"\n$0',
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.EnumMember,
+                detail='duration unit',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'`{unit}`\n\n{doc}',
+                ),
+                command=TRIGGER_SUGGEST,
+            )
+            for unit, doc in _UNITS.items()
+            if not prefix or unit.startswith(prefix)
+        ]
+
     # -------------------------------------------------------------------------
     # SAMPLE FILE COMPLETIONS
     # -------------------------------------------------------------------------
@@ -1269,6 +1317,10 @@ class CompletionProvider:
             'pointer': [
                 ('loop_unit', ': ', 'Meta-parametro: unita dei loop.',
                  _STREAM_CONTEXT_DOCS.get('loop_unit', '')),
+            ],
+            'grain': [
+                ('duration_unit', ': ', 'Meta-parametro: unita della durata grano.',
+                 _STREAM_CONTEXT_DOCS.get('duration_unit', '')),
             ],
         }
 
