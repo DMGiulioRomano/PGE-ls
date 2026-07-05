@@ -111,6 +111,39 @@ class TestPitchStrategies:
         assert kwarg.type == 'int'
         assert kwarg.min_val == 0.0
 
+    # --- chord_progression (PGE issue #86) ---
+
+    def test_strategy_chord_progression_esiste(self):
+        assert 'chord_progression' in VOICE_STRATEGY_REGISTRY['pitch']
+
+    def test_chord_progression_ha_kwarg_progression_richiesto(self):
+        spec = VOICE_STRATEGY_REGISTRY['pitch']['chord_progression']
+        assert 'progression' in spec.kwargs
+        kwarg = spec.kwargs['progression']
+        assert kwarg.required is True
+        assert kwarg.type == 'list'
+
+    def test_chord_progression_interp_enum(self):
+        kwarg = VOICE_STRATEGY_REGISTRY['pitch']['chord_progression'].kwargs['interp']
+        assert kwarg.type == 'enum'
+        assert kwarg.required is False
+        assert set(kwarg.enum_values) == {'linear', 'cubic', 'step'}
+
+    def test_chord_progression_voice_leading_enum(self):
+        kwarg = (VOICE_STRATEGY_REGISTRY['pitch']['chord_progression']
+                 .kwargs['voice_leading'])
+        assert kwarg.type == 'enum'
+        assert kwarg.required is False
+        assert set(kwarg.enum_values) == {'nearest', 'positional'}
+        # default nearest: primo nell'ordine di completamento
+        assert kwarg.enum_values[0] == 'nearest'
+
+    def test_chord_progression_descrizione_cita_tabella_accordi(self):
+        spec = VOICE_STRATEGY_REGISTRY['pitch']['chord_progression']
+        # riusa la stessa tabella accordi di chord
+        assert 'maj7' in spec.kwargs['progression'].description
+        assert 'time_mode' in spec.description
+
     def test_stochastic_ha_kwarg_pitch_range(self):
         spec = VOICE_STRATEGY_REGISTRY['pitch']['stochastic']
         assert 'pitch_range' in spec.kwargs
@@ -154,9 +187,11 @@ class TestPitchUnitKwarg:
         assert kwarg.type == 'pitch_unit'
         assert kwarg.required is False
 
-    @pytest.mark.parametrize('strategy', ['chord', 'spectral'])
+    @pytest.mark.parametrize('strategy',
+                             ['chord', 'chord_progression', 'spectral'])
     def test_strategy_semitone_locked_non_espongono_unit(self, strategy):
-        # chord/spectral accettano solo semitones: unit non viene suggerito
+        # chord/chord_progression/spectral accettano solo semitones:
+        # unit non viene suggerito
         spec = VOICE_STRATEGY_REGISTRY['pitch'][strategy]
         assert 'unit' not in spec.kwargs
 

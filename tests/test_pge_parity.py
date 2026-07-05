@@ -109,14 +109,31 @@ def pge():
 # Voice strategy names
 # =============================================================================
 
+# Superficie che il language server supporta in ANTICIPO sul motore mergiato:
+# strategy presenti su un branch PGE non ancora in main. La parità le tollera
+# come solo-LS finché l'engine non le assorbe (allora la voce diventa innocua e
+# va rimossa). Serve solo per aggiunte deliberate, non maschera drift genuino:
+# lo squilibrio solo-PGE resta un errore in ogni caso.
+#
+#   'chord_progression' — PGE issue #86 (branch claude/chord-interpolation),
+#   PGE-ls issue #28. Rimuovere quando #86 è mergiata in main.
+PENDING_LS_AHEAD = {
+    'pitch': {'chord_progression'},
+}
+
+
 @pytest.mark.parametrize('dimension', ['pitch', 'onset_offset', 'pointer', 'pan'])
 def test_voice_strategy_names_match(pge, dimension):
     from granular_ls.voice_strategies import get_strategies_for_dimension
     ls_names = set(get_strategies_for_dimension(dimension))
     pge_names = set(pge.voice_strategies[dimension].keys())
-    assert ls_names == pge_names, (
+    pending = PENDING_LS_AHEAD.get(dimension, set())
+    only_ls = ls_names - pge_names - pending
+    only_pge = pge_names - ls_names
+    assert not only_ls and not only_pge, (
         f"Drift nei nomi strategy per '{dimension}': "
-        f"solo-LS={ls_names - pge_names}, solo-PGE={pge_names - ls_names}"
+        f"solo-LS={only_ls}, solo-PGE={only_pge} "
+        f"(pending tollerati: {pending & (ls_names - pge_names)})"
     )
 
 

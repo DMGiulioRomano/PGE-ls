@@ -26,6 +26,8 @@ import re
 import wave
 from typing import Dict, List, Optional, Tuple
 
+import yaml
+
 from lsprotocol.types import (
     Diagnostic,
     DiagnosticSeverity,
@@ -353,7 +355,12 @@ class DiagnosticProvider:
         for dim, strategies in VOICE_STRATEGY_REGISTRY.items():
             paths.add(f'voices.{dim}.strategy')
             for spec in strategies.values():
-                for kwarg_name in spec.kwargs:
+                for kwarg_name, kwarg_spec in spec.kwargs.items():
+                    # I kwarg di tipo lista (es. progression) hanno il valore su
+                    # righe successive (block list): non sono "senza valore".
+                    # La lista vuota è validata da _check_chord_progression.
+                    if kwarg_spec.type == 'list':
+                        continue
                     paths.add(f'voices.{dim}.{kwarg_name}')
         return frozenset(paths)
 
@@ -1643,6 +1650,12 @@ class DiagnosticProvider:
                     diagnostics.extend(
                         self._check_voice_pitch_unit(dim_keys, strategy_val)
                     )
+                    if strategy_val == 'chord_progression':
+                        diagnostics.extend(
+                            self._check_chord_progression(
+                                lines, dim_line, voices_end
+                            )
+                        )
 
                 # 3. Controlla i kwargs richiesti e i valori enum
                 for kwarg_name, kwarg_spec in spec.kwargs.items():
@@ -1802,6 +1815,198 @@ class DiagnosticProvider:
                                 severity=DiagnosticSeverity.Error,
                                 source=SOURCE,
                             ))
+
+        return diagnostics
+
+    @staticmethod
+    def _safe_yaml(text: str):
+        """Parsa un frammento YAML in modo tollerante; None su errore."""
+        try:
+            return yaml.safe_load(text)
+        except Exception:
+            return None
+
+    def _check_chord_progression(self, lines: List[str], dim_line: int,
+                                  voices_end: int) -> List[Diagnostic]:
+        """
+        Valida il kwarg `progression` della strategy pitch `chord_progression`.
+
+        Controlli (speculari a ChordProgressionPitchStrategy del motore):
+          1. `progression` è una lista non vuota.
+          2. Ogni step è `[tempo, accordo]` (o `[t, chord, inversion]` /
+             `[t, {chord, inversion}]`); il tempo è numerico.
+          3. I tempi sono non decrescenti.
+          4. Il nome accordo è in CHORD_INTERVALS.
+          5. `inversion` è un intero in `[0, n_note − 1]` dell'accordo.
+
+        Parsing tollerante: ogni step viene letto singolarmente con
+        yaml.safe_load, così una riga malformata non azzera gli altri check e
+        le diagnostiche puntano alla riga esatta. Se `progression` è assente il
+        metodo non emette nulla (il warning di kwarg richiesto è già prodotto
+        dal loop principale).
+        """
+        diagnostics: List[Diagnostic] = []
+
+        # Confine del blocco pitch (indent <= 6 chiude la dimensione).
+        block_end = voices_end
+        for n in range(dim_line + 1, voices_end):
+            raw = lines[n]
+            if not raw.strip():
+                continue
+            leading = len(raw) - len(raw.lstrip())
+            if leading <= 6:
+                block_end = n
+                break
+
+        # Trova la chiave progression: (indent 8) dentro il blocco pitch.
+        prog_line = None
+        prog_inline = ''
+        for n in range(dim_line + 1, block_end):
+            raw = lines[n]
+            leading = len(raw) - len(raw.lstrip())
+            if leading != 8:
+                continue
+            m = re.match(r'^progression\s*:\s*(.*)', raw.strip())
+            if m:
+                prog_line = n
+                prog_inline = m.group(1).strip()
+                break
+
+        if prog_line is None:
+            return diagnostics
+
+        # Raccoglie gli step come (valore_parsato, riga).
+        entries: List[Tuple[object, int]] = []
+        if prog_inline and not prog_inline.startswith('#'):
+            # Forma inline flow: progression: [[0, maj7], ...]
+            parsed = self._safe_yaml(prog_inline)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    entries.append((item, prog_line))
+            elif parsed is not None:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(prog_line),
+                    message=(
+                        "`progression` deve essere una lista non vuota di "
+                        "step `[tempo, accordo]`."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                return diagnostics
+        else:
+            # Forma a blocco: item '- [...]' a indent > 8.
+            for n in range(prog_line + 1, block_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                leading = len(raw) - len(raw.lstrip())
+                if leading <= 8:
+                    break
+                if stripped == '-':
+                    entries.append((None, n))
+                elif stripped.startswith('- '):
+                    entries.append((self._safe_yaml(stripped[2:].strip()), n))
+
+        if not entries:
+            diagnostics.append(Diagnostic(
+                range=self._line_range(prog_line),
+                message=(
+                    "`progression` è vuota: serve almeno uno step "
+                    "`[tempo, accordo]`."
+                ),
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+            return diagnostics
+
+        prev_t = None
+        for item, ln in entries:
+            if not isinstance(item, list) or len(item) < 2:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(ln),
+                    message=(
+                        "Ogni step della progressione deve essere "
+                        "`[tempo, accordo]` (opzionale `[t, chord, inversion]` "
+                        "o `[t, {chord, inversion}]`)."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                continue
+
+            t = item[0]
+            spec = item[1]
+            inversion: object = 0
+            if isinstance(spec, dict):
+                chord = spec.get('chord')
+                inversion = spec.get('inversion', 0)
+            else:
+                chord = spec
+                if len(item) >= 3:
+                    inversion = item[2]
+
+            # Tempo numerico e non decrescente.
+            if isinstance(t, (int, float)) and not isinstance(t, bool):
+                if prev_t is not None and t < prev_t:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(ln),
+                        message=(
+                            f"I tempi della progressione devono essere non "
+                            f"decrescenti: {t} viene dopo {prev_t}."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+                prev_t = t
+            else:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(ln),
+                    message=(
+                        f"Il tempo dello step deve essere numerico, trovato "
+                        f"`{t}`."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+            # Nome accordo.
+            if chord not in CHORD_INTERVALS:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(ln),
+                    message=(
+                        f"Accordo `{chord}` non valido. Valori consentiti: "
+                        + ', '.join(f'`{c}`' for c in CHORD_INTERVALS)
+                        + "."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                continue
+
+            # inversion intero in [0, n_note-1].
+            n_note = len(CHORD_INTERVALS[chord])
+            if not isinstance(inversion, int) or isinstance(inversion, bool):
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(ln),
+                    message=(
+                        f"`inversion` deve essere un intero, trovato "
+                        f"`{inversion}`."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+            elif not (0 <= inversion < n_note):
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(ln),
+                    message=(
+                        f"L'accordo `{chord}` ha {n_note} note: `inversion` "
+                        f"deve essere in [0, {n_note - 1}]."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
 
         return diagnostics
 

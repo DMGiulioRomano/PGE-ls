@@ -108,7 +108,7 @@ VOICE_PITCH_UNIT_VALUES: Tuple[str, ...] = (
 
 # Strategy voices.pitch intrinsecamente in semitoni: accettano solo
 # `unit: semitones` (o `unit` assente). Speculare a SEMITONE_LOCKED del motore.
-SEMITONE_LOCKED_STRATEGIES = frozenset({'chord', 'spectral'})
+SEMITONE_LOCKED_STRATEGIES = frozenset({'chord', 'chord_progression', 'spectral'})
 
 
 def edo_bounds(divisions: int) -> Tuple[float, float]:

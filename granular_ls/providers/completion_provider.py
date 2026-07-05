@@ -1451,6 +1451,10 @@ class CompletionProvider:
             for tab_idx, (kwarg_name, kwarg_spec) in enumerate(
                 spec.kwargs.items() if spec else [], start=1
             ):
+                if kwarg_spec.type == 'list':
+                    # Una lista (es. progression) non è esprimibile in un dict
+                    # inline: si salta nello snippet, l'utente la espande a blocco.
+                    continue
                 if kwarg_spec.type == 'enum' and kwarg_spec.enum_values:
                     choices = ','.join(kwarg_spec.enum_values)
                     placeholder = f'${{{tab_idx}|{choices}|}}'
