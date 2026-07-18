@@ -363,6 +363,9 @@ async function activate(context) {
         } else {
             args.push(`--points=${JSON.stringify(envelopeData.points)}`);
             args.push(`--interp=${envelopeData.interp}`);
+            if (envelopeData.bp_group) {
+                args.push('--bp-group');
+            }
             args.push(`--loop-dist=${envelopeData.loop_dist}`);
             args.push(`--nreps=${envelopeData.n_reps}`);
             args.push(`--ratio=${envelopeData.ratio}`);

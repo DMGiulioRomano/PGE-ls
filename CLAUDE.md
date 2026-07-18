@@ -63,7 +63,7 @@ Three stateless providers (each request receives full document text):
 | `providers/diagnostic_provider.py` | Validates scalar bounds, envelope formats, exclusive group violations, required fields, and duplicate keys. The `pitch:` block has its own strict validation (`_check_pitch_block`) driven by `pitch_units.py`, not by the bridge. |
 | `pitch_units.py` | Static registry of the unit-driven pitch surface (mirrors PGE's `PitchController`/`PitchUnit`): unit keys with per-unit bounds (`semitones`, `cents`, `quarter_tone`, `eighth_tone`, `edo`+`value`, `ratio`), `range` modifier, `voices.pitch.unit` values, semitone-locked strategies, hover docs. Since PGE's `PITCH_PARAMETER_SCHEMA` is empty, pitch never comes from the bridge. |
 | `voice_strategies.py` | Static registry of voice strategies per dimension (pitch/onset_offset/pointer/pan) with kwargs metadata, chord intervals (mirrors PGE's `CHORD_INTERVALS`), and hover docs. |
-| `envelope_snippets.py` | Generates 11 envelope template variants. Y bounds are derived from the matched parameter; `end_time` is calculated from stream duration or defaults to 1.0. |
+| `envelope_snippets.py` | Generates 15 envelope template variants (incl. the BP group `[points, interp]` forms). Y bounds are derived from the matched parameter; `end_time` is calculated from stream duration or defaults to 1.0. |
 
 ### Schema loading modes
 

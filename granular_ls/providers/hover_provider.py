@@ -26,6 +26,11 @@ from typing import Dict, Optional, Tuple
 
 from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
+from granular_ls.envelope_shapes import (
+    VALID_INTERP_TYPES,
+    is_bp_group,
+    is_bp_group_candidate,
+)
 from granular_ls.pitch_units import (
     PITCH_BLOCK_KEYS,
     PITCH_UNIT_KEYS,
@@ -407,6 +412,16 @@ class HoverProvider:
             if voice_hover is not None:
                 return voice_hover
 
+        # Hover sull'interp di un BP group [points, interp] (PGE #64):
+        # la riga sotto il cursore contiene un gruppo il cui interp e'
+        # la parola hoverata.
+        if context.current_text in VALID_INTERP_TYPES:
+            bp_hover = self._build_bp_group_interp_hover(
+                context.current_text, document_text, context.cursor_line
+            )
+            if bp_hover is not None:
+                return bp_hover
+
         # Hover su 'voices' come chiave al livello stream
         if context.current_text == 'voices' and not context.parent_path:
             return Hover(
@@ -596,6 +611,68 @@ class HoverProvider:
         return (
             f"\n\n---\n**Unità attiva:** `{unit_key}` → "
             f"bounds `[0, {info.max_range:g}]`."
+        )
+
+    @staticmethod
+    def _build_bp_group_interp_hover(word: str, document_text: str,
+                                     cursor_line: int) -> 'Optional[Hover]':
+        """
+        Hover sull'interp di un BP group [points, interp] (PGE #64).
+
+        Attivo solo se la riga del cursore contiene un BP group il cui
+        interp e' esattamente la parola hoverata (evita falsi positivi
+        sull'interp dei loop block, che ha altra semantica).
+        """
+        import yaml as _yaml
+
+        lines = document_text.split('\n')
+        if not (0 <= cursor_line < len(lines)):
+            return None
+        stripped = lines[cursor_line].strip()
+        if stripped.startswith('- '):
+            stripped = stripped[2:].strip()
+
+        if stripped.startswith('['):
+            value_str = stripped
+        else:
+            m = re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*:\s*(\[.*)$', stripped)
+            if not m:
+                return None
+            value_str = m.group(1)
+
+        try:
+            parsed = _yaml.safe_load(value_str)
+        except Exception:
+            return None
+        if not isinstance(parsed, list):
+            return None
+
+        if is_bp_group_candidate(parsed):
+            groups = [parsed]
+        else:
+            groups = [item for item in parsed if is_bp_group_candidate(item)]
+
+        if not any(is_bp_group(g) and g[1] == word for g in groups):
+            return None
+
+        doc = (
+            f"**BP group `[points, \"{word}\"]` — interpolazione "
+            "per-macrozona** (PGE #64)\n\n"
+            f"`{word}` governa i **soli segmenti interni** della zona "
+            "(n punti → n−1 segmenti); il segmento in uscita dall'ultimo "
+            "punto resta al default globale dell'envelope.\n\n"
+            "- Un punto 3-tuple `[t, v, type]` dentro la zona fa override "
+            "del group interp per il proprio segmento.\n"
+            "- L'interp del gruppo **non** diventa il tipo globale "
+            "dell'envelope.\n"
+            "- I tempi dei punti sono **assoluti** (non percentuali come "
+            "nei loop block).\n"
+            "- Collisione al bordo zona → `DISCONTINUITY_OFFSET` (salto "
+            "verticale intenzionale ripetendo lo stesso `t`).\n\n"
+            f"Tipi validi: {', '.join(f'`{t}`' for t in VALID_INTERP_TYPES)}."
+        )
+        return Hover(
+            contents=MarkupContent(kind=MarkupKind.Markdown, value=doc)
         )
 
     def _build_grain_envelope_hover(self, word: str) -> 'Optional[Hover]':

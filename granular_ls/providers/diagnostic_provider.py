@@ -36,6 +36,13 @@ from lsprotocol.types import (
     Range,
 )
 
+from granular_ls.envelope_shapes import (
+    VALID_INTERP_TYPES,
+    is_bp_group,
+    is_bp_group_candidate,
+    is_loop_block,
+    is_valid_point,
+)
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
@@ -160,6 +167,9 @@ class DiagnosticProvider:
             d for d in self._check_envelope_bounds(document_text)
             if d.range.start.line not in samples_lines
         )
+
+        # Fase 5d: validazione BP group [points, interp] (PGE #64).
+        diagnostics.extend(self._check_bp_groups(lines))
 
         # Fase 5b: validazione grain.envelope (finestratura del grano).
         diagnostics.extend(self._check_grain_envelope(document_text))
@@ -1440,6 +1450,87 @@ class DiagnosticProvider:
             ))
         return diagnostics
 
+    def _check_bp_groups(self, lines: List[str]) -> List[Diagnostic]:
+        """
+        Valida i BP group [points, interp] (PGE issue #64).
+
+        Un BP group avvolge un run di breakpoint dichiarando l'interpolazione
+        dell'intera macrozona: [[[t, v], ...], 'interp']. Regole (identiche
+        a EnvelopeBuilder._expand_bp_group in PGE):
+
+          - interp deve essere in VALID_INTERP_TYPES (linear/cubic/step),
+            altrimenti il motore solleva InvalidFieldValueError;
+          - la zona deve avere almeno 2 punti (n punti -> n-1 segmenti
+            interni), altrimenti ValueError;
+          - i punti devono essere [t, v] o [t, v, type].
+
+        Cerca i gruppi sia nella forma diretta 'key: [points, interp]' sia
+        come item di envelope misti (inline o block-style '- [...]').
+        Parsing tollerante via yaml.safe_load: righe non parseabili
+        (es. flow spezzato su piu' righe) vengono ignorate.
+        """
+        diagnostics: List[Diagnostic] = []
+
+        for n, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            if stripped.startswith('- '):
+                stripped = stripped[2:].strip()
+
+            # Estrae il valore lista: 'key: [...]' oppure item '- [...]'.
+            if stripped.startswith('['):
+                value_str = stripped
+            else:
+                m = re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*:\s*(\[.*)$',
+                             stripped)
+                if not m:
+                    continue
+                value_str = m.group(1)
+
+            try:
+                parsed = yaml.safe_load(value_str)
+            except Exception:
+                continue
+            if not isinstance(parsed, list):
+                continue
+
+            # Candidati: forma diretta o item di una lista mista.
+            if is_bp_group_candidate(parsed):
+                candidates = [parsed]
+            else:
+                candidates = [item for item in parsed
+                              if is_bp_group_candidate(item)]
+
+            for group in candidates:
+                points, interp = group
+                if not all(is_valid_point(p) for p in points):
+                    message = (
+                        "BP group con punti malformati: ogni punto deve "
+                        "essere [t, v] o [t, v, type] con t, v numerici."
+                    )
+                elif interp not in VALID_INTERP_TYPES:
+                    message = (
+                        f"BP group: interp '{interp}' non valido. "
+                        f"Tipi validi: {', '.join(VALID_INTERP_TYPES)}."
+                    )
+                elif len(points) < 2:
+                    message = (
+                        f"BP group richiede almeno 2 punti, trovati: "
+                        f"{len(points)}. Una zona con meno di 2 punti "
+                        "non ha segmenti interni."
+                    )
+                else:
+                    continue
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(n),
+                    message=message,
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+        return diagnostics
+
     @staticmethod
     def _extract_envelope_y_values(value_str: str) -> List[float]:
         """
@@ -1448,6 +1539,8 @@ class DiagnosticProvider:
         Formati riconosciuti (stessi di _check_envelope_bounds):
           - breakpoints standard: [[t, y], ...] oppure il singolo [t, y]
           - compact loop: [[[x_pct, y], ...], end_time, ...]
+          - BP group diretto: [[[t, y], ...], 'interp'] (PGE #64)
+          - misto: BP group e loop block come item della lista esterna
         Formati non riconosciuti: lista vuota (tolleranza).
         """
         import ast
@@ -1473,11 +1566,16 @@ class DiagnosticProvider:
         if len(parsed) >= 2 and _is_num(parsed[0]) and _is_num(parsed[1]):
             return [parsed[1]]
 
-        # Breakpoints standard [[t, y], ...]
+        # Breakpoints standard [[t, y], ...] + item misti:
+        # BP group [points, interp] e loop block come elementi della lista.
         for item in parsed:
             if (isinstance(item, list) and len(item) >= 2
                     and _is_num(item[0]) and _is_num(item[1])):
                 ys.append(item[1])
+            elif is_bp_group(item) or is_loop_block(item):
+                ys.extend(pt[1] for pt in item[0]
+                          if isinstance(pt, list) and len(pt) >= 2
+                          and _is_num(pt[1]))
         return ys
 
     def _check_voice_strategies(

@@ -254,6 +254,50 @@ def _build_snippets(
                 f' ${"{7:" + et + "}"}, ${"{8:3}"}]]'
             ),
         },
+
+        # 14. BP group diretto (PGE #64)
+        {
+            'label': 'envelope BP group (interp di zona)',
+            'detail': '[[[t,v],...], "interp"]',
+            'doc': (
+                '**BP group: run di breakpoint con interp di macrozona** '
+                '(PGE #64)\n\n'
+                'L\'interp governa i soli segmenti interni della zona '
+                '(n punti → n−1 segmenti); il segmento in uscita '
+                'dall\'ultimo punto resta al default globale. Tempi '
+                'assoluti (non percentuali).\n\n'
+                f'Range parametro: [{ymin}, {ymax}]\n\n'
+                'Interp validi: `linear`, `cubic`, `step`.'
+            ),
+            'insert_text': (
+                f' [[[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}],'
+                f' [${"{5:" + et + "}"}, ${"{6:" + ymin + "}"}]],'
+                f' "${{7|cubic,linear,step|}}"]'
+            ),
+        },
+
+        # 15. Misto con due zone BP group (PGE #64)
+        {
+            'label': 'envelope misto (due zone BP group)',
+            'detail': '[[points, "cubic"], [compact], [points, "step"]]',
+            'doc': (
+                '**Envelope misto: due macrozone BP con interp diverso** '
+                '(PGE #64)\n\n'
+                'Ogni zona `[points, interp]` interpola per conto suo; '
+                'un loop block puo\' stare in mezzo. Collisione al bordo '
+                'zona → `DISCONTINUITY_OFFSET`.\n\n'
+                f'Range parametro: [{ymin}, {ymax}]'
+            ),
+            'insert_text': (
+                f' [[[[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4:" + ymax + "}"}]],'
+                f' "${{5|cubic,linear,step|}}"],'
+                f' [[[${"{6:" + mid + "}"}, ${"{7:" + ymax + "}"}],'
+                f' [${"{8:" + et + "}"}, ${"{9:" + ymin + "}"}]],'
+                f' "${{10|step,linear,cubic|}}"]]'
+            ),
+        },
     ]
 
 

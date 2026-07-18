@@ -70,6 +70,16 @@ def to_dict_type(points: List[Point], end_time: float, interp_type: str) -> str:
     return f'{{type: {interp_type}, points: [{inner}]}}'
 
 
+def to_bp_group(points: List[Point], interp: str) -> str:
+    """
+    Converte in formato BP group (PGE #64): [[[t, v], ...], "interp"]
+    Tempi assoluti; interp governa i segmenti interni della macrozona.
+    """
+    pts = sort_points(points)
+    inner = ', '.join(f'[{_fmt(t)}, {_fmt(v)}]' for t, v in pts)
+    return f'[[{inner}], "{interp}"]'
+
+
 def format_output(
     points: List[Point],
     end_time: float,
@@ -91,12 +101,19 @@ def to_misto_format(segments: list) -> str:
     """
     Serializza una lista di segmenti nel formato misto PGE.
     Ogni segmento è un dict con 'type' ('breakpoints'|'loop') e i relativi campi.
-    Breakpoints BP → [t, v] individuali nell'array esterno.
+    Breakpoints BP linear → [t, v] individuali nell'array esterno.
+    Breakpoints con interp cubic/step (o flag 'bp_group') → BP group
+    [[[t,v],...], "interp"] (PGE #64): in un misto l'interp di zona è
+    esprimibile SOLO come gruppo.
     Loop → sezione compatta [[[%,v],...], abs_end, n, ...].
     """
     elements = []
     for seg in segments:
         if seg['type'] == 'breakpoints':
+            interp = seg.get('interp', 'linear')
+            if seg.get('bp_group') or interp in ('cubic', 'step'):
+                elements.append(to_bp_group(seg['points'], interp))
+                continue
             for t, v in sort_points(seg['points']):
                 elements.append(f'[{_fmt(t)}, {_fmt(v)}]')
         else:
@@ -310,6 +327,7 @@ class EnvelopeEditor:
         exponent: float = 2.0,
         segments: list = None,
         param_name: str = '',
+        bp_group: bool = False,
     ):
         self.y_min           = y_min
         self.y_max           = y_max
@@ -348,12 +366,17 @@ class EnvelopeEditor:
                 initial_points if initial_points
                 else [(0.0, y_min), (end_time, y_max)]
             )
-            self._segments = [{
+            seg = {
                 'type':     'breakpoints',
                 'interp':   interp,
                 'points':   pts,
                 'end_time': end_time,
-            }]
+            }
+            # Aperto da un BP group [points, interp] (PGE #64): il flag
+            # fa riemettere la stessa forma in output.
+            if bp_group:
+                seg['bp_group'] = True
+            self._segments = [seg]
 
         # Breakpoint finale implicito: solo sull'ultimo segmento BP.
         # Se l'ultimo punto ha X < end_time, ne aggiungiamo uno a end_time
@@ -2433,6 +2456,9 @@ class EnvelopeEditor:
             if seg['type'] == 'breakpoints':
                 interp   = seg.get('interp', 'linear')
                 end_time = seg.get('end_time', self.end_time)
+                # Aperto da un BP group (PGE #64): riemetti la stessa forma.
+                if seg.get('bp_group'):
+                    return to_bp_group(pts, interp)
                 if interp == 'step':
                     return to_dict_type(pts, end_time, 'step')
                 elif interp == 'cubic':
@@ -2614,6 +2640,8 @@ def main():
     parser.add_argument('--points',    type=str,    default='',   help='JSON [[t,v],...]')
     parser.add_argument('--struttura', type=str,    default='breakpoints')
     parser.add_argument('--interp',    type=str,    default='linear')
+    parser.add_argument('--bp-group',  action='store_true', dest='bp_group',
+                        help='Il valore aperto era un BP group [points, interp]')
     parser.add_argument('--loop-dist', type=str,    default='base', dest='loop_dist')
     parser.add_argument('--nreps',     type=int,    default=4)
     parser.add_argument('--ratio',     type=float,  default=1.5)
@@ -2661,6 +2689,7 @@ def main():
         exponent=args.exponent,
         segments=segments,
         param_name=args.param,
+        bp_group=args.bp_group,
     )
     result = editor.run()
     if result:
