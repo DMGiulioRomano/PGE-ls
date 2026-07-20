@@ -51,7 +51,10 @@ pytestmark = pytest.mark.skipif(
 # Package top-level di PGE: importarli inquina sys.modules. Il teardown del
 # fixture li rimuove per non perturbare test successivi (es. test_schema_bridge,
 # che importa progetti 'parameters' sintetici via from_python_path).
+# 'pge' e' il package unico del layout corrente (refactor PGE PR #162);
+# gli altri sono i top-level del layout legacy flat.
 _PGE_TOP_PACKAGES = (
+    'pge',
     'parameters', 'strategies', 'controllers', 'shared',
     'core', 'engine', 'envelopes', 'export', 'rendering',
 )
@@ -65,16 +68,26 @@ def pge():
         sys.path.insert(0, PGE_SRC)
     before = set(sys.modules)
     from types import SimpleNamespace
-    from strategies.voice_pitch_strategy import (
-        VOICE_PITCH_STRATEGIES, CHORD_INTERVALS,
-    )
-    from strategies.voice_onset_strategy import VOICE_ONSET_STRATEGIES
-    from strategies.voice_pointer_strategy import VOICE_POINTER_STRATEGIES
-    from strategies.voice_pan_strategy import VOICE_PAN_STRATEGIES
-    from parameters.pitch_unit import PITCH_UNIT_PRESETS
-    from parameters.parameter_definitions import GRANULAR_PARAMETERS
-    from controllers.window_registry import WindowRegistry
-    from core.stream_config import StreamContext, StreamConfig
+    # Import dual-layout: 'pge.<mod>' (corrente) o '<mod>' flat (legacy).
+    from granular_ls.schema_bridge import _import_pge_module
+    _pitch_strat = _import_pge_module('strategies.voice_pitch_strategy')
+    VOICE_PITCH_STRATEGIES = _pitch_strat.VOICE_PITCH_STRATEGIES
+    CHORD_INTERVALS = _pitch_strat.CHORD_INTERVALS
+    VOICE_ONSET_STRATEGIES = _import_pge_module(
+        'strategies.voice_onset_strategy').VOICE_ONSET_STRATEGIES
+    VOICE_POINTER_STRATEGIES = _import_pge_module(
+        'strategies.voice_pointer_strategy').VOICE_POINTER_STRATEGIES
+    VOICE_PAN_STRATEGIES = _import_pge_module(
+        'strategies.voice_pan_strategy').VOICE_PAN_STRATEGIES
+    PITCH_UNIT_PRESETS = _import_pge_module(
+        'parameters.pitch_unit').PITCH_UNIT_PRESETS
+    GRANULAR_PARAMETERS = _import_pge_module(
+        'parameters.parameter_definitions').GRANULAR_PARAMETERS
+    WindowRegistry = _import_pge_module(
+        'controllers.window_registry').WindowRegistry
+    _stream_config = _import_pge_module('core.stream_config')
+    StreamContext = _stream_config.StreamContext
+    StreamConfig = _stream_config.StreamConfig
     from dataclasses import fields as dc_fields
     # Chiavi stream-level attese: campi di StreamContext (meno sample_dur_sec)
     # + campi di StreamConfig (meno il riferimento context) + flag del Generator.
@@ -210,8 +223,9 @@ def test_parameter_bounds_match(pge):
 # =============================================================================
 
 def test_distribution_modes_match(pge):
-    from granular_ls.schema_bridge import SchemaBridge
-    from shared.distribution_strategy import DistributionFactory
+    from granular_ls.schema_bridge import SchemaBridge, _import_pge_module
+    DistributionFactory = _import_pge_module(
+        'shared.distribution_strategy').DistributionFactory
     bridge = SchemaBridge.from_python_path(PGE_SRC)
     ls_modes = set(bridge.get_distribution_modes())
     pge_modes = set(DistributionFactory._registry.keys())

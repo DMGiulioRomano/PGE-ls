@@ -19,6 +19,23 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 
 
+def _import_pge_module(name: str):
+    """
+    Importa un modulo del sorgente PGE gestendo entrambi i layout:
+
+      - package 'pge.<name>' — layout corrente, dal refactor library/CLI
+        di PGE (PR #162);
+      - '<name>' flat — layout legacy (checkout PGE più vecchi).
+
+    Solleva ModuleNotFoundError se il modulo non esiste in nessuno dei due.
+    """
+    import importlib
+    try:
+        return importlib.import_module(f'pge.{name}')
+    except ModuleNotFoundError:
+        return importlib.import_module(name)
+
+
 # =============================================================================
 # VALUE OBJECT
 # =============================================================================
@@ -457,7 +474,9 @@ class SchemaBridge:
         try:
             # Import dinamico: i moduli potrebbero non essere disponibili
             # nell'ambiente del Language Server, solo nel progetto granulare.
-            from parameters import parameter_schema, parameter_definitions
+            parameter_schema = _import_pge_module('parameters.parameter_schema')
+            parameter_definitions = _import_pge_module(
+                'parameters.parameter_definitions')
 
             # Schemi che vivono in un sotto-blocco YAML omonimo.
             # Es. PITCH_PARAMETER_SCHEMA ha yaml_path='ratio' ma nel YAML
@@ -506,7 +525,9 @@ class SchemaBridge:
             stream_context_keys = []
             try:
                 from dataclasses import fields as dc_fields
-                from core.stream_config import StreamContext, StreamConfig
+                _stream_config = _import_pge_module('core.stream_config')
+                StreamContext = _stream_config.StreamContext
+                StreamConfig = _stream_config.StreamConfig
 
                 # Campi di StreamContext (escluso sample_dur_sec)
                 for f in dc_fields(StreamContext):
@@ -585,14 +606,16 @@ class SchemaBridge:
 
             # Carica le modalita' di distribuzione da DistributionFactory
             try:
-                from shared.distribution_strategy import DistributionFactory
+                DistributionFactory = _import_pge_module(
+                    'shared.distribution_strategy').DistributionFactory
                 raw_data['distribution_modes'] = list(DistributionFactory._registry.keys())
             except Exception:
                 pass  # Usa il fallback statico nel costruttore
 
             # Carica i nomi delle finestrature del grano da WindowRegistry
             try:
-                from controllers.window_registry import WindowRegistry
+                WindowRegistry = _import_pge_module(
+                    'controllers.window_registry').WindowRegistry
                 # all_names() include gli alias (es. 'triangle' -> 'bartlett'),
                 # che il motore accetta ma WINDOWS.keys() escluderebbe.
                 raw_data['grain_envelope_names'] = list(WindowRegistry.all_names())

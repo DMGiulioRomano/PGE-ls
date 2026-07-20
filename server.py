@@ -79,6 +79,7 @@ from granular_ls.providers.completion_provider import CompletionProvider
 from granular_ls.providers.hover_provider import HoverProvider
 from granular_ls.providers.diagnostic_provider import DiagnosticProvider
 from granular_ls.envelope_snippets import build_envelope_n_points
+from granular_ls.envelope_shapes import VALID_INTERP_TYPES, is_bp_group
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('pge-ls')
@@ -1098,6 +1099,35 @@ def _parse_loop_segment(item, abs_start: float = 0.0) -> dict:
     }
 
 
+def _is_bp_group_zone(item) -> bool:
+    """
+    True se item è un BP group [points, interp] (PGE #64) editabile in GUI:
+    strutturalmente valido, interp valido, almeno 2 punti, tutti [t, v].
+    I gruppi con punti 3-tuple [t, v, type] (override per-punto) non sono
+    modellabili dalla GUI senza perdita → esclusi (tolleranza: la GUI non
+    si apre, nessuna riscrittura silenziosa).
+    """
+    if not is_bp_group(item):
+        return False
+    points, interp = item
+    if interp not in VALID_INTERP_TYPES or len(points) < 2:
+        return False
+    return all(len(p) == 2 for p in points)
+
+
+def _parse_bp_group_segment(item) -> dict:
+    """Parsa un BP group in un segment dict breakpoints (per formato misto)."""
+    points, interp = item
+    pts = [[float(t), float(v)] for t, v in points]
+    return {
+        'type':     'breakpoints',
+        'interp':   interp,
+        'bp_group': True,
+        'points':   pts,
+        'end_time': max(t for t, v in pts),
+    }
+
+
 def _try_parse_mixed(val) -> list:
     """
     Prova a interpretare val come formato misto/multi-loop.
@@ -1129,6 +1159,23 @@ def _try_parse_mixed(val) -> list:
             segments.append(loop_seg)
             abs_time = loop_seg['abs_start'] + loop_seg['duration']
 
+        elif _is_bp_group_zone(item):
+            if bp_points:
+                abs_time = max(t for t, v in bp_points)
+                segments.append({
+                    'type':     'breakpoints',
+                    'interp':   'linear',
+                    'points':   bp_points[:],
+                    'end_time': abs_time,
+                })
+                bp_points = []
+
+            group_seg = _parse_bp_group_segment(item)
+            if group_seg is None:
+                return None
+            segments.append(group_seg)
+            abs_time = group_seg['end_time']
+
         elif (len(item) == 2
               and isinstance(item[0], (int, float))
               and isinstance(item[1], (int, float))):
@@ -1145,9 +1192,10 @@ def _try_parse_mixed(val) -> list:
             'end_time': max(t for t, v in bp_points),
         })
 
-    # Deve avere almeno un loop e almeno 2 segmenti totali
-    has_loop = any(s['type'] == 'loop' for s in segments)
-    if not has_loop or len(segments) < 2:
+    # Deve avere almeno un loop o un BP group, e almeno 2 segmenti totali
+    has_loop  = any(s['type'] == 'loop' for s in segments)
+    has_group = any(s.get('bp_group') for s in segments)
+    if not (has_loop or has_group) or len(segments) < 2:
         return None
 
     return segments
@@ -1215,6 +1263,20 @@ def _parse_envelope_value(value_str: str) -> dict:
             'ratio': 1.5,
             'exponent': 2.0,
             'points': pts,
+        }
+
+    # ── BP group diretto [points, interp] (PGE #64) ───────────────────────
+    if _is_bp_group_zone(val):
+        seg = _parse_bp_group_segment(val)
+        return {
+            'struttura': 'breakpoints',
+            'interp':    seg['interp'],
+            'bp_group':  True,
+            'loop_dist': 'base',
+            'n_reps':    4,
+            'ratio':     1.5,
+            'exponent':  2.0,
+            'points':    seg['points'],
         }
 
     # ── Compact loop [[[%, v], ...], et, n, ...] ──────────────────────────
@@ -1357,6 +1419,7 @@ def handle_get_envelope_at_cursor(ls: LanguageServer, args):
         'struttura': envelope['struttura'],
         'segments':  envelope.get('segments', []),
         'interp':    envelope.get('interp', 'linear'),
+        'bp_group':  envelope.get('bp_group', False),
         'loop_dist': envelope.get('loop_dist', 'base'),
         'n_reps':    envelope.get('n_reps', 4),
         'ratio':     envelope.get('ratio', 1.5),
