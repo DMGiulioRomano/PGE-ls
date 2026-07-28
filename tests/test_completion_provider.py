@@ -604,6 +604,28 @@ class TestGetCompletionsStreamStart:
         all_text = ' '.join(i.insert_text or '' for i in result)
         assert 'onset' in all_text
 
+    def test_stream_start_contiene_rng_group(self):
+        """rng_group (PGE #169) e' offerto fra le chiavi stream-level."""
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='stream_start', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  - ")
+        labels = [i.label for i in result]
+        assert 'rng_group' in labels
+
+    def test_stream_start_rng_group_ha_doc_specifica(self):
+        """La doc di rng_group spiega la condivisione della sequenza RNG,
+        non il testo generico 'Chiave stream: ...'."""
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='stream_start', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  - ")
+        item = next(i for i in result if i.label == 'rng_group')
+        doc = item.documentation.value.lower()
+        assert 'chiave stream:' not in doc
+        assert 'sequenz' in doc  # sequenza/sequenze RNG condivise
+        assert 'stream_id' in doc  # spiega il default
+
     def test_stream_start_contiene_duration_e_sample(self):
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)

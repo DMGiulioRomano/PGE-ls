@@ -1477,6 +1477,82 @@ class TestCheckMissingValues:
         bool_errors = [d for d in result if 'normalized' in d.message]
         assert bool_errors == []
 
+    def test_rng_group_senza_valore_produce_errore(self, bridge):
+        """rng_group vuoto (PGE #169) e' un silent no-op: l'engine ricade
+        sull'identita' stream_id e la sequenza NON viene condivisa, ma
+        l'utente crede di aver creato il gruppo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    rng_group:\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = self._missing_errors(result)
+        assert len(errors) == 1
+        assert 'rng_group' in errors[0].message
+
+    def test_rng_group_lista_produce_errore(self, bridge):
+        """rng_group e' un'identita' testuale: una lista finirebbe all'engine
+        come identita' \"['a', 'b']\" (f-string sul valore), silenziosamente.
+        Parita' con la diagnostica rng-group-type di gl-ls."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    rng_group: [a, b]\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        errors = [d for d in result if 'rng_group' in d.message]
+        assert len(errors) == 1
+        assert 'identit' in errors[0].message
+
+    def test_rng_group_dict_inline_produce_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    rng_group: {values: [a, b]}\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert [d for d in result if 'rng_group' in d.message]
+
+    def test_rng_group_stringa_quotata_nessun_errore(self, bridge):
+        """Una stringa quotata che contiene parentesi non e' una lista."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            '    rng_group: "[cugini]"\n'
+        )
+        result = provider.get_diagnostics(yaml)
+        assert [d for d in result if 'rng_group' in d.message] == []
+
+    def test_rng_group_con_valore_nessun_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    rng_group: cugini\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert self._missing_errors(result) == []
+
     def test_pointer_normalized_valore_invalido_produce_errore(self, bridge):
         provider = DiagnosticProvider(bridge)
         yaml = (

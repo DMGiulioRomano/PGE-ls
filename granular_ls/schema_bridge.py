@@ -98,6 +98,7 @@ class SchemaBridge:
         # Usata quando from_python_path non riesce a importare StreamContext/StreamConfig.
         _STATIC_STREAM_CONTEXT_KEYS = [
             'stream_id', 'onset', 'duration', 'sample',   # StreamContext
+            'rng_group',                                   # StreamContext (PGE #169)
             'dephase', 'range_always_active', 'time_mode', # StreamConfig
             'time_scale', 'distribution_mode',
             'clip_strategy', 'clip_margin',

@@ -450,6 +450,17 @@ class TestGetHoverStreamContextKeys:
         assert result is not None
         assert 'mute' in result.contents.value.lower()
 
+    def test_rng_group_ritorna_hover_con_documentazione(self, bridge):
+        """rng_group (PGE #169): hover con la semantica dell'identita' RNG."""
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='rng_group')
+        result = provider.get_hover(ctx)
+        assert result is not None
+        text = result.contents.value.lower()
+        assert 'rng_group' in text
+        assert 'sequenz' in text
+        assert 'stream_id' in text  # spiega il default (identita' = stream_id)
+
     def test_solo_documentazione_menziona_esclusione(self, bridge):
         """La doc di solo deve spiegare che gli altri stream vengono ignorati."""
         provider = HoverProvider(bridge)

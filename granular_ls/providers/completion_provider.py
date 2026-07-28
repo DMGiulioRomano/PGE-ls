@@ -182,6 +182,16 @@ _STREAM_CONTEXT_DOCS = {
     'onset':               'Tempo di inizio dello stream in secondi.',
     'duration':            'Durata totale dello stream in secondi.',
     'sample':              'Percorso relativo al file audio sorgente (.wav).',
+    'rng_group': (
+        "Identita' RNG condivisibile fra stream (PGE #169, stringa). "
+        "Stream con lo stesso rng_group — e stessi parametri stocastici — "
+        "pescano le stesse sequenze pseudo-casuali (variazioni _range, gate, "
+        "iot, window, detune e voci stocastiche). "
+        "Assente (default): identita' = stream_id, comportamento invariato. "
+        "Richiede `seed:` top-level per essere riproducibile fra run. "
+        "Nota: con density o distribution diverse le griglie temporali si "
+        "desincronizzano pur condividendo l'RNG."
+    ),
     'time_mode':           "Modalita tempo: 'absolute' (default) | 'normalized'.",
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
     'range_always_active': 'Se True, il range si applica anche senza dephase.',
