@@ -369,6 +369,9 @@ class DiagnosticProvider:
         'loop_unit',
         'duration_unit',
         'distribution_mode',
+        # rng_group (PGE #169): vuoto e' un silent no-op — l'engine ricade
+        # sull'identita' stream_id e la sequenza non viene condivisa.
+        'rng_group',
     })
 
     # Campi obbligatori dello stream che richiedono sempre un valore.
