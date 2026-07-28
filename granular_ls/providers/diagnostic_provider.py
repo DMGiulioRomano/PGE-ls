@@ -197,6 +197,9 @@ class DiagnosticProvider:
         # Fase 11: grain.duration_unit (PGE #158).
         diagnostics.extend(self._check_grain_duration_unit(grain_blocks))
 
+        # Fase 12: rng_group non-scalare (PGE #169).
+        diagnostics.extend(self._check_rng_group_type(lines))
+
         return diagnostics
 
 
@@ -2701,6 +2704,36 @@ class DiagnosticProvider:
             if b['unit'] == 'samples':
                 suppressed |= b['value_lines']
         return frozenset(suppressed)
+
+    # Valore inline di rng_group che apre una lista o una mappa.
+    _RNG_GROUP_NON_SCALAR = re.compile(r'^\s*rng_group\s*:\s*([\[{])')
+
+    def _check_rng_group_type(self, lines: List[str]) -> List[Diagnostic]:
+        """
+        rng_group (PGE #169) e' un'identita' testuale, non un parametro
+        sintetizzabile: l'engine la interpola in una f-string per derivare
+        gli RNG, quindi una lista o una mappa diventerebbero l'identita'
+        "['a', 'b']" senza che nulla protesti a runtime.
+
+        Copre la forma inline (`rng_group: [a, b]` / `{...}`), che e' quella
+        in cui si finisce provando a trattarlo come un envelope o un
+        generatore. Parita' con la diagnostica rng-group-type di gl-ls.
+        """
+        diagnostics = []
+        for i, line in enumerate(lines):
+            if self._RNG_GROUP_NON_SCALAR.match(line):
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(i),
+                    message=(
+                        "'rng_group' e' un'identita' testuale, non un valore "
+                        "sintetizzabile: liste e mappe non sono ammesse "
+                        "(l'engine ne userebbe la resa testuale come nome "
+                        "del gruppo). Usa una stringa."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+        return diagnostics
 
     def _check_grain_duration_unit(self, grain_blocks: List[dict]) -> List[Diagnostic]:
         """
