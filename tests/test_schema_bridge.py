@@ -843,6 +843,12 @@ class TestGetStreamContextKeys:
         bridge = SchemaBridge(minimal_raw_data)
         assert 'mute' in bridge.get_stream_context_keys()
 
+    def test_contiene_rng_group(self, minimal_raw_data):
+        """rng_group (PGE #169): identita' RNG condivisibile fra stream.
+        Deve stare nella lista statica di fallback, non solo nel live import."""
+        bridge = SchemaBridge(minimal_raw_data)
+        assert 'rng_group' in bridge.get_stream_context_keys()
+
     def test_non_contiene_sample_dur_sec(self, minimal_raw_data):
         """sample_dur_sec e' calcolato internamente, non scritto dall'utente."""
         bridge = SchemaBridge(minimal_raw_data)
