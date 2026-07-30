@@ -173,8 +173,8 @@ def _build_n_points_item(context) -> CompletionItem:
 _FLAG_KEYS = {'mute', 'solo', 'range_always_active'}
 
 # Chiavi con completions sul valore: aprono il menu automaticamente dopo ': '
-_VALUE_TRIGGER_KEYS = {'sample', 'distribution_mode', 'time_mode', 'loop_unit',
-                       'duration_unit'}
+_VALUE_TRIGGER_KEYS = {'sample', 'distribution_mode', 'range_anchor',
+                       'time_mode', 'loop_unit', 'duration_unit'}
 
 # Documentazione statica per le stream context keys
 _STREAM_CONTEXT_DOCS = {
@@ -196,6 +196,11 @@ _STREAM_CONTEXT_DOCS = {
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
     'range_always_active': 'Se True, il range si applica anche senza dephase.',
     'distribution_mode':   None,  # generata dinamicamente
+    'range_anchor': (
+        "Ancora del range: dove cade `base` dentro la banda di un `_range`. "
+        "'center' (default): banda `[base - range/2, base + range/2]`. "
+        "'min': banda `[base, base + range]`, `base` è il minimo."
+    ),
     'dephase':             "Randomizzazione inter-grano. Bool, float, envelope o dict.",
     'solo': (
         "Flag: quando presente, SOLO gli stream con 'solo' vengono renderizzati. "
@@ -265,6 +270,10 @@ class CompletionProvider:
         # Contesto 'value' su chiave 'distribution_mode': mostra le modalita' disponibili
         if context.context_type == 'value' and context.current_key == 'distribution_mode':
             return self._get_distribution_mode_completions(context.current_text)
+
+        # Contesto 'value' su chiave 'range_anchor': center | min
+        if context.context_type == 'value' and context.current_key == 'range_anchor':
+            return self._get_range_anchor_completions(context.current_text)
 
         # Contesto 'value' su chiave 'time_mode': mostra i valori disponibili
         if context.context_type == 'value' and context.current_key == 'time_mode':
@@ -1185,6 +1194,42 @@ class CompletionProvider:
                 documentation=MarkupContent(
                     kind=MarkupKind.Markdown,
                     value=_MODE_DOCS.get(mode, f'Modalita` di distribuzione: `{mode}`.'),
+                ),
+            ))
+        return items
+
+    def _get_range_anchor_completions(self, current_text: str) -> List[CompletionItem]:
+        """
+        Valori disponibili per range_anchor: center (default) | min.
+        Letti dinamicamente dal bridge (RANGE_ANCHORS o fallback statico).
+        """
+        anchors = self._bridge.get_range_anchors()
+        prefix = current_text.strip().strip('"\'').lower()
+        _ANCHOR_DOCS = {
+            'center': (
+                'Ancora **center** (default): la banda del `_range` è '
+                '`[base - range/2, base + range/2]`. `base` è il centro. '
+                'Comportamento storico.'
+            ),
+            'min': (
+                'Ancora **min**: la banda del `_range` è `[base, base + range]`. '
+                '`base` è il minimo e `range` la forbice di apertura verso l\'alto. '
+                'Con `distribution_mode: gaussian`, `range` è comunque la '
+                'larghezza della banda (σ = larghezza/6).'
+            ),
+        }
+        items = []
+        for anchor in anchors:
+            if prefix and not anchor.lower().startswith(prefix):
+                continue
+            items.append(CompletionItem(
+                label=anchor,
+                insert_text=f'"{anchor}"',
+                kind=CompletionItemKind.EnumMember,
+                detail='range anchor',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=_ANCHOR_DOCS.get(anchor, f'Ancora del range: `{anchor}`.'),
                 ),
             ))
         return items

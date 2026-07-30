@@ -200,6 +200,9 @@ class DiagnosticProvider:
         # Fase 12: rng_group non-scalare (PGE #169).
         diagnostics.extend(self._check_rng_group_type(lines))
 
+        # Fase 13: range_anchor fuori enum (PGE range-anchor-mode).
+        diagnostics.extend(self._check_range_anchor(lines))
+
         return diagnostics
 
 
@@ -2707,6 +2710,38 @@ class DiagnosticProvider:
 
     # Valore inline di rng_group che apre una lista o una mappa.
     _RNG_GROUP_NON_SCALAR = re.compile(r'^\s*rng_group\s*:\s*([\[{])')
+
+    # range_anchor con valore inline: cattura il valore (eventualmente quotato).
+    _RANGE_ANCHOR_VALUE = re.compile(
+        r'^\s*range_anchor\s*:\s*["\']?([A-Za-z_][A-Za-z0-9_]*)["\']?\s*(?:#.*)?$'
+    )
+
+    def _check_range_anchor(self, lines: List[str]) -> List[Diagnostic]:
+        """
+        Valida il valore di range_anchor contro l'enum del bridge (center | min).
+
+        L'engine solleva InvalidFieldValueError per un valore non ammesso, quindi
+        la severità è Error, non un semplice warning. Un valore mancante è coperto
+        dalla fase _check_missing_values; qui si guarda solo il valore inline.
+        """
+        anchors = self._bridge.get_range_anchors()
+        diagnostics = []
+        for i, line in enumerate(lines):
+            m = self._RANGE_ANCHOR_VALUE.match(line)
+            if not m:
+                continue
+            value = m.group(1)
+            if value not in anchors:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(i),
+                    message=(
+                        f"`range_anchor`: valore `{value}` non valido. "
+                        f"Valori ammessi: {', '.join(anchors)}."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+        return diagnostics
 
     def _check_rng_group_type(self, lines: List[str]) -> List[Diagnostic]:
         """
