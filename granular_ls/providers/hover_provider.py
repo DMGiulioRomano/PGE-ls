@@ -67,6 +67,21 @@ _STREAM_CONTEXT_DOCS = {
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
     'range_always_active': 'Se True, il range si applica anche senza dephase (default: False).',
     'distribution_mode':   None,  # generata dinamicamente da get_distribution_modes()
+    'range_anchor': (
+        "Ancora del range: dove cade `base` dentro la banda di un `_range`.\n\n"
+        "- `center` (default): banda `[base - range/2, base + range/2]`, `base` è il centro. "
+        "Comportamento storico.\n"
+        "- `min`: banda `[base, base + range]`, `base` è il minimo e `range` la forbice "
+        "di apertura verso l'alto.\n\n"
+        "Governa i `_range` che passano da un parametro (`volume_range`, `pan_range`, "
+        "`grain.duration_range`, `pointer.offset_range`, `pitch.range`) e il pitch "
+        "quantizzato. **Non** governa il jitter implicito, il detune implicito del pitch, "
+        "né lo `spread` per-voce: restano simmetrici.\n\n"
+        "> Con `distribution_mode: gaussian`, `range` è la **larghezza** della banda "
+        "(σ = larghezza/6, clamp ai bordi) in entrambe le ancore.\n\n"
+        "In `min`, se `base + range` sfora il tetto del parametro, l'engine solleva un "
+        "errore al parse (non un semplice clamp)."
+    ),
     'dephase':             "Randomizzazione inter-grano. Bool, float, envelope o dict per-parametro.",
     'solo':                (
         "Modalita ascolto esclusivo: quando presente su uno stream, SOLO gli stream "

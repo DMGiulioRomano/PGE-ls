@@ -100,7 +100,7 @@ class SchemaBridge:
             'stream_id', 'onset', 'duration', 'sample',   # StreamContext
             'rng_group',                                   # StreamContext (PGE #169)
             'dephase', 'range_always_active', 'time_mode', # StreamConfig
-            'time_scale', 'distribution_mode',
+            'time_scale', 'distribution_mode', 'range_anchor',
             'clip_strategy', 'clip_margin',
             'solo', 'mute',                                # Generator flags
         ]
@@ -113,6 +113,13 @@ class SchemaBridge:
         _STATIC_DISTRIBUTION_MODES = ['uniform', 'gaussian']
         self._distribution_modes: List[str] = (
             raw_data.get('distribution_modes') or _STATIC_DISTRIBUTION_MODES
+        )
+
+        # Ancore del range disponibili (chiave range_anchor).
+        # Lette da RANGE_ANCHORS in from_python_path; fallback statico.
+        _STATIC_RANGE_ANCHORS = ['center', 'min']
+        self._range_anchors: List[str] = (
+            raw_data.get('range_anchors') or _STATIC_RANGE_ANCHORS
         )
 
         # Nomi delle finestrature del grano (grain.envelope).
@@ -367,6 +374,10 @@ class SchemaBridge:
         """Lista delle modalita' di distribuzione disponibili (es. uniform, gaussian)."""
         return list(self._distribution_modes)
 
+    def get_range_anchors(self) -> List[str]:
+        """Lista delle ancore del range disponibili (es. center, min)."""
+        return list(self._range_anchors)
+
     def get_grain_envelope_names(self) -> List[str]:
         """Lista dei nomi delle finestrature del grano (grain.envelope)."""
         return list(self._grain_envelope_names)
@@ -435,6 +446,7 @@ class SchemaBridge:
         data = {
             'parameters': [asdict(p) for p in self._params.values()],
             'distribution_modes': self._distribution_modes,
+            'range_anchors': self._range_anchors,
             'grain_envelope_names': self._grain_envelope_names,
             'stream_context_keys': self._stream_context_keys,
             'dephase_keys': self.get_dephase_keys(),
@@ -613,6 +625,13 @@ class SchemaBridge:
             except Exception:
                 pass  # Usa il fallback statico nel costruttore
 
+            # Carica le ancore del range da RANGE_ANCHORS
+            try:
+                raw_data['range_anchors'] = list(_import_pge_module(
+                    'shared.distribution_strategy').RANGE_ANCHORS)
+            except Exception:
+                pass  # Usa il fallback statico nel costruttore
+
             # Carica i nomi delle finestrature del grano da WindowRegistry
             try:
                 WindowRegistry = _import_pge_module(
@@ -683,6 +702,8 @@ class SchemaBridge:
         raw = {'specs': specs, 'bounds': bounds}
         if 'distribution_modes' in data:
             raw['distribution_modes'] = data['distribution_modes']
+        if 'range_anchors' in data:
+            raw['range_anchors'] = data['range_anchors']
         if 'grain_envelope_names' in data:
             raw['grain_envelope_names'] = data['grain_envelope_names']
         if 'stream_context_keys' in data:

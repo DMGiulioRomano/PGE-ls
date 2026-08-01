@@ -232,6 +232,25 @@ def test_distribution_modes_match(pge):
     assert ls_modes == pge_modes
 
 
+def test_range_anchors_match(pge):
+    """L'enum di range_anchor del LS non deve divergere da RANGE_ANCHORS di PGE.
+
+    Skip se l'engine precede la feature (RANGE_ANCHORS assente): la parità è un
+    guardrail contro il drift, non un requisito che l'engine sia già aggiornato.
+    Stessa filosofia dello skip di modulo quando PGE_SRC manca — si attiva da
+    solo appena l'engine espone la costante.
+    """
+    from granular_ls.schema_bridge import SchemaBridge, _import_pge_module
+    RANGE_ANCHORS = getattr(
+        _import_pge_module('shared.distribution_strategy'),
+        'RANGE_ANCHORS', None)
+    if RANGE_ANCHORS is None:
+        pytest.skip("engine precede RANGE_ANCHORS (range-anchor-mode non ancora "
+                    "in questo checkout di PGE)")
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    assert set(bridge.get_range_anchors()) == set(RANGE_ANCHORS)
+
+
 # =============================================================================
 # Stream context keys (StreamContext + StreamConfig + flag Generator)
 # =============================================================================
@@ -268,7 +287,8 @@ def test_snapshot_roundtrip_preserves_surface(pge):
         os.unlink(path)
 
     for getter in ('get_dephase_keys', 'get_stream_context_keys',
-                   'get_grain_envelope_names', 'get_distribution_modes'):
+                   'get_grain_envelope_names', 'get_distribution_modes',
+                   'get_range_anchors'):
         assert set(getattr(snap_bridge, getter)()) == set(getattr(src_bridge, getter)()), (
             f"Lo snapshot perde superficie su {getter}()"
         )
