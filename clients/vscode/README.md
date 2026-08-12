@@ -4,7 +4,7 @@ Autocompletamento intelligente, documentazione hover e diagnostica in tempo real
 
 ## Funzionalità
 
-- **Autocompletamento** — parametri stream, blocchi (grain, pointer, pitch, dephase), envelope con 11 formati
+- **Autocompletamento** — parametri stream, blocchi (grain, pointer, pitch, deviation_probability), envelope con 11 formati
 - **Snippet envelope dinamici** — i valori Y usano i bounds del parametro, end_time dalla durata dello stream
 - **Hover** — documentazione su ogni parametro con range, variation mode, gruppo esclusivo
 - **Diagnostica** — errori bounds, exclusive group (ratio/semitones, density/fill_factor), campi obbligatori mancanti, chiavi duplicate, bounds envelope
@@ -78,6 +78,6 @@ streams:
       start: 0.0
     grain:
       duration: 0.05
-    dephase:
+    deviation_probability:
       volume: 40.0
 ```

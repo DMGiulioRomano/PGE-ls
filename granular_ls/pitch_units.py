@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 # Semi-ampiezza in cents (±N) del micro-detune implicito che il motore applica
-# alle unità EDO sotto dephase senza `range` esplicito (PGE issue #95).
+# alle unità EDO sotto deviation_probability senza `range` esplicito (PGE issue #95).
 # Solo documentazione: nessuna validazione LSP collegata.
 EDO_IMPLICIT_DETUNE_CENTS = 12.0
 
@@ -281,7 +281,7 @@ def _edo_key_doc(info: PitchUnitInfo, nome: str, esempio: str) -> str:
         f"Ratio risultante: `2^(valore/{n})`. "
         "Accetta scalare o envelope `[[t, v], ...]`.\n\n"
         f"```yaml\npitch:\n  {esempio}\n```\n\n"
-        "Una sola chiave-unità per blocco pitch. Sotto dephase senza `range`, "
+        "Una sola chiave-unità per blocco pitch. Sotto deviation_probability senza `range`, "
         f"il motore applica un micro-detune implicito di "
         f"±{EDO_IMPLICIT_DETUNE_CENTS:g} cents."
     )

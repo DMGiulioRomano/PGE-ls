@@ -67,7 +67,7 @@ def make_raw_spec(name, yaml_path, default=0.0, is_smart=True,
     return {
         'name': name, 'yaml_path': yaml_path, 'default': default,
         'is_smart': is_smart, 'exclusive_group': exclusive_group,
-        'group_priority': group_priority, 'range_path': None, 'dephase_key': None,
+        'group_priority': group_priority, 'range_path': None, 'deviation_probability_key': None,
     }
 
 def make_raw_bounds(min_val, max_val, variation_mode='additive'):

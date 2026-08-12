@@ -286,11 +286,11 @@ def test_snapshot_roundtrip_preserves_surface(pge):
     finally:
         os.unlink(path)
 
-    for getter in ('get_dephase_keys', 'get_stream_context_keys',
+    for getter in ('get_deviation_probability_keys', 'get_stream_context_keys',
                    'get_grain_envelope_names', 'get_distribution_modes',
                    'get_range_anchors'):
         assert set(getattr(snap_bridge, getter)()) == set(getattr(src_bridge, getter)()), (
             f"Lo snapshot perde superficie su {getter}()"
         )
-    # Regressione del bug snapshot: le dephase keys non devono essere vuote.
-    assert snap_bridge.get_dephase_keys()
+    # Regressione del bug snapshot: le deviation_probability keys non devono essere vuote.
+    assert snap_bridge.get_deviation_probability_keys()

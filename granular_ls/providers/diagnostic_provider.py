@@ -226,10 +226,10 @@ class DiagnosticProvider:
         for start, end, _keys in streams:
             # Raccoglie (path_completo, n_riga) per questo stream.
             # Il path include il blocco padre per evitare falsi positivi:
-            # 'duration' a livello stream != 'dephase.duration' != 'grain.duration'
+            # 'duration' a livello stream != 'deviation_probability.duration' != 'grain.duration'
             key_occurrences: dict = {}  # path -> [n_riga, ...]
 
-            # Traccia il blocco corrente (grain, pitch, pointer, dephase, ...)
+            # Traccia il blocco corrente (grain, pitch, pointer, deviation_probability, ...)
             current_block = None
             current_block_indent = -1
 
@@ -278,7 +278,7 @@ class DiagnosticProvider:
                     path = key
 
                 elif leading == 6 and current_block:
-                    # Path = blocco.chiave (es. 'dephase.duration', 'grain.duration')
+                    # Path = blocco.chiave (es. 'deviation_probability.duration', 'grain.duration')
                     path = current_block + '.' + key
 
                 else:
@@ -804,7 +804,7 @@ class DiagnosticProvider:
                 yaml_path = key
 
             # Se il valore e' vuoto, potrebbe essere:
-            # a) un vero blocco padre (grain:, pointer:, pitch:, dephase:)
+            # a) un vero blocco padre (grain:, pointer:, pitch:, deviation_probability:)
             # b) un parametro con valore envelope sulle righe successive (density:)
             # Distinguiamo i due casi: se yaml_path e' un parametro noto del bridge
             # con valore lista, lo registriamo comunque per il check exclusive_group.

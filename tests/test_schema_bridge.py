@@ -53,7 +53,7 @@ def make_raw_spec(
     exclusive_group=None,
     group_priority=99,
     range_path=None,
-    dephase_key=None,
+    deviation_probability_key=None,
 ):
     return {
         'name': name,
@@ -63,7 +63,7 @@ def make_raw_spec(
         'exclusive_group': exclusive_group,
         'group_priority': group_priority,
         'range_path': range_path,
-        'dephase_key': dephase_key,
+        'deviation_probability_key': deviation_probability_key,
     }
 
 
@@ -147,10 +147,10 @@ def full_raw_data():
             make_raw_spec('effective_density', '_internal_calc_',
                           default=0.0, is_smart=False),
             make_raw_spec('pitch_ratio', 'ratio', default=1.0,
-                          range_path='range', dephase_key='pitch',
+                          range_path='range', deviation_probability_key='pitch',
                           exclusive_group='pitch_mode', group_priority=2),
             make_raw_spec('pitch_semitones', 'semitones', default=None,
-                          range_path='range', dephase_key='pitch',
+                          range_path='range', deviation_probability_key='pitch',
                           exclusive_group='pitch_mode', group_priority=1),
             make_raw_spec('loop_end', 'loop_end', default=None,
                           exclusive_group='loop_bounds', group_priority=1),
@@ -432,11 +432,11 @@ class TestGetParameterByKey:
         raw = {
             'specs': [
                 make_raw_spec('grain_duration', 'grain.duration', default=0.05),
-                make_raw_spec('dephase_duration', 'dephase.duration', default=0.0),
+                make_raw_spec('deviation_probability_duration', 'deviation_probability.duration', default=0.0),
             ],
             'bounds': {
                 'grain_duration': make_raw_bounds(0.001, 10.0),
-                'dephase_duration': make_raw_bounds(0.0, 1.0),
+                'deviation_probability_duration': make_raw_bounds(0.0, 1.0),
             },
         }
         bridge = SchemaBridge(raw)
@@ -445,7 +445,7 @@ class TestGetParameterByKey:
         assert result.name == 'grain_duration'
         # I path completi restano entrambi raggiungibili
         assert bridge.get_parameter_by_key('grain.duration').name == 'grain_duration'
-        assert bridge.get_parameter_by_key('dephase.duration').name == 'dephase_duration'
+        assert bridge.get_parameter_by_key('deviation_probability.duration').name == 'deviation_probability_duration'
 
     def test_include_solo_e_mute_iniettati(self, minimal_raw_data):
         """solo/mute vengono iniettati dal costruttore e devono essere indicizzati."""
@@ -592,7 +592,7 @@ class ParameterSpec:
     yaml_path: str
     default: Any
     range_path: Optional[str] = None
-    dephase_key: Optional[str] = None
+    deviation_probability_key: Optional[str] = None
     is_smart: bool = True
     exclusive_group: Optional[str] = None
     group_priority: int = 99
@@ -828,10 +828,10 @@ class TestGetStreamContextKeys:
         for expected in ['time_mode', 'time_scale', 'range_always_active']:
             assert expected in keys, f"'{expected}' mancante"
 
-    def test_contiene_dephase(self, minimal_raw_data):
-        """dephase e' un campo di StreamConfig."""
+    def test_contiene_deviation_probability(self, minimal_raw_data):
+        """deviation_probability e' un campo di StreamConfig."""
         bridge = SchemaBridge(minimal_raw_data)
-        assert 'dephase' in bridge.get_stream_context_keys()
+        assert 'deviation_probability' in bridge.get_stream_context_keys()
 
     def test_contiene_solo(self, minimal_raw_data):
         """solo e' un flag Generator: mette lo stream in modalita' ascolto esclusivo."""
@@ -892,7 +892,7 @@ class StreamContext:
 
 @dataclass(frozen=True)
 class StreamConfig:
-    dephase: object = False
+    deviation_probability: object = False
     range_always_active: bool = False
     time_mode: str = 'absolute'
     time_scale: float = 1.0
@@ -908,7 +908,7 @@ class ParameterSpec:
     yaml_path: str
     default: Any
     range_path: Optional[str] = None
-    dephase_key: Optional[str] = None
+    deviation_probability_key: Optional[str] = None
     is_smart: bool = True
     exclusive_group: Optional[str] = None
     group_priority: int = 99
@@ -954,7 +954,7 @@ def get_parameter_definition(name):
 
         # Campi di StreamConfig (escluso context)
         assert 'time_mode' in keys
-        assert 'dephase' in keys
+        assert 'deviation_probability' in keys
         assert 'context' not in keys
 
         # Flag speciali sempre presenti
@@ -1039,14 +1039,14 @@ class TestGetBlockKeys:
 
 
 # =============================================================================
-# MODIFICA A - get_dephase_keys()
+# MODIFICA A - get_deviation_probability_keys()
 # =============================================================================
 
-class TestGetDephaseKeys:
+class TestGetDeviationProbabilityKeys:
     """
-    get_dephase_keys() ritorna le chiavi valide del blocco dephase:.
+    get_deviation_probability_keys() ritorna le chiavi valide del blocco deviation_probability:.
 
-    Le chiavi sono derivate dai valori unici di dephase_key presenti
+    Le chiavi sono derivate dai valori unici di deviation_probability_key presenti
     negli ParameterSpec di tutti gli schema. Non sono hardcoded.
 
     Dai schema reali:
@@ -1057,70 +1057,70 @@ class TestGetDephaseKeys:
 
     def test_ritorna_lista(self, minimal_raw_data):
         bridge = SchemaBridge(minimal_raw_data)
-        result = bridge.get_dephase_keys()
+        result = bridge.get_deviation_probability_keys()
         assert isinstance(result, list)
 
     def test_nessun_duplicato(self, full_raw_data):
-        """Nessuna chiave duplicata anche se piu' parametri hanno la stessa dephase_key."""
+        """Nessuna chiave duplicata anche se piu' parametri hanno la stessa deviation_probability_key."""
         bridge = SchemaBridge(full_raw_data)
-        keys = bridge.get_dephase_keys()
+        keys = bridge.get_deviation_probability_keys()
         assert len(keys) == len(set(keys))
 
     def test_chiave_volume_presente(self):
         raw = {
             'specs': [make_raw_spec('volume', 'volume',
-                                    **{'dephase_key': 'volume'})],
+                                    **{'deviation_probability_key': 'volume'})],
             'bounds': {},
         }
-        # Nota: make_raw_spec non supporta dephase_key direttamente,
+        # Nota: make_raw_spec non supporta deviation_probability_key direttamente,
         # costruiamo manualmente
         raw2 = {
             'specs': [{
                 'name': 'volume', 'yaml_path': 'volume', 'default': 0.0,
                 'is_smart': True, 'exclusive_group': None, 'group_priority': 99,
-                'range_path': None, 'dephase_key': 'volume',
+                'range_path': None, 'deviation_probability_key': 'volume',
             }],
             'bounds': {},
         }
         bridge = SchemaBridge(raw2)
-        assert 'volume' in bridge.get_dephase_keys()
+        assert 'volume' in bridge.get_deviation_probability_keys()
 
-    def test_parametri_senza_dephase_key_non_contribuiscono(self):
+    def test_parametri_senza_deviation_probability_key_non_contribuiscono(self):
         raw = {
             'specs': [{
                 'name': 'density', 'yaml_path': 'density', 'default': None,
                 'is_smart': True, 'exclusive_group': None, 'group_priority': 99,
-                'range_path': None, 'dephase_key': None,
+                'range_path': None, 'deviation_probability_key': None,
             }],
             'bounds': {},
         }
         bridge = SchemaBridge(raw)
-        assert bridge.get_dephase_keys() == []
+        assert bridge.get_deviation_probability_keys() == []
 
     def test_pitch_condiviso_da_piu_parametri_appare_una_volta(self):
-        """pitch_ratio e pitch_semitones hanno entrambi dephase_key='pitch'."""
+        """pitch_ratio e pitch_semitones hanno entrambi deviation_probability_key='pitch'."""
         raw = {
             'specs': [
                 {
                     'name': 'pitch_ratio', 'yaml_path': 'pitch.ratio',
                     'default': 1.0, 'is_smart': True, 'exclusive_group': 'pitch_mode',
-                    'group_priority': 2, 'range_path': None, 'dephase_key': 'pitch',
+                    'group_priority': 2, 'range_path': None, 'deviation_probability_key': 'pitch',
                 },
                 {
                     'name': 'pitch_semitones', 'yaml_path': 'pitch.semitones',
                     'default': None, 'is_smart': True, 'exclusive_group': 'pitch_mode',
-                    'group_priority': 1, 'range_path': None, 'dephase_key': 'pitch',
+                    'group_priority': 1, 'range_path': None, 'deviation_probability_key': 'pitch',
                 },
             ],
             'bounds': {},
         }
         bridge = SchemaBridge(raw)
-        keys = bridge.get_dephase_keys()
+        keys = bridge.get_deviation_probability_keys()
         assert keys.count('pitch') == 1
 
     def test_schema_vuoto_ritorna_lista_vuota(self):
         bridge = SchemaBridge({'specs': [], 'bounds': {}})
-        assert bridge.get_dephase_keys() == []
+        assert bridge.get_deviation_probability_keys() == []
 
     def test_tutti_elementi_sono_stringhe(self):
         raw = {
@@ -1128,11 +1128,11 @@ class TestGetDephaseKeys:
                 {
                     'name': 'volume', 'yaml_path': 'volume', 'default': 0.0,
                     'is_smart': True, 'exclusive_group': None, 'group_priority': 99,
-                    'range_path': None, 'dephase_key': 'volume',
+                    'range_path': None, 'deviation_probability_key': 'volume',
                 },
             ],
             'bounds': {},
         }
         bridge = SchemaBridge(raw)
-        for k in bridge.get_dephase_keys():
+        for k in bridge.get_deviation_probability_keys():
             assert isinstance(k, str)

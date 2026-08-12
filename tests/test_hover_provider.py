@@ -57,7 +57,7 @@ def make_raw_spec(name, yaml_path, default=0.0, is_smart=True,
     return {
         'name': name, 'yaml_path': yaml_path, 'default': default,
         'is_smart': is_smart, 'exclusive_group': exclusive_group,
-        'group_priority': group_priority, 'range_path': None, 'dephase_key': None,
+        'group_priority': group_priority, 'range_path': None, 'deviation_probability_key': None,
     }
 
 def make_raw_bounds(min_val, max_val, variation_mode='additive'):
@@ -76,19 +76,19 @@ def bridge():
                           exclusive_group='density_mode', group_priority=2),
             make_raw_spec('fill_factor', 'fill_factor', default=2,
                           exclusive_group='density_mode', group_priority=1),
-            # volume con dephase_key per testare hover nel blocco dephase
+            # volume con deviation_probability_key per testare hover nel blocco deviation_probability
             {
                 'name': 'volume', 'yaml_path': 'volume', 'default': 0.0,
                 'is_smart': True, 'exclusive_group': None, 'group_priority': 99,
-                'range_path': None, 'dephase_key': 'volume',
+                'range_path': None, 'deviation_probability_key': 'volume',
             },
             make_raw_spec('grain_duration', 'grain.duration', default=0.05),
-            # pitch con dephase_key
+            # pitch con deviation_probability_key
             {
                 'name': 'pitch_semitones', 'yaml_path': 'pitch.semitones',
                 'default': None, 'is_smart': True,
                 'exclusive_group': 'pitch_mode', 'group_priority': 1,
-                'range_path': None, 'dephase_key': 'pitch',
+                'range_path': None, 'deviation_probability_key': 'pitch',
             },
             make_raw_spec('orphan', 'orphan'),  # nessun bounds
             make_raw_spec('effective_density', '_internal_calc_',
@@ -413,7 +413,7 @@ class TestGetHoverEdgeCases:
 
 
 # =============================================================================
-# MODIFICA D - Stream context keys e dephase nel HoverProvider
+# MODIFICA D - Stream context keys e deviation_probability nel HoverProvider
 # =============================================================================
 
 class TestGetHoverStreamContextKeys:
@@ -493,23 +493,23 @@ class TestGetHoverStreamContextKeys:
         assert result is None
 
 
-class TestGetHoverDephaseKeys:
+class TestGetHoverDeviationProbabilityKeys:
     """
-    Le dephase keys (volume, pan, duration, pitch, etc.) dentro
-    il blocco dephase: devono avere hover con documentazione utile.
+    Le deviation_probability keys (volume, pan, duration, pitch, etc.) dentro
+    il blocco deviation_probability: devono avere hover con documentazione utile.
     """
 
-    def test_dephase_volume_ritorna_hover(self, bridge):
+    def test_deviation_probability_volume_ritorna_hover(self, bridge):
         provider = HoverProvider(bridge)
         ctx = make_context(context_type='key', current_text='volume',
-                           parent_path=['dephase'], indent_level=1)
+                           parent_path=['deviation_probability'], indent_level=1)
         result = provider.get_hover(ctx)
         assert result is not None
 
-    def test_dephase_key_contents_non_vuoto(self, bridge):
+    def test_deviation_probability_key_contents_non_vuoto(self, bridge):
         provider = HoverProvider(bridge)
         ctx = make_context(context_type='key', current_text='volume',
-                           parent_path=['dephase'], indent_level=1)
+                           parent_path=['deviation_probability'], indent_level=1)
         result = provider.get_hover(ctx)
         assert result is not None
         assert len(result.contents.value) > 0
