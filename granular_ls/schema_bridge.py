@@ -99,7 +99,7 @@ class SchemaBridge:
         _STATIC_STREAM_CONTEXT_KEYS = [
             'stream_id', 'onset', 'duration', 'sample',   # StreamContext
             'rng_group',                                   # StreamContext (PGE #169)
-            'dephase', 'range_always_active', 'time_mode', # StreamConfig
+            'deviation_probability', 'range_always_active', 'time_mode', # StreamConfig
             'time_scale', 'distribution_mode', 'range_anchor',
             'clip_strategy', 'clip_margin',
             'solo', 'mute',                                # Generator flags
@@ -135,12 +135,12 @@ class SchemaBridge:
             raw_data.get('grain_envelope_names') or _STATIC_GRAIN_ENVELOPE_NAMES
         )
 
-        # Conserviamo gli spec raw per get_dephase_keys()
+        # Conserviamo gli spec raw per get_deviation_probability_keys()
         self._raw_specs = specs
 
-        # Override esplicito delle dephase keys: usato in modalita' snapshot,
-        # dove gli spec non conservano dephase_key. None => calcolo dagli spec.
-        self._dephase_keys_override: Optional[List[str]] = raw_data.get('dephase_keys')
+        # Override esplicito delle deviation_probability keys: usato in modalita' snapshot,
+        # dove gli spec non conservano deviation_probability_key. None => calcolo dagli spec.
+        self._deviation_probability_keys_override: Optional[List[str]] = raw_data.get('deviation_probability_keys')
 
         # Costruiamo il registry interno: name -> ParameterInfo
         # Il registry e' un dict per accesso O(1) in get_parameter().
@@ -176,7 +176,7 @@ class SchemaBridge:
                 'exclusive_group': None,
                 'group_priority': 99,
                 'range_path': None,
-                'dephase_key': None,
+                'deviation_probability_key': None,
             })
             if range_bounds:
                 bounds = dict(bounds)
@@ -346,23 +346,23 @@ class SchemaBridge:
                     keys.append(prefix)
         return keys
 
-    def get_dephase_keys(self) -> List[str]:
+    def get_deviation_probability_keys(self) -> List[str]:
         """
-        Ritorna le chiavi valide del blocco dephase:, derivate dai
-        valori unici di dephase_key negli ParameterSpec degli schema.
+        Ritorna le chiavi valide del blocco deviation_probability:, derivate dai
+        valori unici di deviation_probability_key negli ParameterSpec degli schema.
         Non hardcoded: si aggiorna automaticamente con nuovi parametri.
 
         Eccezione: 'pitch'. Dal refactor unit-driven di PGE il pitch non ha
         piu' ParameterSpec (PITCH_PARAMETER_SCHEMA vuoto), ma il motore
-        continua a supportare dephase sul pitch (PitchController passa
-        dephase_key='pitch'). Viene garantito qui se lo schema e' popolato.
+        continua a supportare deviation_probability sul pitch (PitchController passa
+        deviation_probability_key='pitch'). Viene garantito qui se lo schema e' popolato.
         """
-        if self._dephase_keys_override is not None:
-            return list(self._dephase_keys_override)
+        if self._deviation_probability_keys_override is not None:
+            return list(self._deviation_probability_keys_override)
         seen = set()
         keys = []
         for spec in self._raw_specs:
-            dk = spec.get('dephase_key')
+            dk = spec.get('deviation_probability_key')
             if dk and dk not in seen:
                 seen.add(dk)
                 keys.append(dk)
@@ -449,7 +449,7 @@ class SchemaBridge:
             'range_anchors': self._range_anchors,
             'grain_envelope_names': self._grain_envelope_names,
             'stream_context_keys': self._stream_context_keys,
-            'dephase_keys': self.get_dephase_keys(),
+            'deviation_probability_keys': self.get_deviation_probability_keys(),
             'extra_bounds': extra_bounds,
         }
         return json.dumps(data, indent=2)
@@ -520,7 +520,7 @@ class SchemaBridge:
                         'exclusive_group': spec.exclusive_group,
                         'group_priority': spec.group_priority,
                         'range_path': spec.range_path,
-                        'dephase_key': spec.dephase_key,
+                        'deviation_probability_key': spec.deviation_probability_key,
                     })
 
             bounds = {}
@@ -594,7 +594,7 @@ class SchemaBridge:
                         'exclusive_group': None,
                         'group_priority': 99,
                         'range_path': None,
-                        'dephase_key': None,
+                        'deviation_probability_key': None,
                     })
 
                     # Bounds: usa min_range/max_range del parametro padre
@@ -681,7 +681,7 @@ class SchemaBridge:
                 'exclusive_group': p['exclusive_group'],
                 'group_priority': p['group_priority'],
                 'range_path': None,
-                'dephase_key': None,
+                'deviation_probability_key': None,
             })
             if p['min_val'] is not None:
                 bounds[p['name']] = {
@@ -708,6 +708,6 @@ class SchemaBridge:
             raw['grain_envelope_names'] = data['grain_envelope_names']
         if 'stream_context_keys' in data:
             raw['stream_context_keys'] = data['stream_context_keys']
-        if 'dephase_keys' in data:
-            raw['dephase_keys'] = data['dephase_keys']
+        if 'deviation_probability_keys' in data:
+            raw['deviation_probability_keys'] = data['deviation_probability_keys']
         return cls(raw)

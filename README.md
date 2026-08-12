@@ -8,7 +8,7 @@ Fornisce autocompletamento intelligente, documentazione hover e diagnostica in t
 
 ## Funzionalità
 
-- **Autocompletamento** — parametri stream, blocchi (`grain`, `pointer`, `pitch`, `dephase`), 11 formati di envelope
+- **Autocompletamento** — parametri stream, blocchi (`grain`, `pointer`, `pitch`, `deviation_probability`), 11 formati di envelope
 - **Snippet dinamici** — `stream_id` con counter automatico, `end_time` dalla `duration` dello stream, valori Y dai bounds del parametro
 - **Hover** — documentazione su ogni parametro: range, variation mode, exclusive group
 - **Diagnostica** — bounds scalari e envelope, exclusive group per stream, campi obbligatori mancanti, chiavi duplicate

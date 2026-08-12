@@ -41,7 +41,7 @@ def make_raw_spec(name, yaml_path, default=0.0, is_smart=True,
     return {
         'name': name, 'yaml_path': yaml_path, 'default': default,
         'is_smart': is_smart, 'exclusive_group': exclusive_group,
-        'group_priority': group_priority, 'range_path': None, 'dephase_key': None,
+        'group_priority': group_priority, 'range_path': None, 'deviation_probability_key': None,
     }
 
 def make_raw_bounds(min_val, max_val, variation_mode='additive'):
@@ -470,13 +470,13 @@ class TestGetSnippetsWithBounds:
             'specs': [
                 {'name':'density','yaml_path':'density','default':None,'is_smart':True,
                  'exclusive_group':'density_mode','group_priority':2,
-                 'range_path':None,'dephase_key':None},
+                 'range_path':None,'deviation_probability_key':None},
                 {'name':'pan','yaml_path':'pan','default':0.0,'is_smart':True,
                  'exclusive_group':None,'group_priority':99,
-                 'range_path':None,'dephase_key':'pan'},
+                 'range_path':None,'deviation_probability_key':'pan'},
                 {'name':'volume','yaml_path':'volume','default':0.0,'is_smart':True,
                  'exclusive_group':None,'group_priority':99,
-                 'range_path':None,'dephase_key':'volume'},
+                 'range_path':None,'deviation_probability_key':'volume'},
             ],
             'bounds': {
                 'density': {'min_val':0.01,'max_val':4000.0,'min_range':0.0,
@@ -538,7 +538,7 @@ class TestGetSnippetsWithBounds:
         """Parametro senza bounds -> usa 0.0 e 1.0 come y default."""
         raw = {'specs': [{'name':'x','yaml_path':'x','default':0.0,'is_smart':True,
                            'exclusive_group':None,'group_priority':99,
-                           'range_path':None,'dephase_key':None}],
+                           'range_path':None,'deviation_probability_key':None}],
                'bounds': {}}
         b = SchemaBridge(raw)
         p = EnvelopeSnippetProvider(b)

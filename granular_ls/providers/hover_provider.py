@@ -43,7 +43,7 @@ from granular_ls.pitch_units import (
     parse_edo_divisions,
 )
 
-# Documentazione statica per le stream context keys e le dephase keys.
+# Documentazione statica per le stream context keys e le deviation_probability keys.
 # Importata anche dal CompletionProvider per coerenza.
 _STREAM_CONTEXT_DOCS = {
     'stream_id':           'Identificatore univoco dello stream (stringa).',
@@ -65,7 +65,7 @@ _STREAM_CONTEXT_DOCS = {
     ),
     'time_mode':           "Modalita tempo degli envelope: absolute (default) | normalized.",
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
-    'range_always_active': 'Se True, il range si applica anche senza dephase (default: False).',
+    'range_always_active': 'Se True, il range si applica anche senza deviation_probability (default: False).',
     'distribution_mode':   None,  # generata dinamicamente da get_distribution_modes()
     'range_anchor': (
         "Ancora del range: dove cade `base` dentro la banda di un `_range`.\n\n"
@@ -82,7 +82,7 @@ _STREAM_CONTEXT_DOCS = {
         "In `min`, se `base + range` sfora il tetto del parametro, l'engine solleva un "
         "errore al parse (non un semplice clamp)."
     ),
-    'dephase':             "Randomizzazione inter-grano. Bool, float, envelope o dict per-parametro.",
+    'deviation_probability':             "Randomizzazione inter-grano. Bool, float, envelope o dict per-parametro.",
     'solo':                (
         "Modalita ascolto esclusivo: quando presente su uno stream, SOLO gli stream "
         "con questo flag vengono renderizzati. Gli altri vengono ignorati dal Generator. "
@@ -136,7 +136,7 @@ _STREAM_CONTEXT_DOCS = {
 # Parametri del blocco pointer che dipendono da loop_unit / time_mode
 _POINTER_UNIT_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
 
-# Documentazione per le chiavi blocco di primo livello (pointer, pitch, grain, dephase, voices)
+# Documentazione per le chiavi blocco di primo livello (pointer, pitch, grain, deviation_probability, voices)
 _BLOCK_KEY_DOCS = {
     'pointer': (
         "**pointer** — Testa di lettura nel sample\n\n"
@@ -172,8 +172,8 @@ _BLOCK_KEY_DOCS = {
         "> Con `duration_unit: samples` i valori sono in campioni (48000 Hz) e\n"
         "> `duration` va indicata esplicitamente (il default 0.05 è in secondi)."
     ),
-    'dephase': (
-        "**dephase** — Randomizzazione inter-grano\n\n"
+    'deviation_probability': (
+        "**deviation_probability** — Randomizzazione inter-grano\n\n"
         "Aggiunge dispersione casuale a parametri individuali tra i grani.\n\n"
         "**Valori accettati:**\n"
         "- `false` — nessuna randomizzazione\n"
@@ -183,12 +183,12 @@ _BLOCK_KEY_DOCS = {
         "- `dict` — controllo per-parametro (chiave = nome parametro)\n\n"
         "**Esempio dict:**\n"
         "```yaml\n"
-        "dephase:\n"
+        "deviation_probability:\n"
         "  duration: 0.3\n"
         "  pitch: 0.1\n"
         "  volume: 0.5\n"
         "```\n\n"
-        "Le chiavi accettate nel dict corrispondono ai `dephase_key` dei parametri sintetizzabili."
+        "Le chiavi accettate nel dict corrispondono ai `deviation_probability_key` dei parametri sintetizzabili."
     ),
 }
 
@@ -430,9 +430,9 @@ class HoverProvider:
         if not context.current_text:
             return None
 
-        # Contesto dephase: hover sulla dephase key
-        if context.parent_path == ['dephase']:
-            return self._build_dephase_key_hover(context.current_text)
+        # Contesto deviation_probability: hover sulla deviation_probability key
+        if context.parent_path == ['deviation_probability']:
+            return self._build_deviation_probability_key_hover(context.current_text)
 
         # Contesto voices: hover sulle chiavi del blocco voices
         if context.parent_path and context.parent_path[0] == 'voices':
@@ -459,7 +459,7 @@ class HoverProvider:
                 )
             )
 
-        # Hover su chiavi blocco (pointer, pitch, grain, dephase) al livello stream
+        # Hover su chiavi blocco (pointer, pitch, grain, deviation_probability) al livello stream
         if not context.parent_path and context.current_text in _BLOCK_KEY_DOCS:
             return Hover(
                 contents=MarkupContent(
@@ -575,24 +575,24 @@ class HoverProvider:
             )
         )
 
-    def _build_dephase_key_hover(self, key_name: str) -> 'Optional[Hover]':
+    def _build_deviation_probability_key_hover(self, key_name: str) -> 'Optional[Hover]':
         """
-        Hover per una chiave dentro il blocco dephase:.
-        Verifica che la chiave sia una dephase key valida del bridge.
+        Hover per una chiave dentro il blocco deviation_probability:.
+        Verifica che la chiave sia una deviation_probability key valida del bridge.
         """
-        valid_keys = self._bridge.get_dephase_keys()
+        valid_keys = self._bridge.get_deviation_probability_keys()
         if key_name not in valid_keys:
             return None
 
         doc = (
-            f"Controllo dephase per il parametro **{key_name}**.\n\n"
+            f"Controllo deviation_probability per il parametro **{key_name}**.\n\n"
             f"Accetta: `false`, `true`, un valore float (0-1 o 0-100), "
             f"o un envelope `[[t, v], ...]`."
         )
         return Hover(
             contents=MarkupContent(
                 kind=MarkupKind.Markdown,
-                value=f'**{key_name}** (dephase)\n\n{doc}',
+                value=f'**{key_name}** (deviation_probability)\n\n{doc}',
             )
         )
 

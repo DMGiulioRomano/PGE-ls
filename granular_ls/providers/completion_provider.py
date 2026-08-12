@@ -13,13 +13,13 @@ STREAM START (context_type='stream_start', sulla riga '- '):
 STREAM ELEMENT LEVEL (in_stream_element=True, parent_path=[]):
     - Stream context keys (stream_id, onset, duration, ...)
     - Parametri root dello stream (density, volume, fill_factor, ...)
-    - Block keys come blocchi (grain, pointer, pitch, dephase)
+    - Block keys come blocchi (grain, pointer, pitch, deviation_probability)
 
 DENTRO UN BLOCCO (parent_path=['grain']):
     Solo i parametri di quel blocco con label locale (duration, non grain.duration).
 
-DENTRO DEPHASE (parent_path=['dephase']):
-    Le dephase keys ricavate dagli ParameterSpec.
+DENTRO DEVIATION_PROBABILITY (parent_path=['deviation_probability']):
+    Le deviation_probability keys ricavate dagli ParameterSpec.
 """
 
 import re
@@ -194,14 +194,14 @@ _STREAM_CONTEXT_DOCS = {
     ),
     'time_mode':           "Modalita tempo: 'absolute' (default) | 'normalized'.",
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
-    'range_always_active': 'Se True, il range si applica anche senza dephase.',
+    'range_always_active': 'Se True, il range si applica anche senza deviation_probability.',
     'distribution_mode':   None,  # generata dinamicamente
     'range_anchor': (
         "Ancora del range: dove cade `base` dentro la banda di un `_range`. "
         "'center' (default): banda `[base - range/2, base + range/2]`. "
         "'min': banda `[base, base + range]`, `base` è il minimo."
     ),
-    'dephase':             "Randomizzazione inter-grano. Bool, float, envelope o dict.",
+    'deviation_probability':             "Randomizzazione inter-grano. Bool, float, envelope o dict.",
     'solo': (
         "Flag: quando presente, SOLO gli stream con 'solo' vengono renderizzati. "
         "Gli altri vengono ignorati. Utile per isolare un layer durante la composizione."
@@ -364,9 +364,9 @@ class CompletionProvider:
         if context.context_type != 'key':
             return []
 
-        # DENTRO DEPHASE
-        if context.parent_path == ['dephase']:
-            return self._get_dephase_completions(context.current_text, context, document_text)
+        # DENTRO DEVIATION_PROBABILITY
+        if context.parent_path == ['deviation_probability']:
+            return self._get_deviation_probability_completions(context.current_text, context, document_text)
 
         # DENTRO IL BLOCCO VOICES (parent_path inizia con 'voices')
         if context.parent_path and context.parent_path[0] == 'voices':
@@ -528,14 +528,14 @@ class CompletionProvider:
             items.append(self._build_item_local(p))  # gia' ha TRIGGER_SUGGEST
             inserted_labels.add(p.yaml_path.split('.')[-1])
 
-        # 3. Block keys (grain, pointer, pitch, dephase, voices)
+        # 3. Block keys (grain, pointer, pitch, deviation_probability, voices)
         block_keys = list(self._bridge.get_block_keys())
-        if 'dephase' not in block_keys and self._bridge.get_dephase_keys():
-            block_keys.append('dephase')
+        if 'deviation_probability' not in block_keys and self._bridge.get_deviation_probability_keys():
+            block_keys.append('deviation_probability')
         if 'voices' not in block_keys:
             block_keys.append('voices')
         # 'pitch' e' unit-driven: nessun ParameterSpec nel bridge, quindi
-        # get_block_keys() non lo deriva. Aggiunto qui come voices/dephase.
+        # get_block_keys() non lo deriva. Aggiunto qui come voices/deviation_probability.
         if 'pitch' not in block_keys:
             block_keys.append('pitch')
 
@@ -748,19 +748,19 @@ class CompletionProvider:
         return items
 
     # -------------------------------------------------------------------------
-    # DENTRO DEPHASE
+    # DENTRO DEVIATION_PROBABILITY
     # -------------------------------------------------------------------------
 
-    def _get_dephase_completions(self,
+    def _get_deviation_probability_completions(self,
                                   current_text: str,
                                   context=None,
                                   document_text: str = '') -> List[CompletionItem]:
-        """Completion per le chiavi del blocco dephase:."""
-        dephase_keys = self._bridge.get_dephase_keys()
+        """Completion per le chiavi del blocco deviation_probability:."""
+        deviation_probability_keys = self._bridge.get_deviation_probability_keys()
         prefix = current_text.lower()
         already_present = self._extract_present_keys(document_text, context)
         items = []
-        for key in dephase_keys:
+        for key in deviation_probability_keys:
             if prefix and not key.lower().startswith(prefix):
                 continue
             if key in already_present:
@@ -769,10 +769,10 @@ class CompletionProvider:
                 label=key,
                 insert_text=key + ': ',
                 kind=CompletionItemKind.Field,
-                detail='dephase key',
+                detail='deviation_probability key',
                 documentation=MarkupContent(
                     kind=MarkupKind.Markdown,
-                    value=f'**{key}**\n\nControllo dephase per `{key}`.',
+                    value=f'**{key}**\n\nControllo deviation_probability per `{key}`.',
                 ),
                 command=TRIGGER_SUGGEST,
             ))
@@ -1024,15 +1024,15 @@ class CompletionProvider:
         # Calcola end_time dal contesto dello stream corrente
         end_time = self._get_end_time_from_context(context, document_text)
 
-        # Caso speciale: 'dephase' come parametro diretto o chiave dentro dephase.
+        # Caso speciale: 'deviation_probability' come parametro diretto o chiave dentro deviation_probability.
         # In entrambi i casi i bounds sono [0, 100].
-        is_dephase_direct = (
-            context.current_key == 'dephase'
+        is_deviation_probability_direct = (
+            context.current_key == 'deviation_probability'
             and context.parent_path == []
         )
-        is_dephase_sub = context.parent_path == ['dephase']
+        is_deviation_probability_sub = context.parent_path == ['deviation_probability']
 
-        if is_dephase_direct or is_dephase_sub:
+        if is_deviation_probability_direct or is_deviation_probability_sub:
             return self._envelope_provider.get_snippets_with_bounds_and_end_time(
                 y_min=0.0, y_max=100.0, end_time=end_time
             ) + [_build_n_points_item(context), _build_gui_editor_item(context)]
@@ -1840,7 +1840,7 @@ class CompletionProvider:
         - Se in_stream_element=True e parent_path=[]: solo le chiavi
           dello stream corrente (tra il suo '- ' e il prossimo '- ').
         - Se parent_path non vuoto: solo le chiavi del blocco corrente
-          (grain, pointer, pitch, dephase) nello stream corrente.
+          (grain, pointer, pitch, deviation_probability) nello stream corrente.
         - Altrimenti: scan globale (root level).
 
         Questo garantisce che parametri di altri stream o altri blocchi

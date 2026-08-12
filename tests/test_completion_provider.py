@@ -61,7 +61,7 @@ def make_raw_spec(name, yaml_path, default=0.0, is_smart=True,
     return {
         'name': name, 'yaml_path': yaml_path, 'default': default,
         'is_smart': is_smart, 'exclusive_group': exclusive_group,
-        'group_priority': group_priority, 'range_path': None, 'dephase_key': None,
+        'group_priority': group_priority, 'range_path': None, 'deviation_probability_key': None,
     }
 
 def make_raw_bounds(min_val, max_val, variation_mode='additive'):
@@ -528,17 +528,17 @@ def make_bridge_with_stream_keys():
             {
                 'name': 'grain_reverse', 'yaml_path': 'grain.reverse',
                 'default': 0, 'is_smart': True, 'exclusive_group': None,
-                'group_priority': 99, 'range_path': None, 'dephase_key': 'reverse',
+                'group_priority': 99, 'range_path': None, 'deviation_probability_key': 'reverse',
             },
             {
                 'name': 'pitch_ratio', 'yaml_path': 'pitch.ratio',
                 'default': 1.0, 'is_smart': True, 'exclusive_group': 'pitch_mode',
-                'group_priority': 2, 'range_path': None, 'dephase_key': 'pitch',
+                'group_priority': 2, 'range_path': None, 'deviation_probability_key': 'pitch',
             },
             {
                 'name': 'volume_param', 'yaml_path': 'volume',
                 'default': 0.0, 'is_smart': True, 'exclusive_group': None,
-                'group_priority': 99, 'range_path': None, 'dephase_key': 'volume',
+                'group_priority': 99, 'range_path': None, 'deviation_probability_key': 'volume',
             },
         ],
         'bounds': {
@@ -657,7 +657,7 @@ class TestGetCompletionsStreamStart:
 class TestGetCompletionsBlockKeys:
     """
     A root level dello stream (parent_path=[]) il provider suggerisce
-    anche le block keys: 'grain', 'pointer', 'pitch', 'dephase'.
+    anche le block keys: 'grain', 'pointer', 'pitch', 'deviation_probability'.
     Queste sono chiavi di blocco che si inseriscono come 'grain:\n'.
     """
 
@@ -713,54 +713,54 @@ class TestGetCompletionsBlockKeys:
         assert 'pointer' not in labels
 
 
-class TestGetCompletionsDephaseBlock:
+class TestGetCompletionsDeviationProbabilityBlock:
     """
-    parent_path=['dephase'] -> suggerisce le dephase keys ricavate
-    dal bridge con get_dephase_keys().
+    parent_path=['deviation_probability'] -> suggerisce le deviation_probability keys ricavate
+    dal bridge con get_deviation_probability_keys().
     """
 
-    def test_dephase_block_suggerisce_chiavi(self):
+    def test_deviation_probability_block_suggerisce_chiavi(self):
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='key', current_text='',
-                           parent_path=['dephase'], indent_level=3)
-        result = provider.get_completions(ctx, document_text="dephase:\n  ")
+                           parent_path=['deviation_probability'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="deviation_probability:\n  ")
         assert len(result) > 0
 
-    def test_dephase_block_contiene_volume(self):
+    def test_deviation_probability_block_contiene_volume(self):
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='key', current_text='',
-                           parent_path=['dephase'], indent_level=3)
-        result = provider.get_completions(ctx, document_text="dephase:\n  ")
+                           parent_path=['deviation_probability'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="deviation_probability:\n  ")
         labels = [item.label for item in result]
         assert 'volume' in labels
 
-    def test_dephase_block_contiene_pitch(self):
+    def test_deviation_probability_block_contiene_pitch(self):
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='key', current_text='',
-                           parent_path=['dephase'], indent_level=3)
-        result = provider.get_completions(ctx, document_text="dephase:\n  ")
+                           parent_path=['deviation_probability'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="deviation_probability:\n  ")
         labels = [item.label for item in result]
         assert 'pitch' in labels
 
-    def test_dephase_block_non_suggerisce_parametri_normali(self):
-        """'density' non e' una dephase key."""
+    def test_deviation_probability_block_non_suggerisce_parametri_normali(self):
+        """'density' non e' una deviation_probability key."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='key', current_text='',
-                           parent_path=['dephase'], indent_level=3)
-        result = provider.get_completions(ctx, document_text="dephase:\n  ")
+                           parent_path=['deviation_probability'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="deviation_probability:\n  ")
         labels = [item.label for item in result]
         assert 'density' not in labels
 
-    def test_dephase_block_insert_text_ha_due_punti(self):
+    def test_deviation_probability_block_insert_text_ha_due_punti(self):
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='key', current_text='',
-                           parent_path=['dephase'], indent_level=3)
-        result = provider.get_completions(ctx, document_text="dephase:\n  ")
+                           parent_path=['deviation_probability'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="deviation_probability:\n  ")
         for item in result:
             assert item.insert_text.endswith(': ')
 
@@ -924,7 +924,7 @@ class TestStreamLocalScope:
 
 class TestBlockLocalScope:
     """
-    Dentro un blocco (grain, pointer, pitch, dephase), i parametri
+    Dentro un blocco (grain, pointer, pitch, deviation_probability), i parametri
     gia' presenti in QUEL blocco non devono comparire come suggerimenti.
     Parametri presenti in altri blocchi o altri stream non influenzano.
     """
@@ -967,24 +967,24 @@ class TestBlockLocalScope:
 
 
 # =============================================================================
-# Punto 1: envelope autocompletion dentro dephase
+# Punto 1: envelope autocompletion dentro deviation_probability
 # =============================================================================
 
-class TestDephaseEnvelopeCompletion:
+class TestDeviationProbabilityEnvelopeCompletion:
     """
-    Quando il cursore e' dopo 'chiave: ' dentro dephase:
+    Quando il cursore e' dopo 'chiave: ' dentro deviation_probability:
     (es. 'volume: '), devono comparire gli snippet envelope.
     """
 
-    def test_value_context_dentro_dephase_mostra_envelopes(self):
-        """volume: dentro dephase deve mostrare snippet envelope."""
+    def test_value_context_dentro_deviation_probability_mostra_envelopes(self):
+        """volume: dentro deviation_probability deve mostrare snippet envelope."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         from granular_ls.yaml_analyzer import YamlContext, YamlAnalyzer
         ctx = YamlContext(
             context_type='value',
             current_text='',
-            parent_path=['dephase'],
+            parent_path=['deviation_probability'],
             indent_level=3,
             in_stream_element=True,
             current_key='volume',
@@ -997,38 +997,38 @@ class TestDephaseEnvelopeCompletion:
 
 
 # =============================================================================
-# Dephase: envelope su parametro dephase diretto e su chiavi interne
+# DeviationProbability: envelope su parametro deviation_probability diretto e su chiavi interne
 # =============================================================================
 
-class TestDephaseEnvelopeFull:
+class TestDeviationProbabilityEnvelopeFull:
     """
-    Dephase ha bounds [0, 100] sia come parametro diretto che come
+    DeviationProbability ha bounds [0, 100] sia come parametro diretto che come
     contenitore di chiavi. In tutti i casi deve mostrare envelope snippets
     con y_min=0.0 e y_max=100.0.
     """
 
-    def test_dephase_diretto_mostra_envelopes(self):
-        """'dephase: ' come valore diretto mostra 11 snippet envelope."""
+    def test_deviation_probability_diretto_mostra_envelopes(self):
+        """'deviation_probability: ' come valore diretto mostra 11 snippet envelope."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = YamlContext(
             context_type='value', current_text='', parent_path=[],
             indent_level=2, in_stream_element=True,
-            current_key='dephase', cursor_line=5,
+            current_key='deviation_probability', cursor_line=5,
         )
         items = provider.get_completions(ctx, '')
         assert len(items) > 0
         labels = [i.label for i in items]
         assert any('envelope' in l.lower() for l in labels)
 
-    def test_dephase_diretto_bounds_0_100(self):
-        """Gli snippet per dephase diretto hanno y_min=0.0 e y_max=100.0."""
+    def test_deviation_probability_diretto_bounds_0_100(self):
+        """Gli snippet per deviation_probability diretto hanno y_min=0.0 e y_max=100.0."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = YamlContext(
             context_type='value', current_text='', parent_path=[],
             indent_level=2, in_stream_element=True,
-            current_key='dephase', cursor_line=5,
+            current_key='deviation_probability', cursor_line=5,
         )
         items = provider.get_completions(ctx, '')
         linear = next((i for i in items if '2 punti' in i.label), None)
@@ -1036,12 +1036,12 @@ class TestDephaseEnvelopeFull:
         assert '100.0' in linear.insert_text
         assert '0.0' in linear.insert_text
 
-    def test_dephase_volume_usa_bounds_0_100(self):
-        """volume dentro dephase usa bounds [0, 100], non quelli di volume."""
+    def test_deviation_probability_volume_usa_bounds_0_100(self):
+        """volume dentro deviation_probability usa bounds [0, 100], non quelli di volume."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = YamlContext(
-            context_type='value', current_text='', parent_path=['dephase'],
+            context_type='value', current_text='', parent_path=['deviation_probability'],
             indent_level=3, in_stream_element=True,
             current_key='volume', cursor_line=5,
         )
@@ -1054,12 +1054,12 @@ class TestDephaseEnvelopeFull:
         # NON deve usare i bounds di volume (-120, 12)
         assert '-120.0' not in linear.insert_text
 
-    def test_dephase_chiavi_hanno_trigger_suggest(self):
-        """Le chiavi dentro dephase devono avere command triggerSuggest."""
+    def test_deviation_probability_chiavi_hanno_trigger_suggest(self):
+        """Le chiavi dentro deviation_probability devono avere command triggerSuggest."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = YamlContext(
-            context_type='key', current_text='', parent_path=['dephase'],
+            context_type='key', current_text='', parent_path=['deviation_probability'],
             indent_level=3, in_stream_element=True,
             current_key='', cursor_line=5,
         )

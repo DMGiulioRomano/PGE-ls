@@ -140,7 +140,7 @@ def _get_document_text(server: LanguageServer, uri: str) -> str:
 
 # Token types:
 #   0 = 'pge-normalized'  — chiavi pointer in modalita' normalized (verde teal)
-#   1 = 'pge-block-key'   — chiavi blocco strutturali: pointer, pitch, grain, dephase, voices
+#   1 = 'pge-block-key'   — chiavi blocco strutturali: pointer, pitch, grain, deviation_probability, voices
 _SEMANTIC_LEGEND = SemanticTokensLegend(
     token_types=['pge-normalized', 'pge-block-key'],
     token_modifiers=[],
@@ -152,7 +152,7 @@ _TOKEN_BLOCK_KEY  = 1
 _POINTER_UNIT_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
 
 # Chiavi blocco strutturali sempre colorate
-_BLOCK_KEYS = {'pointer', 'pitch', 'grain', 'dephase', 'voices'}
+_BLOCK_KEYS = {'pointer', 'pitch', 'grain', 'deviation_probability', 'voices'}
 
 
 def _compute_semantic_tokens(document_text: str) -> list:
@@ -163,7 +163,7 @@ def _compute_semantic_tokens(document_text: str) -> list:
     Tutti i valori relativi al token precedente.
 
     Tipi emessi:
-      _TOKEN_BLOCK_KEY  (1) — chiavi blocco (pointer, pitch, grain, dephase, voices)
+      _TOKEN_BLOCK_KEY  (1) — chiavi blocco (pointer, pitch, grain, deviation_probability, voices)
                               a 4 spazi di indent, sempre colorate.
       _TOKEN_NORMALIZED (0) — chiavi pointer (start, loop_start, loop_end, loop_dur)
                               solo quando l'unita' effettiva e' 'normalized'.
