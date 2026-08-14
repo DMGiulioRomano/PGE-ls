@@ -584,8 +584,26 @@ class TestGetCompletionsStreamStart:
         snippet = result[0].insert_text
         assert 'stream_id' in snippet
         assert 'onset' in snippet
-        assert 'duration' in snippet
         assert 'sample' in snippet
+
+    def test_stream_start_snippet_non_contiene_duration(self):
+        """PGE #205: i campi obbligatori sono tre. `duration` e' un override
+        compositivo e resta disponibile come chiave singola, non nello
+        scheletro dello stream nuovo."""
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='stream_start', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  - ")
+        assert 'duration' not in result[0].insert_text
+
+    def test_stream_start_duration_offerta_come_chiave_singola(self):
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='stream_start', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  - ")
+        item = next(i for i in result if i.label == 'duration')
+        doc = item.documentation.value.lower()
+        assert 'sample' in doc, "la doc deve dire cosa succede se si omette"
 
     def test_stream_start_contiene_stream_id(self):
         """stream_id e' nel snippet obbligatori."""
