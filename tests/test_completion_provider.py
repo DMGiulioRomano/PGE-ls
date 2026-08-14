@@ -712,6 +712,43 @@ class TestGetCompletionsStreamStart:
         assert len(result) >= 1
 
 
+class TestEndTimeSenzaDuration:
+    """PGE #205: uno stream senza `duration` e' YAML pienamente valido, quindi
+    gli snippet envelope non possono piu' cadere sul default 0.0 lasciato da
+    YamlAnalyzer — uscirebbero degeneri, tutti i breakpoint sullo stesso
+    istante. Il language server non legge i file audio e la durata del sample
+    non gli e' nota: la convenzione e' quella gia' usata da server.py per la
+    GUI (`stream_ctx.get('duration') or 10.0`)."""
+
+    def _end_time(self, document_text, cursor_line):
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='value', current_text='',
+                           cursor_line=cursor_line)
+        return provider._get_end_time_from_context(ctx, document_text)
+
+    def test_stream_senza_duration_usa_il_default_della_gui(self):
+        doc = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    sample: file.wav\n"
+            "    density: \n"
+        )
+        assert self._end_time(doc, 4) == 10.0
+
+    def test_duration_dichiarata_vince(self):
+        doc = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 30.0\n"
+            "    sample: file.wav\n"
+            "    density: \n"
+        )
+        assert self._end_time(doc, 5) == 30.0
+
+
 class TestGetCompletionsBlockKeys:
     """
     A root level dello stream (parent_path=[]) il provider suggerisce

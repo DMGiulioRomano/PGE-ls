@@ -176,6 +176,12 @@ _FLAG_KEYS = {'mute', 'solo', 'range_always_active'}
 _VALUE_TRIGGER_KEYS = {'sample', 'distribution_mode', 'range_anchor',
                        'time_mode', 'loop_unit', 'duration_unit'}
 
+# Fine dell'asse X di uno snippet envelope quando la durata dello stream non e'
+# nota: `duration` omessa (PGE #205) vale la durata del sample, che il language
+# server non puo' leggere. Stesso valore che server.py usa per la GUI: un
+# numero da riscrivere, non un envelope degenere a durata zero.
+DEFAULT_END_TIME = 10.0
+
 # Documentazione statica per le stream context keys
 _STREAM_CONTEXT_DOCS = {
     'stream_id':           'Identificatore univoco dello stream (stringa).',
@@ -1158,10 +1164,14 @@ class CompletionProvider:
 
         Regole:
         - Se time_mode: normalized -> 1.0 (tempo normalizzato [0, 1])
-        - Altrimenti               -> onset dello stream corrente
-                                      (il loop parte dall'onset e finisce
-                                       a onset + durata, ma usiamo onset
-                                       come punto di riferimento iniziale)
+        - Altrimenti               -> la `duration` dello stream corrente
+
+        Senza `duration` (PGE #205: legittimo, vale la durata del sample)
+        YamlAnalyzer lascia 0.0, che darebbe snippet degeneri con tutti i
+        breakpoint sullo stesso istante. Il language server non legge i file
+        audio, quindi la durata vera non gli e' nota: si ricade sullo stesso
+        default che server.py usa per la GUI, cosi' le due strade non
+        divergono sullo stesso YAML.
         """
         from granular_ls.yaml_analyzer import YamlAnalyzer
         stream_ctx = YamlAnalyzer.get_stream_context_at_line(
@@ -1169,7 +1179,7 @@ class CompletionProvider:
         )
         if stream_ctx['time_mode'] == 'normalized':
             return 1.0
-        return stream_ctx['duration']
+        return stream_ctx.get('duration') or DEFAULT_END_TIME
 
     # -------------------------------------------------------------------------
     # DISTRIBUTION MODE COMPLETIONS
