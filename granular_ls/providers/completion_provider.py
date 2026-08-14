@@ -603,8 +603,7 @@ class CompletionProvider:
         snippet = (
             f'- stream_id: "${{1:{stream_id_default}}}"\n'
             '  onset: ${2:0.0}\n'
-            '  duration: ${3:10.0}\n'
-            '  sample: "${4:file.wav}"\n'
+            '  sample: "${3:file.wav}"\n'
             '  $0'
         )
         return [CompletionItem(
@@ -612,12 +611,13 @@ class CompletionProvider:
             insert_text=snippet,
             insert_text_format=InsertTextFormat.Snippet,
             kind=CompletionItemKind.Module,
-            detail='stream_id, onset, duration, sample',
+            detail='stream_id, onset, sample',
             documentation=MarkupContent(
                 kind=MarkupKind.Markdown,
                 value=(
                     '**Nuovo elemento stream**\n\n'
-                    'Inserisce il trattino `- ` e i quattro campi obbligatori.\n'
+                    'Inserisce il trattino `- ` e i tre campi obbligatori.\n'
+                    'Senza `duration` lo stream dura quanto il sample.\n'
                     'Premi **Tab** per spostarti tra i campi.'
                 ),
             ),

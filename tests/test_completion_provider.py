@@ -596,6 +596,19 @@ class TestGetCompletionsStreamStart:
         result = provider.get_completions(ctx, document_text="streams:\n  - ")
         assert 'duration' not in result[0].insert_text
 
+    def test_streams_list_level_snippet_ha_i_tre_campi_obbligatori(self):
+        """Anche lo snippet del trattino (`streams_list_level`) inserisce i
+        tre campi obbligatori, non quattro."""
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='streams_list_level', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  ")
+        snippet = result[0].insert_text
+        assert 'stream_id' in snippet
+        assert 'onset' in snippet
+        assert 'sample' in snippet
+        assert 'duration' not in snippet
+
     def test_stream_start_duration_offerta_come_chiave_singola(self):
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)

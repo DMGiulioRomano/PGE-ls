@@ -420,7 +420,7 @@ class DiagnosticProvider:
           1. Parametri numerici del bridge (min_val != None): richiedono float
              o envelope [[t, v], ...].
           2. voices.num_voices e voices.scatter: bounds via get_raw_bounds.
-          3. Campi obbligatori stream (stream_id, onset, duration, sample):
+          3. Campi obbligatori stream (stream_id, onset, sample):
              richiedono qualsiasi valore.
           4. Chiavi stringa obbligatorie (time_mode, loop_unit, ...):
              richiedono un valore stringa.
