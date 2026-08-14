@@ -422,13 +422,15 @@ class CompletionProvider:
         if current_text and not 'streams'.startswith(current_text.lower()):
             return []
 
-        # Snippet: streams: + primo elemento con campi obbligatori
+        # Snippet: streams: + primo elemento con campi obbligatori.
+        # Tre campi, non quattro (PGE #205): e' il primo posto in cui si legge
+        # cosa uno stream deve avere, e deve dire la stessa cosa degli altri
+        # due punti di ingresso (`- (nuovo stream)`, `stream (obbligatori)`).
         snippet = (
             'streams:\n'
             '  - stream_id: "${1:nome_stream}"\n'
             '    onset: ${2:0.0}\n'
-            '    duration: ${3:10.0}\n'
-            '    sample: "${4:file.wav}"'
+            '    sample: "${3:file.wav}"'
         )
         return [CompletionItem(
             label='streams',
@@ -441,7 +443,9 @@ class CompletionProvider:
                 value=(
                     '**streams**\n\n'
                     'Blocco principale. Contiene la lista degli stream granulari.\n\n'
-                    'Inserisce il blocco con i campi obbligatori del primo stream.'
+                    'Inserisce il blocco con i tre campi obbligatori del primo '
+                    'stream: `stream_id`, `onset`, `sample`.\n\n'
+                    'Senza `duration` lo stream dura quanto il sample.'
                 ),
             ),
         )]
