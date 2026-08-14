@@ -605,8 +605,11 @@ class TestGetDiagnosticsListaStreams:
 
 class TestGetDiagnosticsMandatoryStreamFields:
     """
-    I campi obbligatori di ogni stream sono: stream_id, onset, duration, sample.
+    I campi obbligatori di ogni stream sono tre: stream_id, onset, sample.
     Se uno manca, il provider deve produrre un Warning con il nome del campo.
+
+    `duration` non e' fra questi (PGE #205): se assente, il motore usa la
+    durata del file audio dichiarato in `sample`.
     """
 
     def test_stream_completo_nessun_warning(self, bridge):
@@ -650,7 +653,10 @@ class TestGetDiagnosticsMandatoryStreamFields:
         warnings = [d for d in result if 'onset' in d.message]
         assert len(warnings) >= 1
 
-    def test_stream_senza_duration_produce_warning(self, bridge):
+    def test_stream_senza_duration_non_produce_diagnostiche(self, bridge):
+        """PGE #205: `duration` e' opzionale — assente vale la durata del
+        sample. Segnalarla sarebbe un falso positivo su ogni YAML valido che
+        sfrutta il default."""
         provider = DiagnosticProvider(bridge)
         yaml = (
             "streams:\n"
@@ -659,8 +665,21 @@ class TestGetDiagnosticsMandatoryStreamFields:
             "    sample: file.wav\n"
         )
         result = provider.get_diagnostics(yaml)
-        warnings = [d for d in result if 'duration' in d.message]
-        assert len(warnings) >= 1
+        assert result == []
+
+    def test_duration_senza_valore_non_produce_diagnostiche(self, bridge):
+        """`duration:` senza valore e' `duration: null`, che per il motore
+        vale come chiave assente (PGE #205)."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration:\n"
+            "    sample: file.wav\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert result == []
 
     def test_stream_senza_sample_produce_warning(self, bridge):
         provider = DiagnosticProvider(bridge)
@@ -1271,7 +1290,10 @@ class TestCheckMissingValues:
 
     # --- Campi obbligatori stream ---
 
-    def test_duration_senza_valore_produce_errore(self, bridge):
+    def test_duration_senza_valore_non_produce_errore(self, bridge):
+        """PGE #205: `duration` non e' piu' un campo che richiede un valore.
+        `duration:` nudo e' `duration: null` — durata del sample, non una
+        dichiarazione lasciata a meta'."""
         provider = DiagnosticProvider(bridge)
         yaml = (
             "streams:\n"
@@ -1282,8 +1304,7 @@ class TestCheckMissingValues:
         )
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if "'duration'" in d.message and 'richiede' in d.message]
-        assert len(errors) == 1
-        assert errors[0].severity == DiagnosticSeverity.Error
+        assert errors == []
 
     def test_onset_senza_valore_produce_errore(self, bridge):
         provider = DiagnosticProvider(bridge)
