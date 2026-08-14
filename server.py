@@ -75,7 +75,10 @@ if str(_HERE) not in sys.path:
 
 from granular_ls.schema_bridge import SchemaBridge
 from granular_ls.yaml_analyzer import YamlAnalyzer, is_pge_file
-from granular_ls.providers.completion_provider import CompletionProvider
+from granular_ls.providers.completion_provider import (
+    CompletionProvider,
+    DEFAULT_END_TIME,
+)
 from granular_ls.providers.hover_provider import HoverProvider
 from granular_ls.providers.diagnostic_provider import DiagnosticProvider
 from granular_ls.envelope_snippets import build_envelope_n_points
@@ -987,7 +990,9 @@ def _resolve_envelope_context(
     elif stream_ctx.get('time_mode') == 'normalized':
         end_time = 1.0
     else:
-        end_time = float(stream_ctx.get('duration') or 10.0)
+        # Stessa costante della completion: le due strade calcolano lo
+        # stesso end_time sullo stesso YAML e non devono poter divergere.
+        end_time = float(stream_ctx.get('duration') or DEFAULT_END_TIME)
 
     return {
         'y_min': float(y_min),

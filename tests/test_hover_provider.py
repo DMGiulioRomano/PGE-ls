@@ -450,6 +450,17 @@ class TestGetHoverStreamContextKeys:
         assert result is not None
         assert 'mute' in result.contents.value.lower()
 
+    def test_duration_hover_spiega_il_default(self, bridge):
+        """PGE #205: `duration` e' opzionale, l'hover deve dire cosa vale
+        quando la si omette."""
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='duration')
+        result = provider.get_hover(ctx)
+        assert result is not None
+        text = result.contents.value.lower()
+        assert 'sample' in text
+        assert 'opzionale' in text
+
     def test_rng_group_ritorna_hover_con_documentazione(self, bridge):
         """rng_group (PGE #169): hover con la semantica dell'identita' RNG."""
         provider = HoverProvider(bridge)

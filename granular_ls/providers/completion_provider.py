@@ -176,11 +176,22 @@ _FLAG_KEYS = {'mute', 'solo', 'range_always_active'}
 _VALUE_TRIGGER_KEYS = {'sample', 'distribution_mode', 'range_anchor',
                        'time_mode', 'loop_unit', 'duration_unit'}
 
+# Fine dell'asse X di uno snippet envelope quando la durata dello stream non e'
+# nota: `duration` omessa (PGE #205) vale la durata del sample, che il language
+# server non puo' leggere. Stesso valore che server.py usa per la GUI: un
+# numero da riscrivere, non un envelope degenere a durata zero.
+DEFAULT_END_TIME = 10.0
+
 # Documentazione statica per le stream context keys
 _STREAM_CONTEXT_DOCS = {
     'stream_id':           'Identificatore univoco dello stream (stringa).',
     'onset':               'Tempo di inizio dello stream in secondi.',
-    'duration':            'Durata totale dello stream in secondi.',
+    'duration': (
+        "Durata totale dello stream in secondi. Campo opzionale (PGE #205): "
+        "assente (o null) lo stream dura quanto il file dichiarato in "
+        "`sample`. Dichiararla e' un override compositivo — accorcia o "
+        "allunga rispetto al sample."
+    ),
     'sample':              'Percorso relativo al file audio sorgente (.wav).',
     'rng_group': (
         "Identita' RNG condivisibile fra stream (PGE #169, stringa). "
@@ -417,13 +428,15 @@ class CompletionProvider:
         if current_text and not 'streams'.startswith(current_text.lower()):
             return []
 
-        # Snippet: streams: + primo elemento con campi obbligatori
+        # Snippet: streams: + primo elemento con campi obbligatori.
+        # Tre campi, non quattro (PGE #205): e' il primo posto in cui si legge
+        # cosa uno stream deve avere, e deve dire la stessa cosa degli altri
+        # due punti di ingresso (`- (nuovo stream)`, `stream (obbligatori)`).
         snippet = (
             'streams:\n'
             '  - stream_id: "${1:nome_stream}"\n'
             '    onset: ${2:0.0}\n'
-            '    duration: ${3:10.0}\n'
-            '    sample: "${4:file.wav}"'
+            '    sample: "${3:file.wav}"'
         )
         return [CompletionItem(
             label='streams',
@@ -436,7 +449,9 @@ class CompletionProvider:
                 value=(
                     '**streams**\n\n'
                     'Blocco principale. Contiene la lista degli stream granulari.\n\n'
-                    'Inserisce il blocco con i campi obbligatori del primo stream.'
+                    'Inserisce il blocco con i tre campi obbligatori del primo '
+                    'stream: `stream_id`, `onset`, `sample`.\n\n'
+                    'Senza `duration` lo stream dura quanto il sample.'
                 ),
             ),
         )]
@@ -598,8 +613,7 @@ class CompletionProvider:
         snippet = (
             f'- stream_id: "${{1:{stream_id_default}}}"\n'
             '  onset: ${2:0.0}\n'
-            '  duration: ${3:10.0}\n'
-            '  sample: "${4:file.wav}"\n'
+            '  sample: "${3:file.wav}"\n'
             '  $0'
         )
         return [CompletionItem(
@@ -607,12 +621,13 @@ class CompletionProvider:
             insert_text=snippet,
             insert_text_format=InsertTextFormat.Snippet,
             kind=CompletionItemKind.Module,
-            detail='stream_id, onset, duration, sample',
+            detail='stream_id, onset, sample',
             documentation=MarkupContent(
                 kind=MarkupKind.Markdown,
                 value=(
                     '**Nuovo elemento stream**\n\n'
-                    'Inserisce il trattino `- ` e i quattro campi obbligatori.\n'
+                    'Inserisce il trattino `- ` e i tre campi obbligatori.\n'
+                    'Senza `duration` lo stream dura quanto il sample.\n'
                     'Premi **Tab** per spostarti tra i campi.'
                 ),
             ),
@@ -624,7 +639,7 @@ class CompletionProvider:
         """
         Completion per le chiavi di contesto stream sulla riga '- '.
 
-        Il primo item e' un SNIPPET che inserisce tutti e quattro i campi
+        Il primo item e' un SNIPPET che inserisce tutti e tre i campi
         obbligatori in una volta sola. Gli altri item permettono di inserire
         le chiavi singolarmente se necessario.
         """
@@ -633,12 +648,13 @@ class CompletionProvider:
         # Item principale: snippet con tutti i campi obbligatori.
         # Usa tab stops ($1, $2, ...) per navigare tra i campi con Tab.
         # $0 posiziona il cursore finale dopo l'ultimo campo.
+        # `duration` non c'e' (PGE #205): omessa vale la durata del sample,
+        # quindi e' un override compositivo e sta fra le chiavi singole.
         stream_id_default = _next_stream_id(document_text)
         obligatory_snippet = (
             f'stream_id: "${{1:{stream_id_default}}}"\n'
             'onset: ${2:0.0}\n'
-            'duration: ${3:10.0}\n'
-            'sample: "${4:file.wav}"\n'
+            'sample: "${3:file.wav}"\n'
             '$0'
         )
         items.append(CompletionItem(
@@ -646,16 +662,17 @@ class CompletionProvider:
             insert_text=obligatory_snippet,
             insert_text_format=InsertTextFormat.Snippet,
             kind=CompletionItemKind.Module,
-            detail='stream_id, onset, duration, sample',
+            detail='stream_id, onset, sample',
             documentation=MarkupContent(
                 kind=MarkupKind.Markdown,
                 value=(
                     '**Nuovo stream**\n\n'
-                    'Inserisce i quattro campi obbligatori:\n'
+                    'Inserisce i tre campi obbligatori:\n'
                     '- `stream_id`: identificatore univoco\n'
                     '- `onset`: tempo di inizio in secondi\n'
-                    '- `duration`: durata in secondi\n'
                     '- `sample`: percorso file audio\n\n'
+                    'Senza `duration` lo stream dura quanto il sample: '
+                    'aggiungila solo per accorciarlo o allungarlo.\n\n'
                     'Premi **Tab** per spostarti tra i campi.'
                 ),
             ),
@@ -670,7 +687,7 @@ class CompletionProvider:
             if prefix and not key.lower().startswith(prefix):
                 continue
             # Salta i campi gia' coperti dallo snippet obbligatorio
-            if key in ('stream_id', 'onset', 'duration', 'sample'):
+            if key in ('stream_id', 'onset', 'sample'):
                 continue
             if key == 'distribution_mode':
                 modes = self._bridge.get_distribution_modes()
@@ -1147,10 +1164,14 @@ class CompletionProvider:
 
         Regole:
         - Se time_mode: normalized -> 1.0 (tempo normalizzato [0, 1])
-        - Altrimenti               -> onset dello stream corrente
-                                      (il loop parte dall'onset e finisce
-                                       a onset + durata, ma usiamo onset
-                                       come punto di riferimento iniziale)
+        - Altrimenti               -> la `duration` dello stream corrente
+
+        Senza `duration` (PGE #205: legittimo, vale la durata del sample)
+        YamlAnalyzer lascia 0.0, che darebbe snippet degeneri con tutti i
+        breakpoint sullo stesso istante. Il language server non legge i file
+        audio, quindi la durata vera non gli e' nota: si ricade sullo stesso
+        default che server.py usa per la GUI, cosi' le due strade non
+        divergono sullo stesso YAML.
         """
         from granular_ls.yaml_analyzer import YamlAnalyzer
         stream_ctx = YamlAnalyzer.get_stream_context_at_line(
@@ -1158,7 +1179,7 @@ class CompletionProvider:
         )
         if stream_ctx['time_mode'] == 'normalized':
             return 1.0
-        return stream_ctx['duration']
+        return stream_ctx.get('duration') or DEFAULT_END_TIME
 
     # -------------------------------------------------------------------------
     # DISTRIBUTION MODE COMPLETIONS

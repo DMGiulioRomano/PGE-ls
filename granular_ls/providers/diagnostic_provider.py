@@ -326,15 +326,19 @@ class DiagnosticProvider:
     # CONTROLLO CAMPI OBBLIGATORI
     # -------------------------------------------------------------------------
 
-    _MANDATORY_FIELDS = ['stream_id', 'onset', 'duration', 'sample']
+    # Le condizioni di esistenza di uno stream sono tre (PGE #205).
+    # `duration` non e' fra queste: se assente, il motore usa la durata del
+    # file audio dichiarato in `sample`. `onset` resta obbligatorio, la
+    # posizione in timeline non e' deducibile da nulla.
+    _MANDATORY_FIELDS = ['stream_id', 'onset', 'sample']
 
     def _check_mandatory_stream_fields(
         self, lines: List[str],
         streams: List[Tuple[int, int, dict]],
     ) -> List[Diagnostic]:
         """
-        Controlla che ogni elemento della lista streams abbia i quattro
-        campi obbligatori: stream_id, onset, duration, sample.
+        Controlla che ogni elemento della lista streams abbia i tre
+        campi obbligatori: stream_id, onset, sample.
 
         Produce un Warning per ogni campo mancante, puntando alla riga
         del marcatore '- ' dello stream.
@@ -381,8 +385,10 @@ class DiagnosticProvider:
     })
 
     # Campi obbligatori dello stream che richiedono sempre un valore.
+    # `duration` e' fuori (PGE #205): `duration:` senza valore e'
+    # `duration: null`, che per il motore vale come chiave assente.
     _STREAM_VALUE_REQUIRED = frozenset({
-        'stream_id', 'onset', 'duration', 'sample',
+        'stream_id', 'onset', 'sample',
     })
 
     def _build_voice_required_paths(self) -> 'frozenset[str]':
@@ -414,7 +420,7 @@ class DiagnosticProvider:
           1. Parametri numerici del bridge (min_val != None): richiedono float
              o envelope [[t, v], ...].
           2. voices.num_voices e voices.scatter: bounds via get_raw_bounds.
-          3. Campi obbligatori stream (stream_id, onset, duration, sample):
+          3. Campi obbligatori stream (stream_id, onset, sample):
              richiedono qualsiasi valore.
           4. Chiavi stringa obbligatorie (time_mode, loop_unit, ...):
              richiedono un valore stringa.

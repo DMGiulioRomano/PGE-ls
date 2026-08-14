@@ -195,6 +195,33 @@ class TestGetCompletionsTutteLeChiaviRoot:
         labels = [item.label for item in result]
         assert 'density' in labels
 
+    def test_snippet_streams_non_inserisce_duration(self, bridge):
+        """PGE #205: lo scheletro che apre un file nuovo e' il primo posto in
+        cui si legge cosa e' obbligatorio. Se qui `duration` resta, il language
+        server si contraddice fra i suoi punti di ingresso."""
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='key', current_text='',
+                           in_stream_element=False, indent_level=0)
+        result = provider.get_completions(ctx, document_text="")
+        item = next(i for i in result if i.label == 'streams')
+        assert 'stream_id' in item.insert_text
+        assert 'onset' in item.insert_text
+        assert 'sample' in item.insert_text
+        assert 'duration' not in item.insert_text
+
+    def test_snippet_streams_doc_elenca_i_tre_campi(self, bridge):
+        """La doc dello snippet nomina i campi invece di dire genericamente
+        "i campi obbligatori": e' quello che rende visibile il cambio da
+        quattro a tre."""
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='key', current_text='',
+                           in_stream_element=False, indent_level=0)
+        result = provider.get_completions(ctx, document_text="")
+        doc = next(i for i in result if i.label == 'streams').documentation.value
+        for field in ('stream_id', 'onset', 'sample'):
+            assert field in doc
+        assert 'tre campi obbligatori' in doc
+
     def test_parametri_annidati_non_compaiono_a_root(self, bridge):
         """grain.duration non deve comparire a root level."""
         provider = CompletionProvider(bridge)
@@ -569,7 +596,7 @@ class TestGetCompletionsStreamStart:
         assert len(result) > 0
 
     def test_stream_start_primo_item_e_snippet_obbligatori(self):
-        """Il primo item e' lo snippet con tutti e quattro i campi obbligatori."""
+        """Il primo item e' lo snippet con tutti e tre i campi obbligatori."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='stream_start', current_text='')
@@ -584,8 +611,39 @@ class TestGetCompletionsStreamStart:
         snippet = result[0].insert_text
         assert 'stream_id' in snippet
         assert 'onset' in snippet
-        assert 'duration' in snippet
         assert 'sample' in snippet
+
+    def test_stream_start_snippet_non_contiene_duration(self):
+        """PGE #205: i campi obbligatori sono tre. `duration` e' un override
+        compositivo e resta disponibile come chiave singola, non nello
+        scheletro dello stream nuovo."""
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='stream_start', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  - ")
+        assert 'duration' not in result[0].insert_text
+
+    def test_streams_list_level_snippet_ha_i_tre_campi_obbligatori(self):
+        """Anche lo snippet del trattino (`streams_list_level`) inserisce i
+        tre campi obbligatori, non quattro."""
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='streams_list_level', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  ")
+        snippet = result[0].insert_text
+        assert 'stream_id' in snippet
+        assert 'onset' in snippet
+        assert 'sample' in snippet
+        assert 'duration' not in snippet
+
+    def test_stream_start_duration_offerta_come_chiave_singola(self):
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='stream_start', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  - ")
+        item = next(i for i in result if i.label == 'duration')
+        doc = item.documentation.value.lower()
+        assert 'sample' in doc, "la doc deve dire cosa succede se si omette"
 
     def test_stream_start_contiene_stream_id(self):
         """stream_id e' nel snippet obbligatori."""
@@ -652,6 +710,43 @@ class TestGetCompletionsStreamStart:
         result = provider.get_completions(ctx, document_text="streams:\n  - on")
         # Lo snippet obbligatori e' sempre il primo item
         assert len(result) >= 1
+
+
+class TestEndTimeSenzaDuration:
+    """PGE #205: uno stream senza `duration` e' YAML pienamente valido, quindi
+    gli snippet envelope non possono piu' cadere sul default 0.0 lasciato da
+    YamlAnalyzer — uscirebbero degeneri, tutti i breakpoint sullo stesso
+    istante. Il language server non legge i file audio e la durata del sample
+    non gli e' nota: la convenzione e' quella gia' usata da server.py per la
+    GUI (`stream_ctx.get('duration') or 10.0`)."""
+
+    def _end_time(self, document_text, cursor_line):
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='value', current_text='',
+                           cursor_line=cursor_line)
+        return provider._get_end_time_from_context(ctx, document_text)
+
+    def test_stream_senza_duration_usa_il_default_della_gui(self):
+        doc = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    sample: file.wav\n"
+            "    density: \n"
+        )
+        assert self._end_time(doc, 4) == 10.0
+
+    def test_duration_dichiarata_vince(self):
+        doc = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 30.0\n"
+            "    sample: file.wav\n"
+            "    density: \n"
+        )
+        assert self._end_time(doc, 5) == 30.0
 
 
 class TestGetCompletionsBlockKeys:

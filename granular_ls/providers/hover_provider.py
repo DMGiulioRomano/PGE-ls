@@ -48,7 +48,17 @@ from granular_ls.pitch_units import (
 _STREAM_CONTEXT_DOCS = {
     'stream_id':           'Identificatore univoco dello stream (stringa).',
     'onset':               'Tempo di inizio dello stream in secondi.',
-    'duration':            'Durata totale dello stream in secondi.',
+    'duration': (
+        "Durata totale dello stream in secondi. **Campo opzionale** "
+        "(PGE #205).\n\n"
+        "Assente (o `null`): lo stream dura quanto il file dichiarato in "
+        "`sample`. A riposo lo stream risintetizza il sample, quindi l'unica "
+        "durata non arbitraria e' quella del file; ogni altro valore e' una "
+        "scelta compositiva e vale la pena renderla esplicita.\n\n"
+        "Con `time_mode: normalized` l'asse `0.0`-`1.0` degli envelope e' "
+        "mappato sulla durata risolta: senza `duration`, copre l'intero "
+        "sample."
+    ),
     'sample':              'Percorso relativo al file audio sorgente (.wav).',
     'rng_group': (
         "Identita' RNG condivisibile fra stream (PGE #169, stringa).\n\n"
