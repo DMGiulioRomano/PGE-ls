@@ -2363,3 +2363,252 @@ class TestGrainDurationUnit:
                if 'grain.duration' in e.message
                and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
         assert len(bad) == 1
+
+
+# =============================================================================
+# grain.read_direction (PGE #207)
+# =============================================================================
+
+@pytest.fixture
+def rd_bridge():
+    """Bridge con la coppia del gruppo 'grain_direction'.
+
+    Il fixture `bridge` generale non ha le due chiavi del verso; qui servono
+    entrambe, e con i metadati veri: `read_direction` ha bounds [-1, 1] e
+    priorita' 2, `reverse` default 0 e priorita' 1. Sono esattamente i dati
+    che rendono il check generico insufficiente — un bound continuo su un
+    dominio di due valori, e un gruppo esclusivo che qui e' un errore e non
+    una priorita'.
+    """
+    raw = {
+        'specs': [
+            make_raw_spec('density', 'density', default=None),
+            make_raw_spec('reverse', 'grain.reverse', default=0,
+                          exclusive_group='grain_direction', group_priority=1),
+            make_raw_spec('read_direction', 'grain.read_direction',
+                          default=None, exclusive_group='grain_direction',
+                          group_priority=2),
+        ],
+        'bounds': {
+            'density': make_raw_bounds(0.01, 4000.0),
+            'reverse': make_raw_bounds(0, 1, variation_mode='invert'),
+            'read_direction': make_raw_bounds(-1, 1, variation_mode='negate'),
+        },
+    }
+    return SchemaBridge(raw)
+
+
+class TestReadDirection:
+    """Diagnostica di grain.read_direction: dominio, step imposto, gruppo."""
+
+    @staticmethod
+    def _grain(body: str) -> str:
+        return _stream_yaml("    grain:\n" + body)
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    def _rd_errors(self, provider, yaml):
+        return [d for d in self._errors(provider, yaml)
+                if 'read_direction' in d.message]
+
+    # --- dominio a due valori --------------------------------------------
+
+    @pytest.mark.parametrize('valore', ['1', '-1', '1.0', '-1.0'])
+    def test_i_due_versi_non_sono_segnalati(self, rd_bridge, valore):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(f"      read_direction: {valore}\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_zero_segnalato_pur_essendo_nei_bounds(self, rd_bridge):
+        """Il caso che il solo check sui bounds [-1, 1] lascerebbe passare."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      read_direction: 0\n")
+        errs = self._rd_errors(provider, yaml)
+        assert len(errs) == 1
+        assert '-1' in errs[0].message and '+1' in errs[0].message
+
+    def test_valore_intermedio_segnalato(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      read_direction: 0.5\n")
+        assert len(self._rd_errors(provider, yaml)) == 1
+
+    def test_una_sola_diagnostica_per_valore_fuori_scala(self, rd_bridge):
+        """Fuori dai bounds E fuori dal dominio: un messaggio, non due.
+
+        Il check generico direbbe 'fuori range [-1, 1]', che e' vero ma
+        insufficiente; il dedicato dice perche' il dominio ha due soli valori.
+        Sentirsi dire due cose diverse sullo stesso errore e' rumore.
+        """
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      read_direction: 5\n")
+        errs = self._rd_errors(provider, yaml)
+        assert len(errs) == 1
+        assert 'fuori range' not in errs[0].message
+
+    def test_chiave_vuota_segnalata(self, rd_bridge):
+        """A differenza di grain.reverse, la chiave vuota qui e' un errore."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      read_direction:\n")
+        assert len(self._rd_errors(provider, yaml)) == 1
+
+    def test_reverse_vuota_resta_valida(self, rd_bridge):
+        """Nessuna regressione sulla chiave storica: la sua sintassi e' quella."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      reverse:\n")
+        assert self._errors(provider, yaml) == []
+
+    # --- step imposto -----------------------------------------------------
+
+    def test_envelope_di_versi_non_segnalato(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      read_direction: [[0, 1], [12, -1]]\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_interp_diverso_da_step_segnalato(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      read_direction: {type: linear, points: [[0, 1], [12, -1]]}\n"
+        )
+        errs = self._rd_errors(provider, yaml)
+        assert len(errs) == 1
+        assert 'step' in errs[0].message
+
+    def test_step_esplicito_e_ridondanza_valida(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      read_direction: {type: step, points: [[0, 1], [12, -1]]}\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_envelope_block_style_letto(self, rd_bridge):
+        """Il valore va riletto come YAML: le forme envelope sono cinque."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      read_direction:\n"
+            "        - [0, 1]\n"
+            "        - [12, 0.3]\n"
+        )
+        errs = self._rd_errors(provider, yaml)
+        assert len(errs) == 1
+        assert '0.3' in errs[0].message
+
+    def test_envelope_block_style_valido_non_segnalato(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      read_direction:\n"
+            "        - [0, 1]\n"
+            "        - [12, -1]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_ancoraggio_alla_riga_della_chiave(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      read_direction: 0\n")
+        errs = self._rd_errors(provider, yaml)
+        # streams(0) - stream_id(1) onset(2) duration(3) sample(4) grain(5)
+        assert errs[0].range.start.line == 6
+
+    # --- guard sulle macro-forme -----------------------------------------
+
+    def test_distribuzione_temporale_ignota_segnalata(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      read_direction: [[[0, 1], [50, -1]], 2.0, 2, 'step', 'bogus']\n"
+        )
+        assert len(self._rd_errors(provider, yaml)) == 1
+
+    def test_percentuale_del_pattern_fuori_scala_segnalata(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      read_direction: [[[0, 1], [150, -1]], 2.0, 2]\n"
+        )
+        assert len(self._rd_errors(provider, yaml)) == 1
+
+    def test_ciclo_valido_non_segnalato(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      read_direction: [[[0, 1], [50, -1]], 2.0, 2]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- gruppo esclusivo 'grain_direction' -------------------------------
+
+    def test_reverse_e_read_direction_insieme_sono_errore(self, rd_bridge):
+        """Errore, non warning: il motore rifiuta, non sceglie per priorita'."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      reverse:\n"
+            "      read_direction: 1\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert len(errs) == 2
+        assert all('grain_direction' in e.message for e in errs)
+
+    def test_nessun_warning_di_priorita_sul_gruppo(self, rd_bridge):
+        """Il messaggio generico direbbe 'vince quello a priorita' piu' alta',
+        che qui e' falso: il render fallisce."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      reverse:\n"
+            "      read_direction: 1\n"
+        )
+        warns = [d for d in provider.get_diagnostics(yaml)
+                 if d.severity == DiagnosticSeverity.Warning
+                 and 'grain_direction' in d.message]
+        assert warns == []
+
+    def test_le_due_righe_sono_entrambe_segnalate(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      reverse:\n"
+            "      read_direction: 1\n"
+        )
+        righe = sorted(e.range.start.line for e in self._errors(provider, yaml))
+        assert righe == [6, 7]
+
+    def test_con_entrambe_non_si_segnala_anche_il_valore(self, rd_bridge):
+        """Il motore rifiuta la coppia prima di guardare i valori: dire anche
+        che 0 non e' un verso sposterebbe l'attenzione sul problema minore."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      reverse:\n"
+            "      read_direction: 0\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert len(errs) == 2
+        assert all('grain_direction' in e.message for e in errs)
+
+    def test_gruppo_esclusivo_e_per_stream(self, rd_bridge):
+        """Stream diversi possono usare chiavi diverse dello stesso gruppo."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    grain:\n"
+            "      reverse:\n"
+            "  - stream_id: s2\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    grain:\n"
+            "      read_direction: -1\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- tolleranza -------------------------------------------------------
+
+    def test_documento_a_meta_scrittura_non_segnalato(self, rd_bridge):
+        """Frammento non interpretabile come YAML: si tace, non si indovina."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      read_direction: [[0, 1], [12,\n")
+        assert self._rd_errors(provider, yaml) == []
+
+    def test_chiave_assente_non_produce_niente(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      duration: 0.05\n")
+        assert self._errors(provider, yaml) == []

@@ -668,3 +668,93 @@ class TestGrainDurationUnitHover:
         hover = provider.get_hover(ctx)
         assert hover is not None
         assert 'esplicit' in hover.contents.value.lower()
+
+
+# =============================================================================
+# grain.read_direction (PGE #207)
+# =============================================================================
+
+@pytest.fixture
+def rd_bridge():
+    """Bridge con le due chiavi del verso e le loro deviation_probability key."""
+    raw = {
+        'specs': [
+            make_raw_spec('grain_duration', 'grain.duration', default=0.05),
+            {
+                'name': 'reverse', 'yaml_path': 'grain.reverse', 'default': 0,
+                'is_smart': True, 'exclusive_group': 'grain_direction',
+                'group_priority': 1, 'range_path': None,
+                'deviation_probability_key': 'reverse',
+            },
+            {
+                'name': 'read_direction', 'yaml_path': 'grain.read_direction',
+                'default': None, 'is_smart': True,
+                'exclusive_group': 'grain_direction', 'group_priority': 2,
+                'range_path': None, 'deviation_probability_key': 'read_direction',
+            },
+        ],
+        'bounds': {
+            'grain_duration': make_raw_bounds(0.001, 10.0),
+            'reverse': make_raw_bounds(0, 1, variation_mode='invert'),
+            'read_direction': make_raw_bounds(-1, 1, variation_mode='negate'),
+        },
+    }
+    return SchemaBridge(raw)
+
+
+class TestReadDirectionHover:
+    """Il testo utile e' la distinzione fra le grandezze, non i bounds."""
+
+    def _hover(self, rd_bridge, word, parent_path):
+        provider = HoverProvider(rd_bridge)
+        ctx = make_context(context_type='key', current_text=word,
+                           parent_path=parent_path)
+        return provider.get_hover(ctx, '')
+
+    def test_hover_sulla_chiave_esiste(self, rd_bridge):
+        assert self._hover(rd_bridge, 'read_direction', ['grain']) is not None
+
+    def test_distingue_le_tre_grandezze(self, rd_bridge):
+        """Testina, verso del grano, altezza percepita: si confondono."""
+        testo = self._hover(rd_bridge, 'read_direction', ['grain']).contents.value
+        assert 'speed_ratio' in testo
+        assert 'read_direction' in testo
+        assert 'pitch' in testo
+
+    def test_dice_che_il_dominio_ha_due_valori(self, rd_bridge):
+        """I soli bounds direbbero [-1, 1], che e' fuorviante."""
+        testo = self._hover(rd_bridge, 'read_direction', ['grain']).contents.value
+        assert '0.5' in testo or '{-1, +1}' in testo
+
+    def test_dice_che_step_e_imposto(self, rd_bridge):
+        testo = self._hover(rd_bridge, 'read_direction', ['grain']).contents.value
+        assert 'step' in testo
+
+    def test_dice_dell_esclusiva_con_reverse(self, rd_bridge):
+        testo = self._hover(rd_bridge, 'read_direction', ['grain']).contents.value
+        assert 'reverse' in testo and 'auto' in testo
+
+    def test_blocco_grain_elenca_la_chiave(self, rd_bridge):
+        testo = self._hover(rd_bridge, 'grain', []).contents.value
+        assert 'read_direction' in testo
+
+    # --- deviation_probability: due voci distinte ------------------------
+
+    def test_dp_read_direction_dice_che_non_tocca_reverse(self, rd_bridge):
+        testo = self._hover(rd_bridge, 'read_direction',
+                            ['deviation_probability']).contents.value
+        assert 'ribaltare' in testo
+        assert 'grain.reverse' in testo
+
+    def test_dp_reverse_dice_che_non_tocca_read_direction(self, rd_bridge):
+        """La nota che serve a chi ha YAML scritti prima di PGE #207."""
+        testo = self._hover(rd_bridge, 'reverse',
+                            ['deviation_probability']).contents.value
+        assert 'grain.read_direction' in testo
+
+    def test_le_due_voci_dp_sono_diverse(self, rd_bridge):
+        a = self._hover(rd_bridge, 'read_direction',
+                        ['deviation_probability']).contents.value
+        b = self._hover(rd_bridge, 'reverse',
+                        ['deviation_probability']).contents.value
+        assert a != b

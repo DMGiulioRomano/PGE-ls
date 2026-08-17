@@ -51,6 +51,11 @@ from granular_ls.voice_strategies import (
     CHORD_INTERVALS,
     get_strategy_spec,
 )
+from granular_ls.read_direction import (
+    EXCLUSIVE_HINT,
+    READ_DIRECTION_PATH,
+    check_read_direction,
+)
 from granular_ls.pitch_units import (
     PITCH_UNIT_KEYS,
     PITCH_UNIT_PRESETS,
@@ -72,6 +77,27 @@ SOURCE = 'granular-ls'
 # in _check_pitch_block. Le spec 'pitch.*' di snapshot legacy vengono escluse
 # dai controlli generici per evitare doppie segnalazioni con bounds obsoleti.
 _PITCH_OWNED_PREFIX = 'pitch.'
+
+# grain.read_direction (PGE #207): il bridge la espone con bounds [-1, 1], ma
+# il dominio e' l'insieme {-1, +1} e lo schema non ha modo di dirlo — un check
+# generico accetterebbe 0 e 0.5, che il motore rifiuta. Stessa cosa per lo
+# 'step' imposto e per il gruppo esclusivo 'grain_direction', che qui e' un
+# errore e non una priorita'. Il check dedicato e' _check_read_direction; il
+# path e' escluso dai generici per non dire due volte cose diverse sullo
+# stesso problema, come gia' per il blocco pitch.
+_READ_DIRECTION_OWNED = frozenset({READ_DIRECTION_PATH})
+
+
+def _is_generically_checkable(yaml_path: str) -> bool:
+    """False per i parametri che hanno un check dedicato e lo escludono.
+
+    La superficie di questi parametri non e' descrivibile dal solo schema del
+    bridge: i controlli generici (bounds, valore mancante, exclusive group)
+    ne direbbero qualcosa di vero ma insufficiente, e la diagnostica giusta
+    arriverebbe accanto a una sbagliata.
+    """
+    return (not yaml_path.startswith(_PITCH_OWNED_PREFIX)
+            and yaml_path not in _READ_DIRECTION_OWNED)
 
 # grain.duration_unit (PGE #158): unità di misura di grain.duration e
 # grain.duration_range. Meta-parametro, mirror di loop_unit del pointer.
@@ -103,7 +129,7 @@ class DiagnosticProvider:
             p.yaml_path: p
             for p in bridge.get_all_parameters()
             if not p.is_internal
-            and not p.yaml_path.startswith(_PITCH_OWNED_PREFIX)
+            and _is_generically_checkable(p.yaml_path)
         }
 
     def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
@@ -202,6 +228,10 @@ class DiagnosticProvider:
 
         # Fase 13: range_anchor fuori enum (PGE range-anchor-mode).
         diagnostics.extend(self._check_range_anchor(lines))
+
+        # Fase 14: grain.read_direction (PGE #207) — dominio a due valori,
+        # 'step' imposto, gruppo esclusivo con grain.reverse.
+        diagnostics.extend(self._check_read_direction(lines, grain_blocks))
 
         return diagnostics
 
@@ -446,7 +476,7 @@ class DiagnosticProvider:
             p.yaml_path
             for p in self._bridge.get_all_parameters()
             if p.min_val is not None and not p.is_internal
-            and not p.yaml_path.startswith(_PITCH_OWNED_PREFIX)
+            and _is_generically_checkable(p.yaml_path)
         }
 
         # 2. voices.num_voices e voices.scatter (bounds via get_raw_bounds)
@@ -601,7 +631,7 @@ class DiagnosticProvider:
         params_bounds = {}
         for p in self._bridge.get_all_parameters():
             if p.min_val is not None and p.max_val is not None and not p.is_internal \
-                    and not p.yaml_path.startswith(_PITCH_OWNED_PREFIX):
+                    and _is_generically_checkable(p.yaml_path):
                 params_bounds[p.yaml_path] = (p.min_val, p.max_val)
 
         # Indice di risoluzione chiave -> yaml_path (chiave locale e path
@@ -2613,9 +2643,10 @@ class DiagnosticProvider:
     ) -> List[dict]:
         """
         Scansiona il blocco grain: (indent 4) di ogni stream e ne estrae
-        la superficie di duration_unit.
+        la superficie di duration_unit e quella del verso di lettura.
 
         Ritorna una lista di dict, uno per blocco grain trovato:
+          - start, end:      confini del blocco grain (end escluso)
           - unit:            valore di duration_unit (str) o None se assente
           - unit_present:    True se la chiave duration_unit è scritta
           - unit_line:       riga della chiave duration_unit (o None)
@@ -2626,6 +2657,12 @@ class DiagnosticProvider:
                              duration_range (scalare + breakpoint envelope),
                              usato per sopprimere i falsi positivi dei bound
                              generici quando l'unità è samples.
+          - read_direction_line: riga della chiave read_direction (o None)
+          - reverse_line:    riga della chiave reverse (o None)
+
+        Le due righe del verso servono a _check_read_direction: il gruppo
+        esclusivo 'grain_direction' è per-blocco-grain, quindi va deciso qui
+        dove i confini del blocco sono già noti.
         """
         blocks: List[dict] = []
         for stream_start, stream_end_incl, _keys in streams:
@@ -2655,6 +2692,7 @@ class DiagnosticProvider:
                 'unit': None, 'unit_present': False, 'unit_line': None,
                 'has_duration': False, 'duration_scalar': None,
                 'duration_line': None, 'value_lines': set(),
+                'read_direction_line': None, 'reverse_line': None,
             }
 
             n = grain_start + 1
@@ -2671,7 +2709,11 @@ class DiagnosticProvider:
                     continue
                 key, val = m.group(1), m.group(2).strip()
 
-                if key == 'duration_unit':
+                if key == 'read_direction':
+                    info['read_direction_line'] = n
+                elif key == 'reverse':
+                    info['reverse_line'] = n
+                elif key == 'duration_unit':
                     info['unit_present'] = True
                     info['unit_line'] = n
                     info['unit'] = val.strip('"\'') if val else None
@@ -2703,6 +2745,112 @@ class DiagnosticProvider:
 
             blocks.append(info)
         return blocks
+
+    def _check_read_direction(self, lines: List[str],
+                              grain_blocks: List[dict]) -> List[Diagnostic]:
+        """
+        Valida `grain.read_direction` (PGE #207) e il gruppo 'grain_direction'.
+
+        Due controlli, nell'ordine in cui li fa il motore:
+
+        1. **`reverse` + `read_direction` insieme**: errore esplicito, non una
+           priorità. Il motore lo solleva prima di ogni altra validazione, e
+           qui si fa lo stesso — con entrambe le chiavi scritte non ha senso
+           dire anche cosa c'è che non va nel valore di una delle due.
+        2. **Il valore**: dominio `{-1, +1}`, `step` imposto, e i guard sulle
+           macro-forme. La regola sta in `read_direction.py`.
+
+        Ancoraggio: la riga della chiave. Il valore incriminato è nel
+        messaggio, così un envelope block-style resta leggibile anche quando
+        il punto sbagliato è qualche riga più giù.
+        """
+        diagnostics: List[Diagnostic] = []
+
+        for block in grain_blocks:
+            rd_line = block['read_direction_line']
+            rev_line = block['reverse_line']
+
+            if rd_line is None:
+                continue
+
+            if rev_line is not None:
+                # Le due chiavi governano la stessa grandezza con semantiche
+                # opposte: il render fallisce, non sceglie.
+                message = f"Gruppo esclusivo 'grain_direction': {EXCLUSIVE_HINT}"
+                for n in (rd_line, rev_line):
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(n),
+                        message=message,
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+                continue
+
+            found, raw = self._read_key_value(lines, rd_line, block['end'])
+            if not found:
+                # Frammento non interpretabile come YAML: l'utente sta ancora
+                # scrivendo. Tolleranza, come altrove nel provider.
+                continue
+
+            issue = check_read_direction(raw)
+            if issue is None:
+                continue
+
+            diagnostics.append(Diagnostic(
+                range=self._line_range(rd_line),
+                message=(
+                    f"'{READ_DIRECTION_PATH}': {issue.value!r} non è ammesso. "
+                    f"{issue.hint}"
+                ),
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+
+        return diagnostics
+
+    def _read_key_value(self, lines: List[str], key_line: int,
+                        block_end: int) -> Tuple[bool, object]:
+        """
+        Rilegge il valore di una chiave via YAML, inline o block-style.
+
+        Serve dove il valore è una struttura e non uno scalare: gli envelope
+        si scrivono in cinque forme diverse e riconoscerle a regex vorrebbe
+        dire riscrivere un parser che PyYAML ha già.
+
+        Il frammento va dalla riga della chiave alla prima riga con indent
+        minore o uguale al suo, dedentato a colonna 0 perché `safe_load` non
+        accetta un documento che comincia rientrato.
+
+        Returns:
+            `(True, valore)` se il frammento è YAML valido e contiene la
+            chiave — `valore` è `None` per la chiave scritta e lasciata vuota.
+            `(False, None)` se non è interpretabile: documento a metà
+            scrittura, da non segnalare.
+        """
+        raw_line = lines[key_line]
+        key_indent = len(raw_line) - len(raw_line.lstrip())
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', raw_line.strip())
+        if not m:
+            return False, None
+        key = m.group(1)
+
+        frammento = [raw_line[key_indent:]]
+        n = key_line + 1
+        while n < block_end:
+            riga = lines[n]
+            if not riga.strip():
+                frammento.append('')
+                n += 1
+                continue
+            if (len(riga) - len(riga.lstrip())) <= key_indent:
+                break
+            frammento.append(riga[key_indent:])
+            n += 1
+
+        data = self._safe_yaml('\n'.join(frammento))
+        if not isinstance(data, dict) or key not in data:
+            return False, None
+        return True, data[key]
 
     def _samples_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
         """Righe di duration/duration_range dentro un blocco grain in samples:

@@ -301,6 +301,109 @@ def _build_snippets(
     ]
 
 
+def build_read_direction_snippets(end_time: float) -> List[dict]:
+    """
+    Snippet per `grain.read_direction` (PGE #207): solo `+1` / `-1`, solo step.
+
+    I template generici non vanno: derivano i valori Y dai bounds — che qui
+    sono `[-1, 1]`, quindi gli estremi uscirebbero anche giusti — ma **otto
+    dei quindici dichiarano un interp** (`cubic`, `linear`, o la scelta fra i
+    tre) che su questa chiave è un errore duro. Un completamento che inserisce
+    YAML non renderizzabile è peggio di nessun completamento.
+
+    Il gradino non si scrive: è implicito e obbligatorio, e dichiarare
+    `type: step` è ridondanza valida ma rumorosa nel diff. Perciò i template
+    qui sotto lo omettono, tranne il BP group — dove l'interp è posizionale e
+    non c'è modo di ometterlo.
+    """
+    et = _fmt(end_time)
+    mid = _fmt(end_time / 2)
+
+    return [
+
+        # 1. Il cambio di verso, che è il caso d'uso della chiave
+        {
+            'label': 'verso: cambio a metà (2 punti)',
+            'detail': '[[t, +1], [t, -1]]',
+            'doc': (
+                '**Verso di lettura del grano — un cambio**\n\n'
+                'In avanti fino a `t`, poi all\'indietro.\n\n'
+                'L\'interpolazione è `step` e non va scritta: il verso ha due '
+                'stati, non una rampa fra i due.'
+            ),
+            'insert_text': (
+                f' [[${"{1:0.0}"}, ${"{2|1,-1|}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4|-1,1|}"}]]'
+            ),
+        },
+
+        # 2. Andata e ritorno
+        {
+            'label': 'verso: avanti → indietro → avanti (3 punti)',
+            'detail': '[[t, +1], [t, -1], [t, +1]]',
+            'doc': (
+                '**Verso di lettura del grano — due cambi**\n\n'
+                f'Il verso si inverte a t={mid} e torna a t={et}.'
+            ),
+            'insert_text': (
+                f' [[${"{1:0.0}"}, ${"{2|1,-1|}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4|-1,1|}"}],'
+                f' [${"{5:" + et + "}"}, ${"{6|1,-1|}"}]]'
+            ),
+        },
+
+        # 3. Forma dict, per chi ci deve mettere altre chiavi (time_unit)
+        {
+            'label': 'verso: forma dict (points)',
+            'detail': '{points: [[t, v], ...]}',
+            'doc': (
+                '**Verso di lettura — forma dict**\n\n'
+                'Utile quando servono le altre chiavi del dict '
+                '(es. `time_unit`). Senza `type`: lo `step` è imposto.\n\n'
+                '`type: step` esplicito sarebbe accettato; qualunque altro '
+                'interp è un errore.'
+            ),
+            'insert_text': (
+                f' {{points: [[${"{1:0.0}"}, ${"{2|1,-1|}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4|-1,1|}"}]]}}'
+            ),
+        },
+
+        # 4. Alternanza periodica: il ciclo compatto
+        {
+            'label': 'verso: alternanza periodica (loop compact)',
+            'detail': '[[[0, +1], [50, -1]], end_time, n_reps]',
+            'doc': (
+                '**Verso di lettura — alternanza ripetuta**\n\n'
+                'Il pattern è in percentuale del ciclo `[x%, verso]`, con '
+                '`x` in `[0, 100]` e non decrescente.\n\n'
+                f'- `end_time`: {et} (istante assoluto di fine, non durata)\n'
+                '- `n_reps`: numero di cicli (intero >= 1)'
+            ),
+            'insert_text': (
+                f' [[[0, ${"{1|1,-1|}"}], [50, ${"{2|-1,1|}"}]],'
+                f' ${"{3:" + et + "}"}, ${"{4:4}"}]'
+            ),
+        },
+
+        # 5. BP group: l'unica forma in cui lo step va scritto
+        {
+            'label': 'verso: BP group (step esplicito)',
+            'detail': '[[[t, v], ...], "step"]',
+            'doc': (
+                '**Verso di lettura — BP group** (PGE #64)\n\n'
+                'Qui l\'interp è posizionale e non si può omettere: `step` è '
+                'l\'unico valore ammesso.\n\n'
+                'Il gruppo richiede almeno 2 punti.'
+            ),
+            'insert_text': (
+                f' [[[${"{1:0.0}"}, ${"{2|1,-1|}"}],'
+                f' [${"{3:" + mid + "}"}, ${"{4|-1,1|}"}]], "step"]'
+            ),
+        },
+    ]
+
+
 def build_envelope_n_points(y_min: float, y_max: float, end_time: float, n_points: int) -> str:
     """
     Genera N breakpoints equidistanziati nel tempo da y_min a y_max.
@@ -350,6 +453,13 @@ class EnvelopeSnippetProvider:
         """Snippet con end_time dinamico e bounds default."""
         specs = _build_snippets(_DEFAULT_Y_MIN, _DEFAULT_Y_MAX, end_time)
         return [self._build_item(s) for s in specs]
+
+    def get_read_direction_snippets(
+        self, end_time: float
+    ) -> List[CompletionItem]:
+        """Snippet di `grain.read_direction`: solo `+1`/`-1`, solo step."""
+        return [self._build_item(s)
+                for s in build_read_direction_snippets(end_time)]
 
     def get_snippets_for_parameter(self, yaml_path: str) -> List[CompletionItem]:
         """
