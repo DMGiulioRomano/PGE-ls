@@ -294,3 +294,136 @@ def test_snapshot_roundtrip_preserves_surface(pge):
         )
     # Regressione del bug snapshot: le deviation_probability keys non devono essere vuote.
     assert snap_bridge.get_deviation_probability_keys()
+
+
+# =============================================================================
+# grain.read_direction: il mirror decide come il motore (PGE #207)
+# =============================================================================
+#
+# `granular_ls/read_direction.py` replica a mano la semantica della chiave —
+# dominio a due valori, `step` imposto, guard sulle macro-forme — e i bound dei
+# costruttori del registro delle distribuzioni temporali. Il motore quei bound
+# li applica costruendo; il LS non ha niente da costruire, quindi li ricopia.
+# È il punto del modulo che può divergere in silenzio, e questo test è il posto
+# che se ne accorge: stessa domanda ai due lati, stessa risposta attesa.
+#
+# Il confronto è accetta/rifiuta, non sul messaggio: gli hint sono scritti per
+# due superfici diverse (un errore di render, una diagnostica nell'editor) e
+# pretenderli identici legherebbe il LS a una stringa del motore.
+
+READ_DIRECTION_CORPUS = [
+    # scalari, compresi i casi che i soli bounds [-1, 1] non distinguono
+    1, -1, 1.0, -1.0, 0, 0.5, -0.5, 2, -2, None, True, False, 'avanti',
+    [], {}, 10 ** 400,
+    # envelope come lista di breakpoint
+    [[0, 1], [12, -1]], [[0, 1], [12, 0.5]], [[0, 1]],
+    [[0, 1, 'step'], [12, -1]], [[0, 1, 'linear'], [12, -1]],
+    # dict {points, type}
+    {'points': [[0, 1], [12, -1]]},
+    {'type': 'step', 'points': [[0, 1], [12, -1]]},
+    {'type': 'linear', 'points': [[0, 1], [12, -1]]},
+    {'type': 'step'},
+    {'points': [[0, 1], [12, -1]], 'time_unit': 'normalized'},
+    # forma dict per-punto
+    [{'t': 0, 'v': 1}, {'t': 5, 'v': -1}],
+    [{'t': 'x', 'v': 1}],
+    [{'t': 0, 'v': 1, 'type': 'linear'}],
+    # BP group
+    [[[0, 1], [5, -1]], 'step'], [[[0, 1], [5, -1]], 'linear'],
+    [[[0, 1]], 'step'], [[], 'step'],
+    # formato compatto: arità, segno, percentuali del pattern
+    [[[0, 1], [50, -1]], 2.0, 2],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step'],
+    [[[0, 1], [50, -1]], 2.0, 2, 'linear'],
+    [[[0, 1], [50, -1]], 2.0, 0],
+    [[[0, 1], [50, -1]], 2.0, True],
+    [[[0, 1], [50, -1]], True, 2],
+    [[[0, 1], [50, -1]], 0, 2],
+    [[[0, 1], [150, -1]], 2.0, 2],
+    [[[0, 1], [-10, -1]], 2.0, 2],
+    [[[100, 1], [0, -1]], 2.0, 2],
+    [[[50, 1], [50, -1]], 2.0, 2],
+    [[], 2.0, 2],
+    [[[[0, 1], [5, -1]], 'step'], 2.0, 2],
+    # distribuzione temporale: nomi e bound dei costruttori
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', 'exponential'],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', 'geo'],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', 'bogus'],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', None],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'bogus'}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 5}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'ratio': 1.5}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'geometric', 'ratio': 0}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'geometric', 'ratio': 1.5}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'exponential', 'rate': 0}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'exponential', 'rate': 2}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'exponential', 'ratio': 2}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'logarithmic', 'base': 1}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'logarithmic', 'base': 2}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'power', 'exponent': 'x'}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', {'type': 'power', 'exponent': 2}],
+    [[[0, 1], [50, -1]], 2.0, 2, 'step', 'linear', True],
+    # liste miste
+    [[0, 1], [[[0, 1], [50, -1]], 5.0, 2]],
+    [[0, 1], [[[0, 1], [50, -1]], 5.0, 2, 'linear']],
+]
+
+
+@pytest.mark.parametrize('raw', READ_DIRECTION_CORPUS,
+                         ids=lambda v: repr(v)[:60])
+def test_read_direction_mirror_matches_engine(pge, raw):
+    from granular_ls.read_direction import check_read_direction
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        normalize = _import_pge_module(
+            'parameters.read_direction').normalize_read_direction
+    except Exception:
+        pytest.skip("engine precede grain.read_direction (PGE #207 non ancora "
+                    "in questo checkout)")
+
+    InvalidFieldValueError = _import_pge_module(
+        'shared.exceptions').InvalidFieldValueError
+
+    try:
+        normalize(raw)
+        motore_rifiuta = False
+    except InvalidFieldValueError:
+        motore_rifiuta = True
+
+    ls_rifiuta = check_read_direction(raw) is not None
+
+    assert ls_rifiuta == motore_rifiuta, (
+        f"Drift su {raw!r}: motore "
+        f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
+        f"LS {'rifiuta' if ls_rifiuta else 'accetta'}"
+    )
+
+
+def test_read_direction_in_schema_bridge(pge):
+    """La chiave arriva dal bridge con i metadati che la issue prevedeva."""
+    from granular_ls.schema_bridge import SchemaBridge
+    from granular_ls.read_direction import READ_DIRECTION_PATH
+
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    param = next((p for p in bridge.get_all_parameters()
+                  if p.yaml_path == READ_DIRECTION_PATH), None)
+    if param is None:
+        pytest.skip("engine precede grain.read_direction (PGE #207)")
+
+    assert param.exclusive_group == 'grain_direction'
+    assert (param.min_val, param.max_val) == (-1, 1)
+    assert param.variation_mode == 'negate'
+    # La chiave deviation_probability e' propria: 'reverse' resta legata alla
+    # sua, quindi un vecchio deviation_probability non ribalta read_direction.
+    assert 'read_direction' in bridge.get_deviation_probability_keys()
+
+
+def test_time_distribution_names_match(pge):
+    """I nomi replicati sono quelli del registro, alias compresi."""
+    from granular_ls.read_direction import TIME_DISTRIBUTION_NAMES
+    from granular_ls.schema_bridge import _import_pge_module
+
+    factory = _import_pge_module(
+        'envelopes.time_distribution').TimeDistributionFactory
+    assert set(TIME_DISTRIBUTION_NAMES) == set(factory._DISTRIBUTIONS)
