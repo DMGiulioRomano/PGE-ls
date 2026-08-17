@@ -638,18 +638,20 @@ class TestGetCompletionsStreamStart:
         assert '`stream_id`' in doc
         assert '`sample`' in doc
 
-    def test_streams_list_level_snippet_ha_i_tre_campi_obbligatori(self):
+    def test_streams_list_level_snippet_ha_i_due_campi_obbligatori(self):
         """Anche lo snippet del trattino (`streams_list_level`) inserisce i
-        tre campi obbligatori, non quattro."""
+        due campi obbligatori: i punti di ingresso devono dire la stessa cosa,
+        o il language server si contraddice con se stesso."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='streams_list_level', current_text='')
         result = provider.get_completions(ctx, document_text="streams:\n  ")
         snippet = result[0].insert_text
         assert 'stream_id' in snippet
-        assert 'onset' in snippet
         assert 'sample' in snippet
         assert 'duration' not in snippet
+        assert 'onset' not in snippet
+        assert result[0].detail == 'stream_id, sample'
 
     def test_stream_start_duration_offerta_come_chiave_singola(self):
         b = make_bridge_with_stream_keys()
