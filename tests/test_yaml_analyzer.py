@@ -748,16 +748,20 @@ class TestYamlContextCurrentKey:
 
 
 # =============================================================================
-# get_stream_context_at_line - estrae onset e time_mode dello stream corrente
+# get_stream_context_at_line - estrae duration e time_mode dello stream corrente
 # =============================================================================
 
 class TestGetStreamContextAtLine:
     """
     get_stream_context_at_line(text, line) risale dal cursore al marcatore
-    '- ' piu' vicino e ne estrae i valori di onset e time_mode.
+    '- ' piu' vicino e ne estrae i valori di duration e time_mode.
 
     Ritorna un dict con chiavi 'duration' (float) e 'time_mode' (str).
     Valori di default se non trovati: duration=0.0, time_mode='absolute'.
+
+    `onset` non e' fra i valori estratti, e il nome del metodo non promette
+    che lo sia: serve a calcolare la fine dell'asse X degli snippet envelope,
+    che dipende da quanto lo stream dura, non da dove comincia.
     """
 
     YAML_BASE = (

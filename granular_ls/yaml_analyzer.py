@@ -141,7 +141,7 @@ class YamlAnalyzer:
     def get_stream_context_at_line(text: str, line: int) -> dict:
         """
         Risale dal cursore al blocco stream corrente ed estrae
-        onset e time_mode.
+        duration e time_mode.
 
         Algoritmo:
         1. Risale le righe dalla posizione corrente cercando il
@@ -151,9 +151,18 @@ class YamlAnalyzer:
            o alla fine del documento.
         3. Ritorna i valori trovati, con default se assenti.
 
+        Il metodo NON estrae `onset`: nessuno dei chiamanti lo userebbe. Serve
+        a calcolare la fine dell'asse X degli snippet envelope, che dipende da
+        quanto lo stream dura e da come il suo asse e' misurato, non da dove
+        comincia sulla timeline. Il docstring diceva `onset` per un residuo di
+        una versione precedente; il codice ha sempre letto `duration`.
+
         Returns:
             dict con:
-                'onset'     : float (default 0.0)
+                'duration'  : float (default 0.0 — nessuna durata dichiarata;
+                              il chiamante ricade su DEFAULT_END_TIME, perche'
+                              la durata ereditata dal sample (PGE #205) non e'
+                              leggibile senza aprire il file audio)
                 'time_mode' : str   (default 'absolute')
         """
         DEFAULT = {'duration': 0.0, 'time_mode': 'absolute'}

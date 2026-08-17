@@ -1045,7 +1045,9 @@ class CompletionProvider:
         L'end_time di default degli snippet compact viene calcolato
         dal contesto dello stream corrente:
         - time_mode: normalized -> end_time = 1.0
-        - altrimenti            -> end_time = onset dello stream
+        - altrimenti            -> end_time = duration dello stream
+          (DEFAULT_END_TIME se lo stream non la dichiara: quella ereditata dal
+          sample non e' leggibile senza aprire il file audio)
         """
         if not context.current_key:
             return []
