@@ -450,6 +450,19 @@ class TestGetHoverStreamContextKeys:
         assert result is not None
         assert 'mute' in result.contents.value.lower()
 
+    def test_onset_hover_spiega_il_default(self, bridge):
+        """PGE #220: `onset` e' opzionale, l'hover deve dire cosa vale quando
+        lo si omette — e che time_mode non lo riguarda, che e' l'equivoco piu'
+        a portata di mano davanti a una chiave temporale con default zero."""
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='onset')
+        result = provider.get_hover(ctx)
+        assert result is not None
+        text = result.contents.value.lower()
+        assert 'opzionale' in text
+        assert 'origine' in text
+        assert 'time_mode' in text
+
     def test_duration_hover_spiega_il_default(self, bridge):
         """PGE #205: `duration` e' opzionale, l'hover deve dire cosa vale
         quando la si omette."""
