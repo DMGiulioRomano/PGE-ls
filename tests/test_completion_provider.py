@@ -613,18 +613,30 @@ class TestGetCompletionsStreamStart:
         result = provider.get_completions(ctx, document_text="streams:\n  - ")
         snippet = result[0].insert_text
         assert 'stream_id' in snippet
-        assert 'onset' in snippet
         assert 'sample' in snippet
 
-    def test_stream_start_snippet_non_contiene_duration(self):
-        """PGE #205: i campi obbligatori sono tre. `duration` e' un override
-        compositivo e resta disponibile come chiave singola, non nello
-        scheletro dello stream nuovo."""
+    def test_stream_start_snippet_non_contiene_duration_ne_onset(self):
+        """PGE #205 e #220: i campi obbligatori sono due. `duration` e `onset`
+        sono override compositivi e restano disponibili come chiavi singole,
+        non nello scheletro dello stream nuovo."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='stream_start', current_text='')
         result = provider.get_completions(ctx, document_text="streams:\n  - ")
         assert 'duration' not in result[0].insert_text
+        assert 'onset' not in result[0].insert_text
+
+    def test_stream_start_snippet_doc_elenca_i_due_campi(self):
+        """La doc dello snippet nomina i campi: e' quello che rende visibile
+        il cambio da tre a due."""
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='stream_start', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  - ")
+        doc = result[0].documentation.value
+        assert 'due campi obbligatori' in doc
+        assert '`stream_id`' in doc
+        assert '`sample`' in doc
 
     def test_streams_list_level_snippet_ha_i_tre_campi_obbligatori(self):
         """Anche lo snippet del trattino (`streams_list_level`) inserisce i
@@ -657,13 +669,17 @@ class TestGetCompletionsStreamStart:
         all_text = ' '.join(i.insert_text or '' for i in result)
         assert 'stream_id' in all_text
 
-    def test_stream_start_contiene_onset(self):
+    def test_stream_start_onset_offerta_come_chiave_singola(self):
+        """Uscito dallo snippet, `onset` deve ricomparire fra le chiavi
+        singole: e' un override compositivo, non una chiave sparita. La doc
+        dice cosa succede a ometterlo, come per `duration`."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='stream_start', current_text='')
         result = provider.get_completions(ctx, document_text="streams:\n  - ")
-        all_text = ' '.join(i.insert_text or '' for i in result)
-        assert 'onset' in all_text
+        item = next(i for i in result if i.label == 'onset')
+        doc = item.documentation.value.lower()
+        assert 'origine' in doc, "la doc deve dire cosa succede se si omette"
 
     def test_stream_start_contiene_rng_group(self):
         """rng_group (PGE #169) e' offerto fra le chiavi stream-level."""
