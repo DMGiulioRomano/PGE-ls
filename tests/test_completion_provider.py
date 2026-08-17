@@ -44,7 +44,10 @@ Organizzazione:
     10. Edge cases
 """
 
+import re
+
 import pytest
+import yaml
 from lsprotocol.types import CompletionItem, CompletionItemKind, InsertTextFormat, MarkupKind
 
 from granular_ls.schema_bridge import SchemaBridge
@@ -1673,3 +1676,117 @@ class TestGrainDurationUnitCompletion:
         result = provider.get_completions(ctx, document_text="grain:\n  duration_unit: sam")
         labels = [item.label for item in result]
         assert labels == ['samples']
+
+
+# =============================================================================
+# grain.read_direction (PGE #207)
+# =============================================================================
+
+def _snippet_defaults(insert_text: str) -> str:
+    """Espande uno snippet LSP ai suoi valori di default.
+
+    `${1:0.0}` -> `0.0`, `${2|1,-1|}` -> `1` (la prima scelta), `$0` -> ''.
+    Serve a verificare che cio' che il completamento inserisce sia YAML che
+    il motore accetta: un template che offre valori rifiutati al parse e'
+    peggio di nessun template.
+    """
+    testo = re.sub(r'\$\{\d+\|([^,|]+)[^|]*\|\}', r'\1', insert_text)
+    testo = re.sub(r'\$\{\d+:([^}]*)\}', r'\1', testo)
+    testo = re.sub(r'\$\{\d+\}', '', testo)
+    return re.sub(r'\$0', '', testo).strip()
+
+
+@pytest.fixture
+def rd_bridge():
+    """Bridge con grain.read_direction e la sua gemella grain.reverse."""
+    raw = {
+        'specs': [
+            make_raw_spec('grain_duration', 'grain.duration', default=0.05),
+            make_raw_spec('reverse', 'grain.reverse', default=0,
+                          exclusive_group='grain_direction', group_priority=1),
+            make_raw_spec('read_direction', 'grain.read_direction',
+                          default=None, exclusive_group='grain_direction',
+                          group_priority=2),
+        ],
+        'bounds': {
+            'grain_duration': make_raw_bounds(0.001, 10.0),
+            'reverse': make_raw_bounds(0, 1, variation_mode='invert'),
+            'read_direction': make_raw_bounds(-1, 1, variation_mode='negate'),
+        },
+    }
+    return SchemaBridge(raw)
+
+
+class TestReadDirectionCompletions:
+    """Il dominio e' un insieme di due valori: si completa per enumerazione."""
+
+    def _items(self, rd_bridge, document_text=''):
+        provider = CompletionProvider(rd_bridge)
+        ctx = make_context(context_type='value', current_key='read_direction',
+                           parent_path=['grain'], current_text='')
+        return provider.get_completions(ctx, document_text)
+
+    def test_offre_i_due_versi(self, rd_bridge):
+        labels = [i.label for i in self._items(rd_bridge)]
+        assert '1' in labels and '-1' in labels
+
+    def test_i_versi_sono_enum_non_snippet(self, rd_bridge):
+        versi = [i for i in self._items(rd_bridge) if i.label in ('1', '-1')]
+        assert len(versi) == 2
+        assert all(i.kind == CompletionItemKind.EnumMember for i in versi)
+
+    def test_le_etichette_dicono_il_verso_non_il_numero(self, rd_bridge):
+        versi = {i.label: i.detail for i in self._items(rd_bridge)
+                 if i.label in ('1', '-1')}
+        assert 'avanti' in versi['1']
+        assert 'indietro' in versi['-1']
+
+    def test_offre_anche_gli_envelope(self, rd_bridge):
+        """La chiave accetta envelope: a differenza di grain.reverse, gli
+        snippet vanno offerti."""
+        labels = [i.label for i in self._items(rd_bridge)]
+        assert any('verso:' in l for l in labels)
+
+    def test_nessuno_snippet_dichiara_un_interp_diverso_da_step(self, rd_bridge):
+        """I template generici ne dichiarano otto su quindici, ed e' la
+        ragione per cui questa chiave ha i suoi."""
+        for item in self._items(rd_bridge):
+            testo = item.insert_text or ''
+            assert 'cubic' not in testo, item.label
+            assert 'linear' not in testo, item.label
+
+    def test_gli_snippet_inseriscono_yaml_che_il_motore_accetta(self, rd_bridge):
+        """Espansi ai default, i template devono passare il validatore."""
+        from granular_ls.read_direction import check_read_direction
+        for item in self._items(rd_bridge):
+            if item.kind == CompletionItemKind.EnumMember:
+                continue
+            testo = _snippet_defaults(item.insert_text)
+            valore = yaml.safe_load(testo)
+            assert check_read_direction(valore) is None, (
+                f"lo snippet {item.label!r} inserisce YAML rifiutato: {testo}"
+            )
+
+    def test_gli_snippet_offrono_solo_i_due_versi(self, rd_bridge):
+        """Ogni scelta di valore Y e' fra 1 e -1, mai un intermedio."""
+        for item in self._items(rd_bridge):
+            if item.kind == CompletionItemKind.EnumMember:
+                continue
+            for scelte in re.findall(r'\$\{\d+\|([^|]+)\|\}',
+                                     item.insert_text or ''):
+                assert set(scelte.split(',')) == {'1', '-1'}, item.label
+
+    def test_filtra_per_prefisso(self, rd_bridge):
+        provider = CompletionProvider(rd_bridge)
+        ctx = make_context(context_type='value', current_key='read_direction',
+                           parent_path=['grain'], current_text='-')
+        versi = [i.label for i in provider.get_completions(ctx, '')
+                 if i.kind == CompletionItemKind.EnumMember]
+        assert versi == ['-1']
+
+    def test_reverse_resta_senza_envelope(self, rd_bridge):
+        """Nessuna regressione: grain.reverse e' presence-keyed."""
+        provider = CompletionProvider(rd_bridge)
+        ctx = make_context(context_type='value', current_key='reverse',
+                           parent_path=['grain'], current_text='')
+        assert provider.get_completions(ctx, '') == []

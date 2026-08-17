@@ -31,6 +31,10 @@ from granular_ls.envelope_shapes import (
     is_bp_group,
     is_bp_group_candidate,
 )
+from granular_ls.read_direction import (
+    DEVIATION_PROBABILITY_DOCS,
+    READ_DIRECTION_DOC,
+)
 from granular_ls.pitch_units import (
     PITCH_BLOCK_KEYS,
     PITCH_UNIT_KEYS,
@@ -178,7 +182,12 @@ _BLOCK_KEY_DOCS = {
         "- `duration` — Durata del grano (default: `0.05` s; min 1 campione)\n"
         "- `duration_unit` — Unità di `duration`/`duration_range`: `seconds` \\| `samples`\n"
         "- `envelope` — Forma dell'inviluppo del grano (default: `hanning`)\n"
-        "- `reverse` — Probabilità di inversione del grano (0.0–1.0)\n\n"
+        "- `reverse` — Verso all'indietro, chiave vuota (nessun valore)\n"
+        "- `read_direction` — Verso dichiarato: `-1` indietro, `+1` avanti,\n"
+        "  scalare o envelope *(esclusiva con `reverse`)*\n\n"
+        "> Il verso si dichiara con **una** delle due chiavi: insieme sono un\n"
+        "> errore, non una priorità. Con entrambe assenti vale la modalità\n"
+        "> `auto`, in cui il verso segue il segno di `pointer.speed_ratio`.\n\n"
         "> Con `duration_unit: samples` i valori sono in campioni (48000 Hz) e\n"
         "> `duration` va indicata esplicitamente (il default 0.05 è in secondi)."
     ),
@@ -478,6 +487,19 @@ class HoverProvider:
                 )
             )
 
+        # Hover su grain.read_direction: il testo utile non sono i bounds
+        # (che presi da soli suggeriscono un intervallo dove c'e' un insieme
+        # di due valori) ma la distinzione fra le tre grandezze — testina,
+        # verso del grano, altezza percepita.
+        if (context.parent_path == ['grain']
+                and context.current_text == 'read_direction'):
+            return Hover(
+                contents=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=READ_DIRECTION_DOC,
+                )
+            )
+
         # Hover su grain.envelope (chiave o valore-finestratura)
         if context.parent_path == ['grain']:
             grain_hover = self._build_grain_envelope_hover(context.current_text)
@@ -599,6 +621,13 @@ class HoverProvider:
             f"Accetta: `false`, `true`, un valore float (0-1 o 0-100), "
             f"o un envelope `[[t, v], ...]`."
         )
+
+        # 'reverse' e 'read_direction' governano la stessa grandezza ma non si
+        # toccano: ciascuna e' legata alla propria chiave del blocco grain, e
+        # chi non lo sa si aspetta il contrario (PGE #207).
+        nota = DEVIATION_PROBABILITY_DOCS.get(key_name)
+        if nota is not None:
+            doc = f"{nota}\n\n{doc}"
         return Hover(
             contents=MarkupContent(
                 kind=MarkupKind.Markdown,

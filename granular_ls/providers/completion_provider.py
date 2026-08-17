@@ -352,6 +352,14 @@ class CompletionProvider:
                 and context.parent_path == ['grain']):
             return self._get_grain_envelope_completions(context)
 
+        # Contesto 'value' su 'read_direction' dentro grain: -> i due versi.
+        # Prima degli snippet envelope generici, che qui produrrebbero interp
+        # diversi da 'step' — un errore duro del motore (PGE #207).
+        if (context.context_type == 'value'
+                and context.current_key == 'read_direction'
+                and context.parent_path == ['grain']):
+            return self._get_read_direction_completions(context, document_text)
+
         # Contesto 'value' dentro il blocco pitch: il blocco e' unit-driven
         # (nessun ParameterSpec nel bridge), bounds dalle PitchUnitInfo.
         if (context.context_type == 'value'
@@ -1284,6 +1292,59 @@ class CompletionProvider:
             for mode, doc in _MODES.items()
             if not prefix or mode.startswith(prefix)
         ]
+
+    def _get_read_direction_completions(
+        self, context, document_text: str
+    ) -> List[CompletionItem]:
+        """
+        Valori per `grain.read_direction` (PGE #207): i due versi, poi step.
+
+        Il dominio è l'insieme `{-1, +1}`, non l'intervallo `[-1, 1]` che i
+        bounds del bridge suggeriscono: completare con un range libero
+        offrirebbe valori che il motore rifiuta al parse. Da qui due
+        EnumMember espliciti, come per gli altri enum del blocco.
+
+        Gli snippet envelope arrivano dopo, e sono quelli dedicati: i generici
+        dichiarano interp diversi da `step`, che qui è un errore.
+
+        Restano fuori l'editor grafico e il generatore a N punti, che gli altri
+        parametri hanno: entrambi producono valori Y su un continuo, e su un
+        dominio di due elementi disegnerebbero curve che il motore rifiuta.
+        """
+        _VERSI = [
+            ('1', 'in avanti', (
+                'Il grano legge il materiale **in avanti**.\n\n'
+                'Indipendente dal segno di `pointer.speed_ratio`: la testina '
+                'può percorrere il buffer all\'indietro mentre i grani '
+                'leggono in avanti.'
+            )),
+            ('-1', 'all\'indietro', (
+                'Il grano legge il materiale **all\'indietro**.\n\n'
+                'Equivale a `grain.reverse` (chiave vuota), ma dichiarato: le '
+                'due chiavi non possono coesistere.'
+            )),
+        ]
+        prefix = (context.current_text or '').strip()
+        items = [
+            CompletionItem(
+                label=valore,
+                insert_text=f'{valore}\n$0',
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.EnumMember,
+                detail=f'verso: {etichetta}',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'`read_direction: {valore}` — {etichetta}\n\n{doc}',
+                ),
+            )
+            for valore, etichetta, doc in _VERSI
+            if not prefix or valore.startswith(prefix)
+        ]
+
+        end_time = self._get_end_time_from_context(context, document_text)
+        return items + self._envelope_provider.get_read_direction_snippets(
+            end_time
+        )
 
     def _get_duration_unit_completions(self, current_text: str) -> List[CompletionItem]:
         """Valori disponibili per grain.duration_unit: seconds (default) | samples."""

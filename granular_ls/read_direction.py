@@ -149,6 +149,68 @@ DIST_TIPO_IMPLICITO = (
     "parametri: se ne volevi un'altra, dichiarane il nome."
 )
 
+# =============================================================================
+# DOCUMENTAZIONE HOVER
+# =============================================================================
+
+# Il testo utile sulla chiave non sono i suoi bounds — che presi da soli
+# mentono, suggerendo un intervallo dove c'è un insieme di due valori — ma la
+# distinzione fra le tre grandezze che si confondono facilmente.
+READ_DIRECTION_DOC = (
+    "**read_direction** — il verso di lettura *dentro* il grano\n\n"
+    "`-1` all'indietro, `+1` in avanti. Scalare o envelope; il dominio è "
+    "l'insieme `{-1, +1}`, non l'intervallo: `0` e `0.5` sono rifiutati al "
+    "parse.\n\n"
+    "**Tre grandezze da non confondere:**\n\n"
+    "| chiave | governa | segno |\n"
+    "|---|---|---|\n"
+    "| `pointer.speed_ratio` | la velocità e il verso con cui la **testina** "
+    "percorre il buffer | negativo = all'indietro |\n"
+    "| `grain.read_direction` | il verso con cui il **grano** legge il "
+    "materiale | `-1` indietro, `+1` avanti |\n"
+    "| blocco `pitch` | l'**altezza percepita** (trasposizione) | sempre "
+    "positivo, per costruzione |\n\n"
+    "Sono indipendenti: la testina può percorrere il buffer all'indietro "
+    "mentre i grani leggono in avanti.\n\n"
+    "**L'interpolazione è `step`**, implicita e obbligatoria: l'envelope si "
+    "scrive come una spezzata qualsiasi e il gradino lo impone la chiave. "
+    "`type: step` esplicito è ridondanza accettata; qualunque altro interp è "
+    "un errore.\n\n"
+    "**Esclusiva con `grain.reverse`** (gruppo `grain_direction`): le due "
+    "chiavi insieme sono un errore, non una priorità. Con entrambe assenti "
+    "vale la modalità `auto` — il verso segue il segno di "
+    "`pointer.speed_ratio`.\n\n"
+    "```yaml\n"
+    "grain:\n"
+    "  read_direction: 1                    # sempre in avanti\n"
+    "  read_direction: [[0, 1], [12, -1]]   # si inverte a t=12\n"
+    "```\n\n"
+    "Verso stocastico: `deviation_probability.read_direction` è la "
+    "probabilità per-grano di **ribaltare** il verso dichiarato."
+)
+
+# Le due chiavi del blocco deviation_probability che governano il verso.
+# Distinte, e la distinzione va detta: un vecchio
+# `deviation_probability: {reverse: N}` non tocca un read_direction appena
+# scritto, e chi non lo sa si aspetta il contrario.
+DEVIATION_PROBABILITY_DOCS = {
+    'read_direction': (
+        "Probabilità per-grano di **ribaltare** il verso dichiarato in "
+        "`grain.read_direction` (`variation_mode: negate` — un cambio di "
+        "segno).\n\n"
+        "Governa **solo** `grain.read_direction`: non ha effetto su "
+        "`grain.reverse`, che ha la sua chiave."
+    ),
+    'reverse': (
+        "Probabilità per-grano di invertire il verso quando è dichiarato con "
+        "`grain.reverse` (`variation_mode: invert`).\n\n"
+        "Governa **solo** `grain.reverse`: non tocca `grain.read_direction`, "
+        "che ha la sua chiave. Un `deviation_probability: {reverse: N}` "
+        "scritto prima di PGE #207 non ribalta in silenzio un "
+        "`read_direction` aggiunto dopo."
+    ),
+}
+
 EXCLUSIVE_HINT = (
     "grain.read_direction e grain.reverse governano la stessa grandezza — il "
     "verso di lettura del grano — con semantiche opposte, e non possono "
