@@ -605,11 +605,12 @@ class TestGetDiagnosticsListaStreams:
 
 class TestGetDiagnosticsMandatoryStreamFields:
     """
-    I campi obbligatori di ogni stream sono tre: stream_id, onset, sample.
+    I campi obbligatori di ogni stream sono due: stream_id, sample.
     Se uno manca, il provider deve produrre un Warning con il nome del campo.
 
-    `duration` non e' fra questi (PGE #205): se assente, il motore usa la
-    durata del file audio dichiarato in `sample`.
+    Fuori restano i due campi che il motore risolve da solo: `duration`
+    (PGE #205) vale la durata del file audio dichiarato in `sample`, `onset`
+    (PGE #220) vale l'origine della timeline.
     """
 
     def test_stream_completo_nessun_warning(self, bridge):
@@ -641,7 +642,10 @@ class TestGetDiagnosticsMandatoryStreamFields:
         warnings = [d for d in result if 'stream_id' in d.message]
         assert len(warnings) >= 1
 
-    def test_stream_senza_onset_produce_warning(self, bridge):
+    def test_stream_senza_onset_non_produce_diagnostiche(self, bridge):
+        """PGE #220: `onset` e' opzionale — assente vale l'origine della
+        timeline. Segnalarlo sarebbe un falso positivo su ogni YAML valido che
+        sfrutta il default, come lo era per `duration` prima di PGE #205."""
         provider = DiagnosticProvider(bridge)
         yaml = (
             "streams:\n"
@@ -650,8 +654,34 @@ class TestGetDiagnosticsMandatoryStreamFields:
             "    sample: file.wav\n"
         )
         result = provider.get_diagnostics(yaml)
-        warnings = [d for d in result if 'onset' in d.message]
-        assert len(warnings) >= 1
+        assert result == []
+
+    def test_onset_senza_valore_non_produce_diagnostiche(self, bridge):
+        """`onset:` senza valore e' `onset: null`, che per il motore vale come
+        chiave assente (PGE #220)."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset:\n"
+            "    duration: 10.0\n"
+            "    sample: file.wav\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert result == []
+
+    def test_stream_con_le_due_sole_condizioni_non_produce_diagnostiche(self, bridge):
+        """Lo stream minimo assoluto dopo PGE #205 e #220: stream_id e sample.
+        E' il caso che riassume la nuova superficie — nessuno dei due default
+        deve accendere un Warning, ne' da solo ne' insieme all'altro."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    sample: file.wav\n"
+        )
+        result = provider.get_diagnostics(yaml)
+        assert result == []
 
     def test_stream_senza_duration_non_produce_diagnostiche(self, bridge):
         """PGE #205: `duration` e' opzionale — assente vale la durata del
@@ -1306,7 +1336,10 @@ class TestCheckMissingValues:
         errors = [d for d in result if "'duration'" in d.message and 'richiede' in d.message]
         assert errors == []
 
-    def test_onset_senza_valore_produce_errore(self, bridge):
+    def test_onset_senza_valore_non_produce_errore(self, bridge):
+        """PGE #220: `onset` non e' piu' un campo che richiede un valore.
+        `onset:` nudo e' `onset: null` — l'origine della timeline, non una
+        dichiarazione lasciata a meta'."""
         provider = DiagnosticProvider(bridge)
         yaml = (
             "streams:\n"
@@ -1317,8 +1350,7 @@ class TestCheckMissingValues:
         )
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if "'onset'" in d.message and 'richiede' in d.message]
-        assert len(errors) == 1
-        assert errors[0].severity == DiagnosticSeverity.Error
+        assert errors == []
 
     def test_sample_senza_valore_produce_errore(self, bridge):
         provider = DiagnosticProvider(bridge)
