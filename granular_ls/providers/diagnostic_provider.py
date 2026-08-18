@@ -99,12 +99,29 @@ def _is_generically_checkable(yaml_path: str) -> bool:
     return (not yaml_path.startswith(_PITCH_OWNED_PREFIX)
             and yaml_path not in _READ_DIRECTION_OWNED)
 
-# grain.duration_unit (PGE #158): unità di misura di grain.duration e
-# grain.duration_range. Meta-parametro, mirror di loop_unit del pointer.
-# output_sr è una config globale del motore (48000 Hz), non impostabile
-# per-stream: qui è una costante statica come lato PGE (DEFAULT_OUTPUT_SR).
-_GRAIN_DURATION_UNITS = ('seconds', 'samples')
+# grain.duration_unit (PGE #158, terza unità in v5.2.0): unità di misura di
+# grain.duration e grain.duration_range. Meta-parametro, mirror di loop_unit
+# del pointer. output_sr è una config globale del motore (48000 Hz), non
+# impostabile per-stream: qui è una costante statica come lato PGE
+# (DEFAULT_OUTPUT_SR).
+_GRAIN_DURATION_UNITS = ('seconds', 'samples', 'milliseconds')
 _OUTPUT_SR = 48000
+
+# Quanti secondi vale una unità, per le unità che vanno convertite. Il
+# fattore, non due rami paralleli: 'samples' dipende da output_sr,
+# 'milliseconds' no (lato PGE è SECONDS_PER_MILLISECOND, costante), e
+# modellarli come lo stesso conto con un fattore diverso è ciò che tiene
+# insieme bounds, soppressione dei falsi positivi e messaggi.
+_GRAIN_DURATION_UNIT_SECONDS = {
+    'samples': 1.0 / _OUTPUT_SR,
+    'milliseconds': 1e-3,
+}
+
+# Come si chiamano i valori di quell'unità, nei messaggi.
+_GRAIN_DURATION_UNIT_LABELS = {
+    'samples': 'campioni',
+    'milliseconds': 'millisecondi',
+}
 
 
 class DiagnosticProvider:
@@ -178,20 +195,20 @@ class DiagnosticProvider:
 
         # Blocchi grain (PGE #158): scansione unica riusata da fase 4, 5 e 11.
         grain_blocks = self._scan_grain_blocks(lines, streams)
-        # Righe di grain.duration/duration_range in unità samples: i loro
-        # valori sono campioni, non secondi → esclusi dai bound generici.
-        samples_lines = self._samples_suppressed_lines(grain_blocks)
+        # Righe di grain.duration/duration_range in un'unità non-secondi: i
+        # loro valori sono campioni o millisecondi → esclusi dai bound generici.
+        scaled_lines = self._scaled_unit_suppressed_lines(grain_blocks)
 
         # Fase 4: controllo bounds numerici (valori scalari).
         diagnostics.extend(
             d for d in self._check_bounds(parsed)
-            if d.range.start.line not in samples_lines
+            if d.range.start.line not in scaled_lines
         )
 
         # Fase 5: controllo bounds nei valori envelope (breakpoints Y).
         diagnostics.extend(
             d for d in self._check_envelope_bounds(document_text)
-            if d.range.start.line not in samples_lines
+            if d.range.start.line not in scaled_lines
         )
 
         # Fase 5d: validazione BP group [points, interp] (PGE #64).
@@ -2910,13 +2927,15 @@ class DiagnosticProvider:
             return False, None
         return True, data[key]
 
-    def _samples_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
-        """Righe di duration/duration_range dentro un blocco grain in samples:
-        i loro valori sono campioni, non secondi — vanno esclusi dai bound
-        generici (in secondi) per non produrre falsi positivi."""
+    def _scaled_unit_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
+        """Righe di duration/duration_range dentro un blocco grain in un'unità
+        non-secondi: i loro valori sono campioni o millisecondi, non secondi —
+        vanno esclusi dai bound generici (in secondi) per non produrre falsi
+        positivi. `50` in millisecondi è la grana breve, non cinquanta volte
+        il tetto del parametro."""
         suppressed: set = set()
         for b in grain_blocks:
-            if b['unit'] == 'samples':
+            if b['unit'] in _GRAIN_DURATION_UNIT_SECONDS:
                 suppressed |= b['value_lines']
         return frozenset(suppressed)
 
@@ -2982,22 +3001,36 @@ class DiagnosticProvider:
                 ))
         return diagnostics
 
+    @staticmethod
+    def _fmt_unit_value(value: float) -> str:
+        """Un valore di durata come si scrive nel messaggio: 480000 e non
+        480000.0, ma 0.0208 quando la banda in millisecondi lo richiede."""
+        if abs(value - round(value)) < 1e-9:
+            return str(int(round(value)))
+        return f'{value:.4g}'
+
     def _check_grain_duration_unit(self, grain_blocks: List[dict]) -> List[Diagnostic]:
         """
-        Valida grain.duration_unit (PGE #158):
-          - unità non in {seconds, samples} → Error;
-          - con samples, grain.duration deve essere esplicita (il default
-            0.05 è in secondi e non viene convertito) → Error;
-          - con samples, valida i valori scalari di duration in [1, max]
-            campioni (max = bound massimo in secondi × output_sr).
+        Valida grain.duration_unit (PGE #158, terza unità in v5.2.0):
+          - unità non in {seconds, samples, milliseconds} → Error;
+          - con un'unità non-secondi, grain.duration deve essere esplicita
+            (il default 0.05 è in secondi e non viene convertito) → Error;
+          - con un'unità non-secondi, valida il valore scalare di duration
+            contro i bound del parametro convertiti in quell'unità.
+
+        La regola della durata esplicita vale per ogni unità non-secondi, non
+        per `samples` soltanto: senza `grain.duration` la base resterebbe in
+        secondi mentre `duration_range` sarebbe nell'unità dichiarata — due
+        domini nello stesso blocco.
+
+        I bound arrivano dal parametro (secondi) e si convertono dividendo per
+        il fattore dell'unità. Il minimo non è quello del registro ma **un
+        campione**, come lato motore, che in campioni fa 1 e in millisecondi
+        1/48: dipende da output_sr anche quando l'unità non ne dipende.
         """
         diagnostics: List[Diagnostic] = []
         grain_dur = self._params_by_yaml_path.get('grain.duration')
-        max_samples = (
-            round(grain_dur.max_val * _OUTPUT_SR)
-            if grain_dur is not None and grain_dur.max_val is not None
-            else None
-        )
+        max_seconds = grain_dur.max_val if grain_dur is not None else None
 
         for b in grain_blocks:
             unit = b['unit']
@@ -3014,46 +3047,55 @@ class DiagnosticProvider:
                 ))
                 continue
 
-            if unit != 'samples':
-                continue
+            factor = _GRAIN_DURATION_UNIT_SECONDS.get(unit)
+            if factor is None:
+                continue  # 'seconds' o chiave assente: nulla da convertire
+            label = _GRAIN_DURATION_UNIT_LABELS[unit]
 
-            # samples richiede grain.duration esplicita.
+            # Un'unità non-secondi richiede grain.duration esplicita.
             if not b['has_duration']:
                 diagnostics.append(Diagnostic(
                     range=self._line_range(b['unit_line']),
                     message=(
-                        "`grain.duration_unit: samples` richiede una "
-                        "`grain.duration` esplicita: il default 0.05 è in "
-                        "secondi e non verrebbe convertito in campioni."
+                        f"`grain.duration_unit: {unit}` richiede una "
+                        f"`grain.duration` esplicita in {label}: il default "
+                        f"0.05 è in secondi e non verrebbe convertito."
                     ),
                     severity=DiagnosticSeverity.Error,
                     source=SOURCE,
                 ))
 
-            # Bound in campioni per il valore scalare di duration.
+            # Bound del parametro, espressi nell'unità dichiarata.
+            min_in_unit = (1.0 / _OUTPUT_SR) / factor
+            max_in_unit = max_seconds / factor if max_seconds is not None else None
+
             scalar = self._try_parse_number(b['duration_scalar']) \
                 if b['duration_scalar'] is not None else None
-            if scalar is not None:
-                if scalar < 1:
-                    diagnostics.append(Diagnostic(
-                        range=self._line_range(b['duration_line']),
-                        message=(
-                            f"`grain.duration` = {b['duration_scalar']} campioni: "
-                            f"la durata minima è 1 campione."
-                        ),
-                        severity=DiagnosticSeverity.Error,
-                        source=SOURCE,
-                    ))
-                elif max_samples is not None and scalar > max_samples:
-                    diagnostics.append(Diagnostic(
-                        range=self._line_range(b['duration_line']),
-                        message=(
-                            f"`grain.duration` = {b['duration_scalar']} campioni "
-                            f"fuori range [1, {max_samples}] (max = "
-                            f"{grain_dur.max_val}s × {_OUTPUT_SR})."
-                        ),
-                        severity=DiagnosticSeverity.Error,
-                        source=SOURCE,
-                    ))
+            if scalar is None:
+                continue
+
+            if scalar < min_in_unit:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(b['duration_line']),
+                    message=(
+                        f"`grain.duration` = {b['duration_scalar']} {label}: "
+                        f"la durata minima è un campione "
+                        f"({self._fmt_unit_value(min_in_unit)} {label})."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+            elif max_in_unit is not None and scalar > max_in_unit:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(b['duration_line']),
+                    message=(
+                        f"`grain.duration` = {b['duration_scalar']} {label} "
+                        f"fuori range [{self._fmt_unit_value(min_in_unit)}, "
+                        f"{self._fmt_unit_value(max_in_unit)}] "
+                        f"(max = {max_seconds}s)."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
 
         return diagnostics

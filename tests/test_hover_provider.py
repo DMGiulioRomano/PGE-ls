@@ -682,6 +682,29 @@ class TestGrainDurationUnitHover:
         assert hover is not None
         assert 'esplicit' in hover.contents.value.lower()
 
+    # --- milliseconds (PGE v5.2.0, issue #36) -----------------------------
+
+    def test_hover_elenca_milliseconds(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        assert 'milliseconds' in provider.get_hover(ctx).contents.value
+
+    def test_hover_non_lega_piu_la_durata_esplicita_ai_soli_samples(self, bridge):
+        """La regola vale per ogni unita' non-secondi, non per samples."""
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        text = provider.get_hover(ctx).contents.value
+        assert 'Con `samples` la `grain.duration` va indicata' not in text
+
+    def test_hover_del_blocco_grain_elenca_le_tre_unita(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='grain',
+                           parent_path=[], indent_level=2)
+        text = provider.get_hover(ctx).contents.value
+        assert 'milliseconds' in text
+
 
 # =============================================================================
 # grain.read_direction (PGE #207)

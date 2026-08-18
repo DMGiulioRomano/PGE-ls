@@ -2786,3 +2786,204 @@ class TestPointerStartEnvelope:
         provider = DiagnosticProvider(bridge)
         yaml = self._pointer("      loop_start: [[0, 0.0], [30, 0.5]]\n")
         assert self._start_errors(provider, yaml) == []
+
+
+# =============================================================================
+# grain.duration_unit: milliseconds (PGE v5.2.0 — issue PGE-ls #36)
+# =============================================================================
+
+
+class TestGrainDurationUnitMilliseconds:
+    """
+    Terza unita' di `grain.duration` / `grain.duration_range`: `milliseconds`.
+
+    A differenza di `samples` il fattore e' fisso (`SECONDS_PER_MILLISECOND`,
+    1e-3) e non dipende da `output_sr`. La motivazione della chiave e' la
+    leggibilita': la grana udibile vive fra 1 e 1000 ms, dove in secondi si
+    scrivono solo `.001` / `.0045` / `.35`.
+
+    La regola della durata esplicita, finora scritta su misura per `samples`,
+    vale ora per ogni unita' non-secondi: senza `grain.duration` la base
+    resterebbe in secondi mentre `duration_range` sarebbe nell'unita'
+    dichiarata — due domini nello stesso blocco.
+    """
+
+    @staticmethod
+    def _grain(body: str) -> str:
+        return _stream_yaml("    grain:\n" + body)
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    def _duration_errors(self, provider, yaml):
+        """Errori sul VALORE di `grain.duration`, non sulla meta-chiave che
+        la governa: 'grain.duration_unit' contiene 'grain.duration' come
+        sottostringa, e il messaggio della durata esplicita nomina entrambe."""
+        return [d for d in self._errors(provider, yaml)
+                if 'grain.duration' in d.message
+                and 'duration_unit' not in d.message]
+
+    def _missing_duration_errors(self, provider, yaml):
+        """L'errore che pretende una `grain.duration` esplicita."""
+        return [d for d in self._errors(provider, yaml)
+                if 'esplicita' in d.message]
+
+    # --- 1. YAML valido non va segnalato ----------------------------------
+
+    def test_milliseconds_e_una_unita_valida(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 50\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert not any('duration_unit' in e.message
+                       for e in self._errors(provider, yaml))
+
+    def test_esempio_della_issue_non_produce_errori(self, bridge):
+        """50 ms con +/- 4.5 ms: lo YAML dell'issue, corretto per v5.2.0."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+            "      duration_range: 4.5\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_enum_elenca_tutte_e_tre_le_unita(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 480\n"
+            "      duration_unit: frames\n"
+        )
+        msg = [e.message for e in self._errors(provider, yaml)
+               if 'duration_unit' in e.message][0]
+        assert 'milliseconds' in msg
+        assert 'samples' in msg and 'seconds' in msg
+
+    # --- 2. durata esplicita per ogni unita' non-secondi -------------------
+
+    def test_milliseconds_richiede_duration_esplicita(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 4.5\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert len(self._missing_duration_errors(provider, yaml)) == 1
+
+    def test_hint_nomina_l_unita_dichiarata_e_i_suoi_valori(self, bridge):
+        """Il messaggio non dice piu' 'campioni' a prescindere."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 4.5\n"
+            "      duration_unit: milliseconds\n"
+        )
+        msg = self._missing_duration_errors(provider, yaml)[0].message
+        assert 'millisecondi' in msg
+        assert 'campioni' not in msg
+
+    def test_samples_conserva_il_proprio_hint(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 64\n"
+            "      duration_unit: samples\n"
+        )
+        msg = self._missing_duration_errors(provider, yaml)[0].message
+        assert 'campioni' in msg
+
+    def test_seconds_non_richiede_duration_esplicita(self, bridge):
+        """In secondi il default 0.05 e' gia' nell'unita' giusta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 0.01\n"
+            "      duration_unit: seconds\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- 3. bounds in millisecondi ----------------------------------------
+
+    def test_valore_in_ms_non_segnalato_contro_il_bound_in_secondi(self, bridge):
+        """50 ms non e' 50 secondi: il bound generico non deve scattare."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 50\n"
+            "      duration_unit: milliseconds\n"
+        )
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert bad == []
+
+    def test_envelope_in_ms_non_segnalato_contro_il_bound_in_secondi(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: [[0.0, 5], [10.0, 500]]\n"
+            "      duration_unit: milliseconds\n"
+        )
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert bad == []
+
+    def test_sopra_diecimila_ms_e_fuori_banda(self, bridge):
+        """10000 ms = 10 s, il tetto del parametro."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 10001\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert len(self._duration_errors(provider, yaml)) == 1
+
+    def test_diecimila_ms_esatti_sono_ammessi(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 10000\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_sotto_un_campione_e_fuori_banda(self, bridge):
+        """Il minimo resta 1 campione: a 48 kHz sono 1/48 di ms."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 0.01\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert len(self._duration_errors(provider, yaml)) == 1
+
+    def test_un_millisecondo_e_ammesso(self, bridge):
+        """La grana corta della scala udibile: 1 ms non va segnalato."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 1\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_il_minimo_in_ms_non_e_quello_in_campioni(self, bridge):
+        """0.5 e' sotto il minimo in campioni ma non in millisecondi."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 0.5\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- nessuna regressione su samples e seconds -------------------------
+
+    def test_samples_resta_valido(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 480\n"
+            "      duration_range: 64\n"
+            "      duration_unit: samples\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_seconds_conserva_il_bound_massimo(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain("      duration: 999\n")
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert len(bad) == 1

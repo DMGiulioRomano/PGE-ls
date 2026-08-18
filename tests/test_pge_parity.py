@@ -251,6 +251,79 @@ def test_range_anchors_match(pge):
     assert set(bridge.get_range_anchors()) == set(RANGE_ANCHORS)
 
 
+def _literal_from_engine_source(relpath: str, name: str):
+    """Legge un letterale di modulo dal sorgente PGE senza importarlo.
+
+    `core/stream.py` tira dentro soundfile e numpy, che la CI del language
+    server non installa (installa solo pygls, lsprotocol, PyYAML e pytest, per
+    restare veloce). Importarlo qui farebbe fallire la parità proprio dove
+    dovrebbe girare. L'AST basta: la costante è un letterale, e leggerla così
+    non esegue nulla del motore.
+
+    Ritorna None se il file o il nome non esistono — engine più vecchio.
+    """
+    import ast
+    source = Path(PGE_SRC) / relpath
+    if not source.exists():
+        return None
+    tree = ast.parse(source.read_text(encoding='utf-8'))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == name:
+                try:
+                    return ast.literal_eval(node.value)
+                except ValueError:
+                    return None
+    return None
+
+
+def test_grain_duration_units_match(pge):
+    """L'enum di grain.duration_unit del LS non deve divergere da PGE.
+
+    È il drift che ha prodotto l'issue #36: PGE ha aggiunto 'milliseconds' e il
+    LS ha continuato a segnalare come errore uno YAML valido, perché la tupla
+    era ricopiata a mano e nulla la confrontava con l'originale.
+    """
+    from granular_ls.providers.diagnostic_provider import _GRAIN_DURATION_UNITS
+    engine_units = _literal_from_engine_source(
+        'pge/core/stream.py', 'GRAIN_DURATION_UNITS')
+    if engine_units is None:
+        engine_units = _literal_from_engine_source(
+            'core/stream.py', 'GRAIN_DURATION_UNITS')
+    if engine_units is None:
+        pytest.skip("engine precede GRAIN_DURATION_UNITS")
+    assert set(_GRAIN_DURATION_UNITS) == set(engine_units)
+
+
+def test_milliseconds_factor_matches(pge):
+    """Il fattore di conversione dei millisecondi è ricopiato: se PGE lo cambia,
+    i bound in ms del LS scivolano di un ordine di grandezza senza dirlo."""
+    from granular_ls.providers.diagnostic_provider import (
+        _GRAIN_DURATION_UNIT_SECONDS,
+    )
+    from granular_ls.schema_bridge import _import_pge_module
+    factor = getattr(
+        _import_pge_module('shared.constants'), 'SECONDS_PER_MILLISECOND', None)
+    if factor is None:
+        pytest.skip("engine precede SECONDS_PER_MILLISECOND")
+    assert _GRAIN_DURATION_UNIT_SECONDS['milliseconds'] == factor
+
+
+def test_non_seconds_units_all_have_a_factor(pge):
+    """Ogni unità non-secondi dev'essere convertibile: una nuova unità che PGE
+    aggiunge senza fattore qui produrrebbe bound in secondi su valori che
+    secondi non sono."""
+    from granular_ls.providers.diagnostic_provider import (
+        _GRAIN_DURATION_UNITS, _GRAIN_DURATION_UNIT_SECONDS,
+        _GRAIN_DURATION_UNIT_LABELS,
+    )
+    non_seconds = set(_GRAIN_DURATION_UNITS) - {'seconds'}
+    assert non_seconds <= set(_GRAIN_DURATION_UNIT_SECONDS)
+    assert non_seconds <= set(_GRAIN_DURATION_UNIT_LABELS)
+
+
 # =============================================================================
 # Stream context keys (StreamContext + StreamConfig + flag Generator)
 # =============================================================================
