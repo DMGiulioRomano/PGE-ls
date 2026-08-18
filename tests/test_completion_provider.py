@@ -198,32 +198,62 @@ class TestGetCompletionsTutteLeChiaviRoot:
         labels = [item.label for item in result]
         assert 'density' in labels
 
-    def test_snippet_streams_non_inserisce_duration(self, bridge):
-        """PGE #205: lo scheletro che apre un file nuovo e' il primo posto in
-        cui si legge cosa e' obbligatorio. Se qui `duration` resta, il language
-        server si contraddice fra i suoi punti di ingresso."""
+    def test_snippet_streams_non_inserisce_duration_ne_onset(self, bridge):
+        """PGE #205 e #220: lo scheletro che apre un file nuovo e' il primo
+        posto in cui si legge cosa e' obbligatorio. Se qui restano `duration`
+        o `onset`, il language server si contraddice fra i suoi punti di
+        ingresso."""
         provider = CompletionProvider(bridge)
         ctx = make_context(context_type='key', current_text='',
                            in_stream_element=False, indent_level=0)
         result = provider.get_completions(ctx, document_text="")
         item = next(i for i in result if i.label == 'streams')
         assert 'stream_id' in item.insert_text
-        assert 'onset' in item.insert_text
         assert 'sample' in item.insert_text
         assert 'duration' not in item.insert_text
+        assert 'onset' not in item.insert_text
 
-    def test_snippet_streams_doc_elenca_i_tre_campi(self, bridge):
+    def test_snippet_streams_doc_elenca_i_due_campi(self, bridge):
         """La doc dello snippet nomina i campi invece di dire genericamente
         "i campi obbligatori": e' quello che rende visibile il cambio da
-        quattro a tre."""
+        tre a due."""
         provider = CompletionProvider(bridge)
         ctx = make_context(context_type='key', current_text='',
                            in_stream_element=False, indent_level=0)
         result = provider.get_completions(ctx, document_text="")
         doc = next(i for i in result if i.label == 'streams').documentation.value
-        for field in ('stream_id', 'onset', 'sample'):
+        for field in ('stream_id', 'sample'):
             assert field in doc
-        assert 'tre campi obbligatori' in doc
+        assert 'due campi obbligatori' in doc
+
+    def test_i_tre_punti_di_ingresso_inseriscono_gli_stessi_campi(self, bridge):
+        """L'invariante che i tre commit separati devono preservare insieme:
+        `streams`, `- (nuovo stream)` e `stream (obbligatori)` scrivono la
+        stessa coppia di chiavi. E' l'unico test che li confronta fra loro,
+        e quello che si accende se un prossimo cambio ne aggiorna due su tre.
+        """
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+
+        root = next(
+            i for i in provider.get_completions(
+                make_context(context_type='key', current_text='',
+                             in_stream_element=False, indent_level=0),
+                document_text="")
+            if i.label == 'streams'
+        ).insert_text
+        dash = provider.get_completions(
+            make_context(context_type='streams_list_level', current_text=''),
+            document_text="streams:\n  ")[0].insert_text
+        obbligatori = provider.get_completions(
+            make_context(context_type='stream_start', current_text=''),
+            document_text="streams:\n  - ")[0].insert_text
+
+        for snippet in (root, dash, obbligatori):
+            assert 'stream_id' in snippet
+            assert 'sample' in snippet
+            assert 'onset' not in snippet
+            assert 'duration' not in snippet
 
     def test_parametri_annidati_non_compaiono_a_root(self, bridge):
         """grain.duration non deve comparire a root level."""
@@ -613,31 +643,45 @@ class TestGetCompletionsStreamStart:
         result = provider.get_completions(ctx, document_text="streams:\n  - ")
         snippet = result[0].insert_text
         assert 'stream_id' in snippet
-        assert 'onset' in snippet
         assert 'sample' in snippet
 
-    def test_stream_start_snippet_non_contiene_duration(self):
-        """PGE #205: i campi obbligatori sono tre. `duration` e' un override
-        compositivo e resta disponibile come chiave singola, non nello
-        scheletro dello stream nuovo."""
+    def test_stream_start_snippet_non_contiene_duration_ne_onset(self):
+        """PGE #205 e #220: i campi obbligatori sono due. `duration` e `onset`
+        sono override compositivi e restano disponibili come chiavi singole,
+        non nello scheletro dello stream nuovo."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='stream_start', current_text='')
         result = provider.get_completions(ctx, document_text="streams:\n  - ")
         assert 'duration' not in result[0].insert_text
+        assert 'onset' not in result[0].insert_text
 
-    def test_streams_list_level_snippet_ha_i_tre_campi_obbligatori(self):
+    def test_stream_start_snippet_doc_elenca_i_due_campi(self):
+        """La doc dello snippet nomina i campi: e' quello che rende visibile
+        il cambio da tre a due."""
+        b = make_bridge_with_stream_keys()
+        provider = CompletionProvider(b)
+        ctx = make_context(context_type='stream_start', current_text='')
+        result = provider.get_completions(ctx, document_text="streams:\n  - ")
+        doc = result[0].documentation.value
+        assert 'due campi obbligatori' in doc
+        assert '`stream_id`' in doc
+        assert '`sample`' in doc
+
+    def test_streams_list_level_snippet_ha_i_due_campi_obbligatori(self):
         """Anche lo snippet del trattino (`streams_list_level`) inserisce i
-        tre campi obbligatori, non quattro."""
+        due campi obbligatori: i punti di ingresso devono dire la stessa cosa,
+        o il language server si contraddice con se stesso."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='streams_list_level', current_text='')
         result = provider.get_completions(ctx, document_text="streams:\n  ")
         snippet = result[0].insert_text
         assert 'stream_id' in snippet
-        assert 'onset' in snippet
         assert 'sample' in snippet
         assert 'duration' not in snippet
+        assert 'onset' not in snippet
+        assert result[0].detail == 'stream_id, sample'
 
     def test_stream_start_duration_offerta_come_chiave_singola(self):
         b = make_bridge_with_stream_keys()
@@ -657,13 +701,17 @@ class TestGetCompletionsStreamStart:
         all_text = ' '.join(i.insert_text or '' for i in result)
         assert 'stream_id' in all_text
 
-    def test_stream_start_contiene_onset(self):
+    def test_stream_start_onset_offerta_come_chiave_singola(self):
+        """Uscito dallo snippet, `onset` deve ricomparire fra le chiavi
+        singole: e' un override compositivo, non una chiave sparita. La doc
+        dice cosa succede a ometterlo, come per `duration`."""
         b = make_bridge_with_stream_keys()
         provider = CompletionProvider(b)
         ctx = make_context(context_type='stream_start', current_text='')
         result = provider.get_completions(ctx, document_text="streams:\n  - ")
-        all_text = ' '.join(i.insert_text or '' for i in result)
-        assert 'onset' in all_text
+        item = next(i for i in result if i.label == 'onset')
+        doc = item.documentation.value.lower()
+        assert 'origine' in doc, "la doc deve dire cosa succede se si omette"
 
     def test_stream_start_contiene_rng_group(self):
         """rng_group (PGE #169) e' offerto fra le chiavi stream-level."""

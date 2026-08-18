@@ -356,19 +356,21 @@ class DiagnosticProvider:
     # CONTROLLO CAMPI OBBLIGATORI
     # -------------------------------------------------------------------------
 
-    # Le condizioni di esistenza di uno stream sono tre (PGE #205).
-    # `duration` non e' fra queste: se assente, il motore usa la durata del
-    # file audio dichiarato in `sample`. `onset` resta obbligatorio, la
-    # posizione in timeline non e' deducibile da nulla.
-    _MANDATORY_FIELDS = ['stream_id', 'onset', 'sample']
+    # Le condizioni di esistenza di uno stream sono due (PGE #220).
+    # Fuori da queste due ci sono i campi che il motore sa risolvere da solo:
+    # `duration` assente vale la durata del file audio dichiarato in `sample`
+    # (PGE #205), `onset` assente vale l'origine della timeline — 0 non e'
+    # "nulla", e' l'origine (PGE #220). Uno stream a riposo e' il sample:
+    # stessa origine, stessa durata, contenuto risintetizzato.
+    _MANDATORY_FIELDS = ['stream_id', 'sample']
 
     def _check_mandatory_stream_fields(
         self, lines: List[str],
         streams: List[Tuple[int, int, dict]],
     ) -> List[Diagnostic]:
         """
-        Controlla che ogni elemento della lista streams abbia i tre
-        campi obbligatori: stream_id, onset, sample.
+        Controlla che ogni elemento della lista streams abbia i due
+        campi obbligatori: stream_id, sample.
 
         Produce un Warning per ogni campo mancante, puntando alla riga
         del marcatore '- ' dello stream.
@@ -415,10 +417,11 @@ class DiagnosticProvider:
     })
 
     # Campi obbligatori dello stream che richiedono sempre un valore.
-    # `duration` e' fuori (PGE #205): `duration:` senza valore e'
-    # `duration: null`, che per il motore vale come chiave assente.
+    # `duration` (PGE #205) e `onset` (PGE #220) sono fuori, per lo stesso
+    # motivo: la chiave scritta e lasciata vuota e' `null`, che per il motore
+    # vale come chiave assente, non come dichiarazione lasciata a meta'.
     _STREAM_VALUE_REQUIRED = frozenset({
-        'stream_id', 'onset', 'sample',
+        'stream_id', 'sample',
     })
 
     def _build_voice_required_paths(self) -> 'frozenset[str]':
@@ -450,7 +453,7 @@ class DiagnosticProvider:
           1. Parametri numerici del bridge (min_val != None): richiedono float
              o envelope [[t, v], ...].
           2. voices.num_voices e voices.scatter: bounds via get_raw_bounds.
-          3. Campi obbligatori stream (stream_id, onset, sample):
+          3. Campi obbligatori stream (stream_id, sample):
              richiedono qualsiasi valore.
           4. Chiavi stringa obbligatorie (time_mode, loop_unit, ...):
              richiedono un valore stringa.

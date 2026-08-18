@@ -48,10 +48,28 @@ from granular_ls.pitch_units import (
 )
 
 # Documentazione statica per le stream context keys e le deviation_probability keys.
-# Importata anche dal CompletionProvider per coerenza.
+#
+# NON e' importata dal CompletionProvider: quello definisce un dizionario
+# omonimo tutto suo (completion_provider.py). Sono due copie indipendenti, con
+# testi deliberatamente diversi — breve nella completion, esteso qui — quindi
+# ogni chiave che cambia semantica va aggiornata in entrambi i file. Il
+# commento diceva il contrario e mandava a cercare un import che non esiste.
 _STREAM_CONTEXT_DOCS = {
     'stream_id':           'Identificatore univoco dello stream (stringa).',
-    'onset':               'Tempo di inizio dello stream in secondi.',
+    'onset': (
+        "Tempo di inizio dello stream in secondi, sempre assoluto. "
+        "**Campo opzionale** (PGE #220).\n\n"
+        "Assente (o `null`): lo stream comincia all'origine della timeline, a "
+        "`0.0`. Uno stream che non dichiara una posizione non ne ha una "
+        "indeterminata, ne ha una neutra — `0` non e' \"nulla\", e' l'origine. "
+        "Dichiararlo e' un override compositivo: sposta lo stream piu' avanti "
+        "nel tempo.\n\n"
+        "`time_mode: normalized` **non** riguarda questa chiave: mappa l'asse "
+        "`0.0`-`1.0` degli envelope dentro lo stream, mentre `onset` resta in "
+        "secondi assoluti sulla timeline.\n\n"
+        "Il default e' di natura diversa da quello di `duration`: la durata "
+        "si eredita dal file audio, la posizione no — e' la costante `0.0`."
+    ),
     'duration': (
         "Durata totale dello stream in secondi. **Campo opzionale** "
         "(PGE #205).\n\n"
