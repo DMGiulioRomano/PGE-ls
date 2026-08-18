@@ -48,7 +48,12 @@ from granular_ls.pitch_units import (
 )
 
 # Documentazione statica per le stream context keys e le deviation_probability keys.
-# Importata anche dal CompletionProvider per coerenza.
+#
+# NON e' importata dal CompletionProvider: quello definisce un dizionario
+# omonimo tutto suo (completion_provider.py). Sono due copie indipendenti, con
+# testi deliberatamente diversi — breve nella completion, esteso qui — quindi
+# ogni chiave che cambia semantica va aggiornata in entrambi i file. Il
+# commento diceva il contrario e mandava a cercare un import che non esiste.
 _STREAM_CONTEXT_DOCS = {
     'stream_id':           'Identificatore univoco dello stream (stringa).',
     'onset': (
