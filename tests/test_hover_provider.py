@@ -794,3 +794,62 @@ class TestReadDirectionHover:
         b = self._hover(rd_bridge, 'reverse',
                         ['deviation_probability']).contents.value
         assert a != b
+
+
+# =============================================================================
+# deviation_probability: chiave vuota contro chiave assente (PGE #209, #210)
+# =============================================================================
+
+
+class TestDeviationProbabilityHover:
+    """
+    Cinque scritture sembrano dire la stessa cosa e una fa l'opposto: la chiave
+    scritta e lasciata vuota e' la sola a NON disattivare la deviazione — vale
+    jitter implicito all'1%. E' il punto in cui l'utente si sorprende, quindi
+    e' quello che l'hover deve dire.
+
+    L'hover portava anche due affermazioni false sulla scala: le probabilita'
+    sono 0-100 (`RandomGate` confronta `uniform(0, 100)`), non 0.0-1.0, e
+    `true` vale 1% come il jitter implicito, non "valori di default".
+    """
+
+    def _doc(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key',
+                           current_text='deviation_probability',
+                           parent_path=[], indent_level=2)
+        hover = provider.get_hover(ctx)
+        assert hover is not None
+        return hover.contents.value
+
+    def test_hover_presente(self, bridge):
+        assert 'deviation_probability' in self._doc(bridge)
+
+    def test_chiave_vuota_e_chiave_assente_sono_distinte(self, bridge):
+        doc = self._doc(bridge)
+        assert 'assente' in doc.lower()
+        assert '1%' in doc
+
+    def test_dice_che_la_chiave_vuota_non_disattiva(self, bridge):
+        """E' l'unica delle cinque scritture a non disattivare la deviazione."""
+        doc = self._doc(bridge)
+        righe_vuota = [r for r in doc.split('\n') if 'vuot' in r.lower()]
+        assert any('1%' in r for r in righe_vuota), righe_vuota
+        assert any('non' in r.lower() and 'disattiva' in r.lower()
+                   for r in doc.split('\n'))
+
+    def test_scala_e_zero_cento(self, bridge):
+        doc = self._doc(bridge)
+        assert '0-100' in doc or '0–100' in doc
+
+    def test_non_dichiara_piu_la_scala_zero_uno(self, bridge):
+        assert '0.0–1.0' not in self._doc(bridge)
+
+    def test_true_vale_un_percento_non_default_globali(self, bridge):
+        doc = self._doc(bridge)
+        assert 'randomizzazione globale con valori di default' not in doc
+
+    def test_dict_vuoto_e_false_disattivano(self, bridge):
+        doc = self._doc(bridge)
+        assert '`false`' in doc
+        assert '{}' in doc

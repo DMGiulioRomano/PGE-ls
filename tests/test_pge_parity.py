@@ -500,3 +500,109 @@ def test_time_distribution_names_match(pge):
     factory = _import_pge_module(
         'envelopes.time_distribution').TimeDistributionFactory
     assert set(TIME_DISTRIBUTION_NAMES) == set(factory._DISTRIBUTIONS)
+
+
+# =============================================================================
+# deviation_probability: il mirror decide come il motore (PGE #209)
+# =============================================================================
+#
+# `granular_ls/deviation_probability.py` replica il criterio con cui il motore
+# costruisce un envelope da quel corpo. Il rischio non è simmetrico: un mirror
+# più permissivo tace su uno YAML che non renderà, un mirror più severo segnala
+# uno YAML che rende — e quello è il modo peggiore in cui un language server
+# può sbagliarsi. Il corpus tiene insieme le forme valide, quelle malformate, e
+# i casi che distinguono questa chiave da `grain.read_direction`.
+#
+# Le stringhe restano fuori dal corpus di proposito: il motore le rifiuta, ma
+# il Generator valuta `(50/2)` a 25 su tutto lo YAML prima che il gate le veda,
+# e il LS non ha modo di distinguere l'espressione dal refuso.
+
+DEVIATION_PROBABILITY_CORPUS = [
+    # scalari e le cinque scritture che disattivano (o no) la deviazione
+    50, 0, 100, 150, -5, False, True, None, {},
+    # forme valide
+    [[0, 50], [10, 100]], [[0, 50]], [[0, 50, 'linear'], [10, 100]],
+    {'points': [[0, 50], [10, 100]]}, {'points': [[0, 50]]},
+    {'points': [[0, 50], [10, 100]], 'type': 'linear'},
+    {'points': [[0, 50], [10, 100]], 'type': 'cubic'},
+    {'points': [[0, 50], [10, 100]], 'type': 'step'},
+    {'points': [[0, 50], [10, 100]], 'time_unit': 'normalized'},
+    {'points': [[0, 50, 'linear'], [10, 100]]},
+    [[[0, 50], [10, 100]], 'linear'],
+    [{'t': 0, 'v': 50}, {'t': 10, 'v': 100}],
+    [[[0, 50], [100, 100]], 10.0, 4],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear'],
+    [[[0, 50], [100, 100]], 10.0, 4, None],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', 'linear', True],
+    [[[0, 50], [100, 100]], 10.0, 1],
+    [[[0, 50]], 10.0, 4],
+    [[[0, 50, 'linear'], [100, 100]], 10.0, 4],
+    [[0, 50], [[[0, 50], [100, 100]], 5.0, 2]],
+    [[[[0, 50], [10, 100]], 'linear'], [20, 30]],
+    # corpi che il motore rifiuta
+    [], ['x'], {'punti': [[0, 50]]}, {'type': 'linear'}, [0, 50], [1, 2, 3],
+    [[0, 50], 'x'], {'points': 'x'}, {'points': []}, {'points': [[0, 50], 'x']},
+    [[0, 50], [10, 'x']], [['x', 50], [10, 100]],
+    [[0, 50, 'bogus'], [10, 100]], [[[0, 50], [10, 100]], 'bogus'],
+    {'points': [[0, 50], [10, 100]], 'type': 'bogus'},
+    [[[0, 50]], 'linear'], [[[0, 50], [10, 100]], None],
+    [[[0, 50], [100, 100]], 10.0, 0], [[[0, 50], [100, 100]], 0, 4],
+    [[[0, 50], [100, 100]], 10.0, 4, 'bogus'],
+    [[[0, 50], [100, 100]], 'x', 4], [[[0, 50], [100, 100]], 10.0, 'x'],
+    [[[0, 50], [100, 100]], 10.0, 2.5], [[[0, 50], [100, 100]], 10.0, -3],
+    [[[0, 'x'], [100, 100]], 10.0, 4], [['x', [100, 100]], 10.0, 4],
+    [[], 10.0, 4], [[[0, 50, 'bogus'], [100, 100]], 10.0, 4],
+    [{'t': 0}], [{'t': 'x', 'v': 50}], [{'t': 0, 'v': 50, 'type': 'bogus'}],
+    [[[0, 50], [10, 100]]],
+    # i casi che questa chiave accetta e read_direction no: i guard di PGE #208
+    # sono semantica del verso, non del formato envelope
+    [[[0, 50], [150, 100]], 10.0, 4],
+    [[[100, 50], [0, 100]], 10.0, 4],
+    [[[0, 50], [100, 100]], 10.0, True],
+    [[[0, 50], [100, 100]], True, 4],
+    [[0, -50], [10, 500]],
+    # distribuzione temporale del ciclo
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', 'exp'],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', 'bogus'],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', None],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'geometric', 'ratio': 1.5}],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'geometric', 'ratio': 0}],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'exponential', 'rate': 0}],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'logarithmic', 'base': 1}],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'power', 'exponent': 2}],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'ratio': 1.5}],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 5}],
+]
+
+
+@pytest.mark.parametrize('raw', DEVIATION_PROBABILITY_CORPUS,
+                         ids=lambda v: repr(v)[:60])
+def test_deviation_probability_mirror_matches_engine(pge, raw, tmp_path,
+                                                     monkeypatch):
+    from granular_ls.deviation_probability import check_envelope_body
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        GateFactory = _import_pge_module('parameters.gate_factory').GateFactory
+    except Exception:
+        pytest.skip("engine senza GateFactory importabile in questo checkout")
+
+    # Il logger del motore apre un `logs/envelope_clips_*.log` relativo alla
+    # cwd al primo gate costruito: senza questo chdir la parità lascerebbe
+    # quei file dentro il repo del language server.
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        GateFactory.create_gate(deviation_probability={'volume': raw},
+                                param_key='volume', duration=10.0)
+        motore_rifiuta = False
+    except Exception:
+        motore_rifiuta = True
+
+    ls_rifiuta = check_envelope_body(raw) is not None
+
+    assert ls_rifiuta == motore_rifiuta, (
+        f"Drift su {raw!r}: motore "
+        f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
+        f"LS {'rifiuta' if ls_rifiuta else 'accetta'}"
+    )

@@ -56,6 +56,10 @@ from granular_ls.read_direction import (
     READ_DIRECTION_PATH,
     check_read_direction,
 )
+from granular_ls.deviation_probability import (
+    DEVIATION_PROBABILITY_PATH,
+    check_global_value,
+)
 from granular_ls.pitch_units import (
     PITCH_UNIT_KEYS,
     PITCH_UNIT_PRESETS,
@@ -249,6 +253,12 @@ class DiagnosticProvider:
         # Fase 14: grain.read_direction (PGE #207) — dominio a due valori,
         # 'step' imposto, gruppo esclusivo con grain.reverse.
         diagnostics.extend(self._check_read_direction(lines, grain_blocks))
+
+        # Fase 15: corpo di deviation_probability che non si costruisce come
+        # envelope (PGE #209). Prima diventava un AlwaysGate in silenzio.
+        diagnostics.extend(
+            self._check_deviation_probability(lines, streams)
+        )
 
         return diagnostics
 
@@ -2882,6 +2892,83 @@ class DiagnosticProvider:
             ))
 
         return diagnostics
+
+    def _check_deviation_probability(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
+        """
+        Segnala il corpo di `deviation_probability` che non si costruisce come
+        envelope (PGE #209).
+
+        Prima quel corpo veniva accettato in silenzio e diventava un
+        `AlwaysGate` — probabilità 100%, la variazione su tutti i grani, cioè
+        il gate più lontano da quanto scritto. Ora il motore lo rifiuta, e la
+        regola sta in `deviation_probability.py`.
+
+        L'ancoraggio segue il campo che il motore nominerebbe: la riga della
+        chiave per-parametro quando l'errore è suo, quella di
+        `deviation_probability` per la forma globale. Così un dict lungo non
+        manda l'utente a cercare quale delle sue chiavi non va.
+        """
+        diagnostics: List[Diagnostic] = []
+
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            key_line = None
+            for n in range(stream_start, stream_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                if stripped.startswith('- '):
+                    stripped = stripped[2:].strip()
+                    leading = 4
+                else:
+                    leading = len(raw) - len(raw.lstrip())
+                if leading == 4 and re.match(
+                        r'^deviation_probability\s*:', stripped):
+                    key_line = n
+                    break
+            if key_line is None:
+                continue
+
+            found, raw_value = self._read_key_value(lines, key_line, stream_end)
+            if not found:
+                # Frammento non interpretabile: documento a metà scrittura.
+                continue
+
+            issue = check_global_value(raw_value)
+            if issue is None:
+                continue
+
+            anchor = key_line
+            if issue.param_key is not None:
+                param_line = self._find_key_line(
+                    lines, key_line + 1, stream_end, issue.param_key
+                )
+                if param_line is not None:
+                    anchor = param_line
+
+            diagnostics.append(Diagnostic(
+                range=self._line_range(anchor),
+                message=(
+                    f"'{issue.field}': {issue.value!r} non è ammesso. "
+                    f"{issue.hint}"
+                ),
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+
+        return diagnostics
+
+    @staticmethod
+    def _find_key_line(lines: List[str], start: int, end: int,
+                       key: str) -> Optional[int]:
+        """La riga di `key:` dentro un intervallo, o None se non c'è."""
+        pattern = re.compile(r'^' + re.escape(key) + r'\s*:')
+        for n in range(start, min(end, len(lines))):
+            if pattern.match(lines[n].strip()):
+                return n
+        return None
 
     def _read_key_value(self, lines: List[str], key_line: int,
                         block_end: int) -> Tuple[bool, object]:

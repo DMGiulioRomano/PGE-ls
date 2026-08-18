@@ -95,7 +95,16 @@ def is_loop_block(item) -> bool:
     """
     True se item e' un loop block compact
     [pattern, end_time, n_reps, interp?, time_dist?, wrap?]
-    (mirror di EnvelopeBuilder._is_compact_format in PGE).
+    (mirror di EnvelopeBuilder.is_compact_format in PGE).
+
+    `end_time` e `n_reps` accettano i bool, come nel motore, che usa
+    `isinstance(..., (int, float))` e `isinstance(..., int)` nudi: `True` e'
+    un `int` per sottoclasse e li passa. La differenza non e' cosmetica —
+    decide quale messaggio riceve `[[[0, 1], [50, -1]], true, 2]`. Con il
+    riconoscimento stretto la forma non sarebbe un ciclo e l'utente
+    leggerebbe che il valore non e' un envelope; cosi' arriva al guard su
+    `end_time`, che e' il suo problema vero. Solo `wrap` pretende un bool
+    puro, ed e' il motore a pretenderlo.
     """
     if not isinstance(item, list) or not (3 <= len(item) <= 6):
         return False
@@ -104,9 +113,9 @@ def is_loop_block(item) -> bool:
     if item[0] and not all(
             isinstance(p, list) and len(p) in (2, 3) for p in item[0]):
         return False
-    if not is_num(item[1]):
+    if not isinstance(item[1], (int, float)):
         return False
-    if not isinstance(item[2], int) or isinstance(item[2], bool):
+    if not isinstance(item[2], int):
         return False
     if len(item) >= 4 and item[3] is not None and not isinstance(item[3], str):
         return False

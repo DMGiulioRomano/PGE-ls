@@ -2987,3 +2987,240 @@ class TestGrainDurationUnitMilliseconds:
                if 'grain.duration' in e.message
                and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
         assert len(bad) == 1
+
+
+# =============================================================================
+# deviation_probability: corpo che non si costruisce come envelope (PGE #209)
+# =============================================================================
+
+
+class TestDeviationProbabilityEnvelopeBody:
+    """
+    Fino a PGE #209 un corpo malformato sotto `deviation_probability` veniva
+    accettato in silenzio e diventava un `AlwaysGate`: probabilita' 100%, la
+    variazione applicata a tutti i grani. Piu' l'errore era grossolano, meno il
+    sistema lo segnalava. Ora il motore solleva `InvalidFieldValueError`.
+
+    Il criterio della diagnostica e' non essere piu' severi del motore: le
+    forme accettate restano mute, comprese quelle che sorprendono (Y fuori da
+    0-100, `n_reps` booleano, percentuali del pattern fuori scala).
+    """
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'deviation_probability' in d.message]
+
+    # --- i tre corpi dell'issue -------------------------------------------
+
+    def test_lista_vuota_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      read_direction: []\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_lista_di_non_breakpoint_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: ['x']\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_dict_senza_points_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: {punti: [[0, 50]]}\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    # --- il campo e l'ancoraggio ------------------------------------------
+
+    def test_messaggio_nomina_la_chiave_per_parametro(self, bridge):
+        """Il motore attribuisce l'errore a `deviation_probability.<chiave>`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: ['x']\n"
+        )
+        assert 'deviation_probability.volume' in \
+            self._errors(provider, yaml)[0].message
+
+    def test_errore_ancorato_alla_riga_della_chiave_sbagliata(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: 50\n"
+            "      pan: ['x']\n"
+        )
+        assert self._errors(provider, yaml)[0].range.start.line == 7
+
+    def test_forma_globale_ancorata_alla_sua_riga(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: ['x']\n")
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 5
+
+    # --- le cinque scritture che non sono errori ---------------------------
+
+    def test_chiave_omessa(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        assert self._errors(provider, _stream_yaml("    volume: -6\n")) == []
+
+    def test_chiave_vuota_e_jitter_implicito_non_errore(self, bridge):
+        """La sola delle cinque a NON disattivare la deviazione: vale 1%."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability:\n    volume: -6\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_dict_vuoto_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: {}\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_false_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: false\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_chiave_a_null_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume:\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- forme valide che devono restare mute -----------------------------
+
+    def test_scalare_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: 50\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_envelope_globale_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability: [[0, 100], [0.4, 100], [1, 1]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_dict_con_points_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: {points: [[0, 50], [10, 100]]}\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_formato_compatto_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, 4, 'linear']\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_y_fuori_da_zero_cento_non_e_errore(self, bridge):
+        """Il motore non li rifiuta: 150 e' un AlwaysGate legittimo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, -50], [10, 500]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_guard_specifici_di_read_direction_non_replicati(self, bridge):
+        """Percentuali fuori scala e x decrescenti: il motore le accetta qui.
+
+        Sono semantica di `grain.read_direction` (PGE #208), non del formato
+        envelope — replicarle qui segnalerebbe YAML che rende.
+        """
+        provider = DiagnosticProvider(bridge)
+        for pattern in ("[[0, 50], [150, 100]]", "[[100, 50], [0, 100]]"):
+            yaml = _stream_yaml(
+                "    deviation_probability:\n"
+                f"      volume: [{pattern}, 10.0, 4]\n"
+            )
+            assert self._errors(provider, yaml) == [], pattern
+
+    def test_n_reps_booleano_non_e_errore_qui(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, true]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_stringa_non_segnalata(self, bridge):
+        """`(50/2)` e' una stringa che il Generator valuta a 25 prima del gate:
+        distinguerla da un refuso vorrebbe dire rifare _eval_math_expressions."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: (50/2)\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- distribuzione temporale ------------------------------------------
+
+    def test_distribuzione_ignota_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, 4, 'linear', 'bogus']\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert 'geometric' in errors[0].message  # l'hint elenca i nomi validi
+
+    def test_parametro_estraneo_alla_distribuzione_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, 4, 'linear', "
+            "{type: geometric, ratio: 0}]\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_distribuzione_valida_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, 4, 'linear', "
+            "{type: geometric, ratio: 1.5}]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- tolleranza --------------------------------------------------------
+
+    def test_documento_a_meta_scrittura_non_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: [[0, 50], [10,\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_piu_stream_indipendenti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    deviation_probability:\n"
+            "      volume: ['x']\n"
+            "  - stream_id: s2\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    deviation_probability:\n"
+            "      volume: 50\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 5
