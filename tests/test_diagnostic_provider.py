@@ -2644,3 +2644,145 @@ class TestReadDirection:
         provider = DiagnosticProvider(rd_bridge)
         yaml = self._grain("      duration: 0.05\n")
         assert self._errors(provider, yaml) == []
+
+
+# =============================================================================
+# pointer.start con un envelope (PGE #199, PR #200 — issue PGE-ls #39)
+# =============================================================================
+
+
+class TestPointerStartEnvelope:
+    """
+    `pointer.start` non accetta envelope: la spec lo dichiara `is_smart=False`,
+    quindi il valore resta grezzo e `PointerController.calculate` lo somma alla
+    posizione (`self.start + sample_position`). Con una curva al suo posto il
+    motore solleva `InvalidFieldValueError` all'inizializzazione dello stream.
+
+    Gli altri tre scalari del blocco pointer (`loop_start`, `loop_end`,
+    `loop_dur`) gli envelope li accettano davvero: la distinzione e' di `start`
+    soltanto, non dell'intero `_POINTER_SCALAR_PARAMS`.
+    """
+
+    @staticmethod
+    def _pointer(body: str) -> str:
+        return _stream_yaml("    pointer:\n" + body)
+
+    def _start_errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'pointer.start' in d.message]
+
+    # --- forme envelope rifiutate ----------------------------------------
+
+    def test_lista_di_breakpoint_inline_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[0, 0.0], [30, 0.5]]\n")
+        errors = self._start_errors(provider, yaml)
+        assert len(errors) == 1
+
+    def test_formato_compatto_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[[0, 0.0], [100, 0.5]], 30, 4]\n")
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_dict_con_points_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      start: {points: [[0, 0.0], [30, 0.5]], type: linear}\n"
+        )
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_envelope_block_style_e_errore(self, bridge):
+        """Block-style: il valore non sta sulla riga della chiave."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      start:\n"
+            "        - [0, 0.0]\n"
+            "        - [30, 0.5]\n"
+        )
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_dict_block_style_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      start:\n"
+            "        points: [[0, 0.0], [30, 0.5]]\n"
+            "        type: linear\n"
+        )
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    # --- ancoraggio e messaggio ------------------------------------------
+
+    def test_errore_ancorato_alla_riga_della_chiave(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      start:\n"
+            "        - [0, 0.0]\n"
+            "        - [30, 0.5]\n"
+        )
+        errors = self._start_errors(provider, yaml)
+        assert errors[0].range.start.line == 6  # la riga di 'start:'
+
+    def test_messaggio_indica_le_due_strade_vere(self, bridge):
+        """L'hint del motore nomina speed_ratio e il loop mobile."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[0, 0.0], [30, 0.5]]\n")
+        message = self._start_errors(provider, yaml)[0].message
+        assert 'speed_ratio' in message
+        assert 'loop_start' in message
+
+    def test_severita_error(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[0, 0.0], [30, 0.5]]\n")
+        assert self._start_errors(provider, yaml)[0].severity == \
+            DiagnosticSeverity.Error
+
+    # --- cosa NON va segnalato -------------------------------------------
+
+    def test_scalare_non_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: 1.5\n")
+        assert self._start_errors(provider, yaml) == []
+
+    def test_espressione_matematica_non_segnalata(self, bridge):
+        """`(10/2)` e' una stringa in YAML ma il Generator la valuta a 5.0
+        prima che il PointerController la veda: non e' un envelope."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: (10/2)\n")
+        assert self._start_errors(provider, yaml) == []
+
+    def test_chiave_vuota_non_segnalata_qui(self, bridge):
+        """`start:` senza valore e' materia di _check_missing_values."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start:\n      speed_ratio: 1.0\n")
+        assert self._start_errors(provider, yaml) == []
+
+    def test_loop_start_envelope_resta_ammesso(self, bridge):
+        """Il loop mobile e' proprio la strada che l'hint indica."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      loop_start: [[0, 0.0], [30, 0.5]]\n")
+        errors = [d for d in provider.get_diagnostics(yaml)
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'loop_start' in d.message]
+        assert errors == []
+
+    def test_loop_end_e_loop_dur_envelope_restano_ammessi(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      loop_start: [[0, 0.0], [30, 0.5]]\n"
+            "      loop_dur: [[0, 1.0], [30, 2.0]]\n"
+        )
+        errors = [d for d in provider.get_diagnostics(yaml)
+                  if d.severity == DiagnosticSeverity.Error]
+        assert errors == []
+
+    def test_documento_a_meta_scrittura_non_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[0, 0.0], [30,\n")
+        assert self._start_errors(provider, yaml) == []
+
+    def test_start_di_un_altro_blocco_non_confuso(self, bridge):
+        """`loop_start` contiene 'start' ma non e' la chiave `start`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      loop_start: [[0, 0.0], [30, 0.5]]\n")
+        assert self._start_errors(provider, yaml) == []

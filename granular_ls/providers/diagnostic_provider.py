@@ -2501,6 +2501,49 @@ class DiagnosticProvider:
 
     _POINTER_SCALAR_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
 
+    # L'hint del motore, parola per parola: le due strade vere per far
+    # variare nel tempo la posizione di lettura.
+    _POINTER_START_HINT = (
+        "e' un valore scalare — la posizione di partenza nel sample — e non "
+        "accetta envelope. Se non ti serve, ometti la chiave: il default e' "
+        "0.0 (o loop_start, con un loop attivo). Per far variare nel tempo la "
+        "posizione di lettura usa `pointer.speed_ratio`, oppure un loop mobile "
+        "con `loop_start` come envelope."
+    )
+
+    def _check_pointer_start_envelope(
+        self, lines: List[str], key_line: int, block_end: int,
+    ) -> Optional[Diagnostic]:
+        """
+        Segnala `pointer.start` scritto come envelope (PGE #199, PR #200).
+
+        La spec dichiara `pointer_start` con `is_smart=False`: il valore non
+        diventa mai un `Parameter`, resta grezzo, e `calculate` lo somma alla
+        posizione. Il motore lo ferma all'inizializzazione dello stream con
+        un `InvalidFieldValueError`; prima cadeva piu' a valle come
+        `TypeError` dentro la generazione dei grani, dove non c'era piu' modo
+        di dire all'utente cosa avesse scritto.
+
+        Si segnalano le **strutture** — lista di breakpoint, formato compatto,
+        BP group, dict con `points` — e non ogni valore non numerico. Una
+        stringa puo' essere legittima: il Generator valuta le espressioni fra
+        parentesi (`(10/2)` → 5.0) su tutto lo YAML prima che il
+        PointerController veda il valore.
+
+        Ritorna None per la chiave vuota (materia di _check_missing_values) e
+        per il frammento non interpretabile, che e' il documento a meta'
+        scrittura.
+        """
+        found, raw = self._read_key_value(lines, key_line, block_end)
+        if not found or not isinstance(raw, (list, dict)):
+            return None
+        return Diagnostic(
+            range=self._line_range(key_line),
+            message=f"'pointer.start' {self._POINTER_START_HINT}",
+            severity=DiagnosticSeverity.Error,
+            source=SOURCE,
+        )
+
     def _check_pointer_param_bounds(
         self, document_text: str, lines: List[str],
         streams: List[Tuple[int, int, dict]], refs_dir: str,
@@ -2516,7 +2559,10 @@ class DiagnosticProvider:
               [0.0, durata_sample] se il file WAV e' leggibile,
               altrimenti solo [0.0, +inf] (controlla solo limite inferiore)
 
-        I valori envelope (che iniziano con '[') vengono ignorati.
+        I valori envelope vengono ignorati per loop_start, loop_end e
+        loop_dur, che gli envelope li accettano davvero. Per `start` no:
+        li' una curva e' un errore, e la segnala
+        _check_pointer_start_envelope.
 
         document_text resta necessario per _get_effective_unit_mode
         (helper condiviso con l'hover, lavora sul testo completo).
@@ -2597,6 +2643,15 @@ class DiagnosticProvider:
                 key, val_str = m.group(1), m.group(2).strip()
                 if key not in self._POINTER_SCALAR_PARAMS:
                     continue
+                # `start` e' il solo dei quattro a non accettare envelope:
+                # va deciso prima dello skip, che altrimenti lo rende muto.
+                if key == 'start':
+                    diag = self._check_pointer_start_envelope(
+                        lines, n, pointer_end
+                    )
+                    if diag is not None:
+                        diagnostics.append(diag)
+                        continue
                 # Salta envelope e valori vuoti
                 if not val_str or val_str.startswith('[') or val_str.startswith('#'):
                     continue
