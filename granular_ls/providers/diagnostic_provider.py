@@ -260,6 +260,11 @@ class DiagnosticProvider:
             self._check_deviation_probability(lines, streams)
         )
 
+        # Fase 16: tetto della banda sotto range_anchor: min.
+        diagnostics.extend(
+            self._check_band_ceiling(lines, streams, grain_blocks)
+        )
+
         return diagnostics
 
 
@@ -2959,6 +2964,198 @@ class DiagnosticProvider:
             ))
 
         return diagnostics
+
+    # Le coppie base/_range che l'ancora governa, con il blocco in cui vivono.
+    # `pointer.offset_range` resta fuori: la sua base è `_dummy_fixed_zero_`,
+    # fissa a 0 e non scrivibile, quindi la banda non può sforare il tetto per
+    # colpa di quanto l'utente ha scritto come base.
+    _ANCHOR_BAND_PAIRS = (
+        (None, 'volume', 'volume_range', 'volume'),
+        (None, 'pan', 'pan_range', 'pan'),
+        ('grain', 'duration', 'duration_range', 'grain.duration'),
+    )
+
+    def _check_band_ceiling(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+        grain_blocks: List[dict],
+    ) -> List[Diagnostic]:
+        """
+        Con `range_anchor: min`, verifica che `base + range` stia sotto il
+        tetto del parametro.
+
+        Sotto l'ancora `center` la banda arriva a `base + range/2` e resta
+        gestita dal safety clamp: è il comportamento storico. Sotto `min` no —
+        la modalità promette una banda esatta, e il motore preferisce
+        rifiutarla al parse (`ParameterBoundError`) invece di schiacciarla
+        contro il tetto e lasciare l'utente convinto di avere la banda che ha
+        scritto. Da qui la severità Error, non un warning.
+
+        Si controlla solo dove il massimo della somma è calcolabile da un solo
+        lato (scalare+scalare, envelope+scalare, scalare+envelope). Con
+        entrambi envelope il massimo della somma non è la somma dei massimi —
+        i due picchi possono cadere in istanti diversi — e un falso positivo
+        bloccherebbe un render valido: lì tace anche il motore.
+
+        Il picco di un envelope è stimato dai suoi breakpoint, come lato
+        motore: con interpolazione cubica la curva può superarli, quindi la
+        stima è per difetto. L'errore cade dalla parte giusta — si lascia
+        passare una banda che sfora di poco, non se ne blocca una valida.
+        """
+        diagnostics: List[Diagnostic] = []
+        grain_by_start = {b['start']: b for b in grain_blocks}
+
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            if not self._anchor_is_min(lines, stream_start, stream_end):
+                continue
+
+            for block, base_key, range_key, yaml_path in self._ANCHOR_BAND_PAIRS:
+                param = self._params_by_yaml_path.get(yaml_path)
+                if param is None or param.max_val is None:
+                    continue
+
+                if block is None:
+                    scope_start, scope_end, indent = stream_start, stream_end, 4
+                else:
+                    grain = self._grain_block_of(
+                        grain_by_start, stream_start, stream_end
+                    )
+                    if grain is None:
+                        continue
+                    scope_start, scope_end, indent = (
+                        grain['start'] + 1, grain['end'], 6
+                    )
+
+                range_line = self._find_key_line_at_indent(
+                    lines, scope_start, scope_end, range_key, indent)
+                if range_line is None:
+                    # Senza range non c'è banda: nemmeno il motore controlla.
+                    continue
+
+                base_line = self._find_key_line_at_indent(
+                    lines, scope_start, scope_end, base_key, indent)
+                if base_line is None:
+                    # Chiave assente: vale il default della spec, che è quanto
+                    # l'orchestrator passa al parser. `volume_range: 24` da
+                    # solo sfora il tetto, e tacere qui lo perderebbe.
+                    if not isinstance(param.default, (int, float)) \
+                            or isinstance(param.default, bool):
+                        continue
+                    base_peak, base_is_env = float(param.default), False
+                else:
+                    base_peak, base_is_env = self._peak_of(
+                        lines, base_line, scope_end)
+                range_peak, range_is_env = self._peak_of(
+                    lines, range_line, scope_end)
+                if base_peak is None or range_peak is None:
+                    continue
+                if base_is_env and range_is_env:
+                    continue
+
+                # I valori di grain.duration sono nell'unità dichiarata: il
+                # motore li scala prima che il parser li veda, quindi il
+                # confronto va fatto in secondi come fa lui.
+                if block == 'grain':
+                    factor = _GRAIN_DURATION_UNIT_SECONDS.get(
+                        self._grain_block_of(
+                            grain_by_start, stream_start, stream_end)['unit'])
+                    if factor is not None:
+                        base_peak *= factor
+                        range_peak *= factor
+
+                ceiling = base_peak + range_peak
+                if ceiling <= param.max_val:
+                    continue
+
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(range_line),
+                    message=(
+                        f"`range_anchor: min`: la banda di `{yaml_path}` "
+                        f"arriva a {self._fmt_unit_value(ceiling)} "
+                        f"(base + range) e sfora il tetto "
+                        f"{self._fmt_unit_value(param.max_val)}. "
+                        f"Da centrata la stessa coppia starebbe dentro, ma "
+                        f"`min` promette una banda esatta e il motore la "
+                        f"rifiuta al parse invece di schiacciarla col clamp."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+        return diagnostics
+
+    @staticmethod
+    def _grain_block_of(grain_by_start: dict, stream_start: int,
+                        stream_end: int) -> Optional[dict]:
+        """Il blocco grain di questo stream, se ne ha uno."""
+        for start, block in grain_by_start.items():
+            if stream_start <= start < stream_end:
+                return block
+        return None
+
+    def _anchor_is_min(self, lines: List[str], start: int, end: int) -> bool:
+        """True se lo stream dichiara `range_anchor: min`."""
+        for n in range(start, min(end, len(lines))):
+            m = self._RANGE_ANCHOR_VALUE.match(lines[n])
+            if m:
+                return m.group(1) == 'min'
+        return False
+
+    @staticmethod
+    def _find_key_line_at_indent(lines: List[str], start: int, end: int,
+                                 key: str, indent: int) -> Optional[int]:
+        """La riga di `key:` a un indent preciso, o None."""
+        pattern = re.compile(r'^' + re.escape(key) + r'\s*:')
+        for n in range(start, min(end, len(lines))):
+            raw = lines[n]
+            stripped = raw.strip()
+            if stripped.startswith('- '):
+                stripped = stripped[2:].strip()
+                leading = 4
+            else:
+                leading = len(raw) - len(raw.lstrip())
+            if leading == indent and pattern.match(stripped):
+                return n
+        return None
+
+    def _peak_of(self, lines: List[str], key_line: int,
+                 block_end: int) -> Tuple[Optional[float], bool]:
+        """
+        Il massimo del valore di una chiave, e se quel valore è un envelope.
+
+        Per uno scalare il massimo è il valore; per un envelope è il più alto
+        dei suoi breakpoint, che è la stessa stima che fa il motore.
+
+        Returns:
+            `(picco, is_envelope)`, con picco None se il valore non è
+            interpretabile — documento a metà scrittura, o una forma da cui
+            non si ricava un numero.
+        """
+        found, raw = self._read_key_value(lines, key_line, block_end)
+        if not found or raw is None:
+            return None, False
+        if isinstance(raw, bool):
+            return None, False
+        if isinstance(raw, (int, float)):
+            return float(raw), False
+        ys = self._envelope_peak(raw)
+        return ys, True
+
+    @staticmethod
+    def _envelope_peak(raw) -> Optional[float]:
+        """Il breakpoint più alto di un envelope già letto come struttura."""
+        if isinstance(raw, dict):
+            raw = raw.get('points')
+        if not isinstance(raw, list):
+            return None
+        ys = []
+        for item in raw:
+            if (isinstance(item, list) and len(item) >= 2
+                    and isinstance(item[1], (int, float))
+                    and not isinstance(item[1], bool)):
+                ys.append(float(item[1]))
+        return max(ys) if ys else None
 
     @staticmethod
     def _find_key_line(lines: List[str], start: int, end: int,

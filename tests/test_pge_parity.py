@@ -606,3 +606,110 @@ def test_deviation_probability_mirror_matches_engine(pge, raw, tmp_path,
         f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
         f"LS {'rifiuta' if ls_rifiuta else 'accetta'}"
     )
+
+
+# =============================================================================
+# Il tetto della banda sotto `range_anchor: min` (issue #37)
+# =============================================================================
+#
+# Il motore rifiuta al parse una banda `[base, base + range]` che sfora il
+# tetto del parametro, ma solo dove il massimo della somma è calcolabile da un
+# solo lato. La diagnostica ne replica i confini: qui si verifica che
+# accetti e rifiuti le stesse coppie, non che il messaggio coincida.
+
+BAND_CEILING_CORPUS = [
+    # (base, range) su `volume`, bounds [-120, 12] e range [0, 24]
+    (-6, 24), (0, 12), (0, 12.5), (-120, 24), (6, 12), (5, 6), (-6, 18),
+    (12, 0), (11.9, 0.05), (None, 24), (-6, None),
+    ([[0, -60], [10, 6]], 12), (6, [[0, 1], [10, 20]]),
+    ([[0, -60], [10, 6]], [[0, 1], [10, 20]]),
+    ([[0, -60], [10, -20]], 12),
+]
+
+
+def _band_ceiling_bridge():
+    """Bridge con la coppia volume / volume_range e i bound veri del motore."""
+    from granular_ls.schema_bridge import SchemaBridge
+
+    def spec(name, yaml_path):
+        return {'name': name, 'yaml_path': yaml_path, 'default': 0.0,
+                'is_smart': True, 'exclusive_group': None, 'group_priority': 0,
+                'range_path': None, 'deviation_probability_key': None,
+                'is_internal': False}
+
+    def bounds(mn, mx):
+        return {'min_val': mn, 'max_val': mx, 'min_range': 0.0,
+                'max_range': 0.0, 'default_jitter': 0.0,
+                'variation_mode': 'additive'}
+
+    return SchemaBridge({
+        'specs': [spec('volume', 'volume'), spec('volume_range', 'volume_range')],
+        'bounds': {'volume': bounds(-120.0, 12.0),
+                   'volume_range': bounds(0.0, 24.0)},
+    })
+
+
+@pytest.mark.parametrize('base,mod_range', BAND_CEILING_CORPUS,
+                         ids=lambda v: repr(v)[:40])
+def test_band_ceiling_mirror_matches_engine(pge, base, mod_range, tmp_path,
+                                            monkeypatch):
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+    from granular_ls.schema_bridge import _import_pge_module
+
+    parser_mod = _import_pge_module('parameters.parser')
+    GranularParser = getattr(parser_mod, 'GranularParser', None)
+    ANCHOR_MIN = getattr(
+        _import_pge_module('shared.distribution_strategy'), 'ANCHOR_MIN', None)
+    if GranularParser is None or ANCHOR_MIN is None:
+        pytest.skip("engine precede range_anchor / GranularParser")
+
+    ParameterBoundError = _import_pge_module(
+        'shared.exceptions').ParameterBoundError
+
+    class _Ctx:
+        sample_dur_sec = 10.0
+        output_sr = 48000
+        stream_id = 's1'
+        rng_id = 'r1'
+        duration = 10.0
+
+    class _Cfg:
+        context = _Ctx()
+        time_mode = 'absolute'
+        distribution_mode = 'uniform'
+        range_anchor = ANCHOR_MIN
+        duration = 10.0
+        seed = None
+
+    # Il logger del motore apre un file relativo alla cwd al primo parse.
+    monkeypatch.chdir(tmp_path)
+
+    # `base is None` è la chiave assente nello YAML: al parser non arriva mai
+    # None, arriva il default della spec — è l'orchestrator a sostituirlo.
+    base_engine = 0.0 if base is None else base
+
+    try:
+        GranularParser(_Cfg()).parse_parameter('volume', base_engine, mod_range)
+        motore_rifiuta = False
+    except ParameterBoundError:
+        motore_rifiuta = True
+
+    body = "    range_anchor: min\n"
+    if base is not None:
+        body += f"    volume: {base}\n"
+    if mod_range is not None:
+        body += f"    volume_range: {mod_range}\n"
+    yaml = ("streams:\n  - stream_id: s1\n    duration: 10.0\n"
+            "    sample: f.wav\n" + body)
+
+    provider = DiagnosticProvider(_band_ceiling_bridge())
+    ls_rifiuta = any(
+        'banda' in d.message.lower() and 'range_anchor' in d.message
+        for d in provider.get_diagnostics(yaml)
+    )
+
+    assert ls_rifiuta == motore_rifiuta, (
+        f"Drift su base={base!r} range={mod_range!r}: motore "
+        f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
+        f"LS {'rifiuta' if ls_rifiuta else 'accetta'}"
+    )

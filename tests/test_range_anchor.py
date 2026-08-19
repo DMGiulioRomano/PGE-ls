@@ -30,6 +30,43 @@ def _bridge():
     return SchemaBridge({'specs': [], 'bounds': {}})
 
 
+@pytest.fixture
+def bridge():
+    """Bridge con le coppie base/_range che l'ancora governa.
+
+    I bound sono quelli veri del motore: `volume` arriva a 12 e il suo range a
+    24, ed è proprio quella sproporzione a rendere possibile una coppia valida
+    da centrata e fuori tetto da ancorata.
+    """
+    def spec(name, yaml_path):
+        return {'name': name, 'yaml_path': yaml_path, 'default': 0.0,
+                'is_smart': True, 'exclusive_group': None,
+                'group_priority': 0, 'range_path': None,
+                'deviation_probability_key': None, 'is_internal': False}
+
+    def bounds(min_val, max_val):
+        return {'min_val': min_val, 'max_val': max_val, 'min_range': 0.0,
+                'max_range': 0.0, 'default_jitter': 0.0,
+                'variation_mode': 'additive'}
+
+    return SchemaBridge({
+        'specs': [
+            spec('volume', 'volume'), spec('volume_range', 'volume_range'),
+            spec('pan', 'pan'), spec('pan_range', 'pan_range'),
+            spec('grain_duration', 'grain.duration'),
+            spec('grain_duration_range', 'grain.duration_range'),
+        ],
+        'bounds': {
+            'volume': bounds(-120.0, 12.0),
+            'volume_range': bounds(0.0, 24.0),
+            'pan': bounds(-3600.0, 3600.0),
+            'pan_range': bounds(0.0, 360.0),
+            'grain_duration': bounds(0.001, 10.0),
+            'grain_duration_range': bounds(0.0, 1.0),
+        },
+    })
+
+
 def make_context(context_type='key', current_text='',
                  parent_path=None, indent_level=2,
                  in_stream_element=True, current_key='',
@@ -195,3 +232,224 @@ class TestRangeAnchorDiagnostic:
         diags = [d for d in self._diags(doc) if 'range_anchor' in d.message]
         assert 'center' in diags[0].message
         assert 'min' in diags[0].message
+
+
+# =============================================================================
+# Il tetto della banda sotto `range_anchor: min` (issue #37)
+# =============================================================================
+
+
+class TestBandCeilingUnderAnchorMin:
+    """
+    In modalita' `min` la banda arriva a `base + range`, quindi una coppia che
+    passa la validazione da centrata puo' sforare il tetto: `volume: -6` con
+    `volume_range: 24` sta dentro i bounds da centrata (`[-18, 6]`) e li sfora
+    da ancorata (`[-6, 18]` contro `max_val` 12).
+
+    Il motore lo tratta come **errore al parse**, non come warning: la
+    modalita' `min` promette una banda esatta, e prometterla per poi tagliarla
+    col clamp e' peggio che rifiutarla subito. La diagnostica ne rispecchia la
+    severita' e i confini — compreso quello che il motore NON controlla, cioe'
+    base e range entrambi envelope, dove il massimo della somma non e' la
+    somma dei massimi.
+    """
+
+    @staticmethod
+    def _stream(body: str) -> str:
+        return (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            + body
+        )
+
+    def _ceiling_errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'range_anchor' in d.message and 'banda' in d.message.lower()]
+
+    # --- il caso dell'issue ------------------------------------------------
+
+    def test_volume_meno_sei_con_range_ventiquattro(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_la_stessa_coppia_da_centrata_e_valida(self, bridge):
+        """Sotto `center` la banda arriva a base + range/2: nessun errore."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: center\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_ancora_assente_e_come_center(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    # --- confini del controllo --------------------------------------------
+
+    def test_banda_esattamente_al_tetto_e_valida(self, bridge):
+        """volume: 0 + range 12 = 12 = max_val: il motore accetta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: 0\n"
+            "    volume_range: 12\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_senza_range_niente_controllo(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: 6\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_pan_ha_la_sua_coppia(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    pan: 3500\n"
+            "    pan_range: 200\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_grain_duration_ha_la_sua_coppia(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration: 9.5\n"
+            "      duration_range: 0.8\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    # --- envelope ----------------------------------------------------------
+
+    def test_base_envelope_e_range_scalare_usa_il_picco(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: [[0, -60], [10, 6]]\n"
+            "    volume_range: 12\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_base_scalare_e_range_envelope_usa_il_picco(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: 6\n"
+            "    volume_range: [[0, 1], [10, 20]]\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_entrambi_envelope_non_si_controlla(self, bridge):
+        """I due picchi possono cadere in istanti diversi: il motore non
+        controlla, e un falso positivo bloccherebbe un render valido."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: [[0, -60], [10, 6]]\n"
+            "    volume_range: [[0, 1], [10, 20]]\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    # --- unita' di grain.duration -----------------------------------------
+
+    def test_duration_in_millisecondi_convertita_prima_del_confronto(self, bridge):
+        """9500 ms + 800 ms = 10.3 s: sfora, ma solo se si converte."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration: 9500\n"
+            "      duration_range: 800\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_duration_in_millisecondi_dentro_il_tetto_non_segnalata(self, bridge):
+        """50 ms + 4.5 ms non sfora niente: senza conversione sarebbero 54.5 s."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+            "      duration_range: 4.5\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    # --- messaggio e ancoraggio -------------------------------------------
+
+    def test_messaggio_nomina_la_somma_e_il_tetto(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert '18' in msg and '12' in msg
+
+    def test_errore_ancorato_alla_riga_del_range(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml)[0].range.start.line == 7
+
+    def test_stream_indipendenti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+            "  - stream_id: s2\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    # --- base assente: vale il default ------------------------------------
+
+    def test_range_da_solo_usa_il_default_della_base(self, bridge):
+        """`volume_range: 24` senza `volume`: l'orchestrator passa il default
+        0.0 al parser, e 0 + 24 sfora il tetto 12."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_range_da_solo_dentro_il_tetto_non_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume_range: 12\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
