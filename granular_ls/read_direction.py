@@ -33,12 +33,19 @@ Cosa resta fuori, come nel motore: `end_time <= time_offset`, che dipende
 dall'offset accumulato dagli elementi che precedono il ciclo in una lista
 mista. Verificarlo vorrebbe dire rifare la passata di `EnvelopeBuilder.parse`.
 Qui se ne verifica il segno, decidibile perché quell'offset non è mai negativo.
+
+E resta fuori ogni corpo dove compare un'espressione matematica: il `Generator`
+valuta `(...)` su tutto lo YAML — ricorrendo dentro liste e dict — prima che il
+controller veda i valori, quindi `(0-1)` arriva come `-1` e la stringa scritta
+non è il valore. Segnalarla sarebbe un falso positivo su YAML che rende. Le
+stringhe senza parentesi restano segnalate: quelle il motore le vede come sono.
 """
 
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
 from granular_ls.envelope_shapes import (
+    contains_math_expression,
     is_3tuple_breakpoint as _is_3tuple_breakpoint,
     is_bp_group as _is_bp_group,
     is_loop_block as _is_compact_format,
@@ -435,6 +442,12 @@ def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
         `None` se il motore lo accetterebbe; il primo `ReadDirectionIssue`
         altrimenti, nello stesso ordine in cui il motore solleverebbe.
     """
+    if contains_math_expression(raw):
+        # Il `Generator` valuta le espressioni prima del parse: qui non si
+        # legge il valore, si legge la sua scrittura. Il silenzio è sul corpo
+        # intero, perché il verso vero dipende da quell'espressione.
+        return None
+
     if raw is None:
         # Chiave vuota: a differenza di `grain.reverse`, qui è un errore.
         return _issue(raw, VALUE_HINT)

@@ -20,10 +20,15 @@ corpus perché il confronto non scada.
 
 Cosa resta fuori, deliberatamente:
 
-- **le stringhe.** Il motore le rifiuta (`InvalidParameterError`), ma il
-  `Generator` valuta le espressioni fra parentesi su tutto lo YAML prima che
-  il gate le veda: `(50/2)` è una stringa che arriva come `25`. Distinguere
-  l'espressione dal refuso vorrebbe dire rifare `_eval_math_expressions`.
+- **i corpi dove compare un'espressione matematica.** Il motore rifiuta le
+  stringhe (`InvalidParameterError`), ma il `Generator` valuta le espressioni
+  fra parentesi su tutto lo YAML prima che il gate le veda, **ricorrendo
+  dentro liste e dict**: `(50/2)` arriva come `25` tanto da scalare quanto
+  sepolta nella Y di un breakpoint. Distinguere l'espressione dal refuso
+  vorrebbe dire rifare `_eval_math_expressions`, quindi si tace — e si tace
+  sul corpo intero, perché il valore vero dipende da quell'espressione. Le
+  stringhe **senza** parentesi restano segnalate: quelle il motore le vede
+  come sono scritte.
 - **i valori Y fuori da 0-100.** Il motore non li rifiuta: `150` è un
   `AlwaysGate` legittimo, non un errore di scrittura.
 - **i guard specifici di `grain.read_direction`** (percentuali del pattern in
@@ -38,6 +43,7 @@ from typing import Any, Optional
 
 from granular_ls.envelope_shapes import (
     VALID_INTERP_TYPES,
+    contains_math_expression,
     is_bp_group,
     is_breakpoint,
     is_3tuple_breakpoint,
@@ -283,6 +289,13 @@ def check_envelope_body(body: Any, param_key: Optional[str] = None
 
 
 def _check_body(body: Any) -> Optional[DeviationProbabilityIssue]:
+    # Un'espressione ovunque nel corpo rende il corpo indecidibile: il gate
+    # non vede quel che c'è scritto, vede quel che ne esce. Vale per l'intero
+    # corpo e non solo per il valore che la porta, perché una `(50/2)` nella
+    # X di un punto sposta anche il punto accanto.
+    if contains_math_expression(body):
+        return None
+
     if isinstance(body, dict):
         if 'points' not in body:
             return _issue(body, DICT_HINT)

@@ -3224,3 +3224,70 @@ class TestDeviationProbabilityEnvelopeBody:
         errors = self._errors(provider, yaml)
         assert len(errors) == 1
         assert errors[0].range.start.line == 5
+
+    # --- le espressioni matematiche ----------------------------------------
+
+    def test_espressione_nella_y_di_un_punto(self, bridge):
+        """`Generator._eval_math_expressions` ricorre dentro liste e dict e
+        riconverte a numero: il gate vede `[[0, 25], [10, 100]]` e costruisce
+        l'envelope. Segnalarlo qui sarebbe un falso positivo su YAML che
+        rende."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, (50/2)], [10, 100]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_espressione_nella_x_di_un_punto(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[(5*2), 50], [20, 100]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_espressione_dentro_points(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: {points: [[0, (50/2)], [10, 100]]}\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_espressione_nella_forma_globale(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability: [[0, (50/2)], [10, 100]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_espressione_scalare(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: (50/2)\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_il_silenzio_e_per_chiave_non_per_blocco(self, bridge):
+        """Un'espressione sotto `volume` non rende indecidibile `pan`: sono
+        due envelope distinti, e il motore li costruisce separatamente."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, (50/2)], [10, 100]]\n"
+            "      pan: ['x']\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 7
+
+    def test_stringa_senza_parentesi_resta_un_errore(self, bridge):
+        """Il Generator la lascia stringa: il valore è quello scritto."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, meta], [10, 100]]\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1

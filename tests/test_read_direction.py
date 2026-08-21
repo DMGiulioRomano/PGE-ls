@@ -351,3 +351,67 @@ class TestIssue:
         issue = check_read_direction(0)
         with pytest.raises(Exception):
             issue.value = 1
+
+
+# =============================================================================
+# 10. Le espressioni matematiche: il Generator le valuta prima del parse
+# =============================================================================
+
+class TestEspressioniMatematiche:
+    """
+    `Generator._eval_math_expressions` valuta `(...)` su **tutto** lo YAML
+    prima che qualunque controller veda i valori, e ricorre dentro liste e
+    dict: `(0-1)` arriva come `-1`, non come la stringa che l'utente ha
+    scritto. Da qui il mirror non può decidere — la stringa non è il valore.
+
+    Il criterio è quello di tutto il modulo: non essere più severi del motore.
+    Su un corpo dove compare un'espressione si tace, ovunque compaia; sulle
+    stringhe che il motore lascerebbe stringhe si continua a segnalare, perché
+    lì il valore è quello scritto.
+    """
+
+    # --- scalare -----------------------------------------------------------
+
+    def test_scalare_espressione_non_si_decide(self):
+        # `(0-1)` vale -1, che è un verso legittimo.
+        assert accetta('(0-1)')
+
+    def test_scalare_stringa_qualsiasi_resta_un_errore(self):
+        # Senza parentesi il Generator la lascia stringa e il motore rifiuta.
+        assert not accetta('indietro')
+
+    # --- annidata nei punti ------------------------------------------------
+
+    def test_espressione_nella_y_di_un_breakpoint(self):
+        assert accetta([[0, '(0-1)'], [10, 1]])
+
+    def test_espressione_nella_x_di_un_breakpoint(self):
+        assert accetta([['(5*2)', 1], [20, -1]])
+
+    def test_espressione_dentro_points(self):
+        assert accetta({'points': [[0, '(0-1)'], [10, 1]]})
+
+    def test_espressione_dentro_un_bp_group(self):
+        assert accetta([[[0, '(0-1)'], [10, 1]], 'step'])
+
+    def test_espressione_nel_pattern_di_un_ciclo(self):
+        assert accetta([[[0, '(0-1)'], [50, 1]], 10.0, 4])
+
+    def test_espressione_in_end_time(self):
+        assert accetta([[[0, 1], [50, -1]], '(5*2)', 4])
+
+    # --- il silenzio copre il corpo intero ---------------------------------
+
+    def test_un_espressione_tace_su_tutto_il_corpo(self):
+        """Il valore vero dipende dall'espressione: nessun altro controllo
+        sul corpo è più decidibile, nemmeno quelli che sembrano indipendenti."""
+        assert accetta([[0, '(0-1)'], [10, 0.5]])
+
+    # --- le stringhe che restano stringhe -----------------------------------
+
+    def test_stringa_senza_parentesi_dentro_i_punti(self):
+        assert not accetta([[0, 'x'], [10, 1]])
+
+    def test_interp_sbagliato_resta_un_errore(self):
+        """`linear` non ha parentesi: il motore lo vede come lo si è scritto."""
+        assert not accetta([[[0, 1], [10, -1]], 'linear'])

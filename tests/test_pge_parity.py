@@ -713,3 +713,217 @@ def test_band_ceiling_mirror_matches_engine(pge, base, mod_range, tmp_path,
         f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
         f"LS {'rifiuta' if ls_rifiuta else 'accetta'}"
     )
+
+
+# =============================================================================
+# Le espressioni matematiche: la pipeline reale, non il solo gate
+# =============================================================================
+#
+# `Generator._eval_math_expressions` gira su **tutto** lo YAML prima che
+# qualunque controller veda i valori, e ricorre dentro liste e dict: `(50/2)`
+# arriva come `25` tanto da scalare quanto sepolta nella Y di un breakpoint.
+# I due mirror lo sanno e tacciono sui corpi dove un'espressione compare.
+#
+# I corpus qui sopra non se ne accorgerebbero: interrogano `create_gate` e
+# `normalize_read_direction`, cioè il gradino **a valle** dell'evaluazione, e
+# le stringhe ne sono escluse di proposito. Questo corpus rimette davanti il
+# gradino mancante, chiamando la funzione vera del motore.
+#
+# La parità qui è a senso unico, e va detto: si pretende che il motore accetti
+# ⇒ il language server taccia. L'implicazione opposta no — su un'espressione
+# che il motore rifiuta dopo averla valutata (`(abc)` resta stringa) il mirror
+# tace lo stesso, perché prevederne l'esito vorrebbe dire rifare
+# `_eval_math_expressions`. Tacere di troppo costa una diagnostica mancata;
+# segnalare di troppo costa un errore rosso su uno YAML che rende.
+
+
+def _load_eval_math_expressions():
+    """La funzione vera del motore, senza importarne il modulo.
+
+    `_eval_math_expressions` vive dentro `Generator`, e importare
+    `pge.engine.generator` tira dentro numpy e soundfile — dipendenze del
+    render che la CI del language server non installa (vedi lo step `install
+    deps` in .github/workflows). Il corpo della funzione però non ne usa
+    nessuna: solo `re` e `math`. Si estrae dal sorgente con `ast` e si compila
+    da sola, così la parità gira davvero invece di skippare.
+
+    Returns:
+        `(evaluate, pattern)`: la funzione applicata a un oggetto YAML, e la
+        stringa del regex con cui il motore riconosce un'espressione.
+    """
+    import ast
+    import math
+    import re as _re
+
+    root = Path(PGE_SRC)
+    for cand in (root / 'pge' / 'engine' / 'generator.py',
+                 root / 'engine' / 'generator.py'):
+        if cand.exists():
+            sorgente = cand
+            break
+    else:
+        pytest.skip("generator.py non trovato in questo checkout del motore")
+
+    tree = ast.parse(sorgente.read_text(encoding='utf-8'))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)
+               and n.name == '_eval_math_expressions'), None)
+    if fn is None:
+        pytest.skip("il motore non valuta piu' le espressioni in questo punto")
+
+    modulo = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(modulo)
+    namespace = {'math': math, 're': _re}
+    exec(compile(modulo, str(sorgente), 'exec'), namespace)
+    grezza = namespace['_eval_math_expressions']
+
+    # Il primo argomento e' `self`, e serve solo alla ricorsione: si passa un
+    # oggetto che rimanda alla funzione stessa.
+    class _Portatore:
+        def _eval_math_expressions(self, obj):
+            return grezza(self, obj)
+
+    # Il pattern letterale, per confrontarlo col mirror.
+    pattern = next(
+        (n.value.value for n in ast.walk(fn)
+         if isinstance(n, ast.Assign)
+         and any(getattr(t, 'id', None) == 'pattern' for t in n.targets)
+         and isinstance(n.value, ast.Constant)
+         and isinstance(n.value.value, str)),
+        None,
+    )
+    return _Portatore()._eval_math_expressions, pattern
+
+
+def test_math_expression_pattern_matches_engine(pge):
+    """Il regex del mirror e' quello del motore, carattere per carattere.
+
+    Se il motore allarga o restringe cio' che valuta, il mirror tace su un
+    insieme di stringhe diverso: da una parte diagnostiche mancate, dall'altra
+    falsi positivi. E' una riga sola, ed e' quella che va inseguita.
+    """
+    from granular_ls.envelope_shapes import _MATH_EXPRESSION_RE
+
+    _, pattern = _load_eval_math_expressions()
+    if pattern is None:
+        pytest.skip("pattern non estraibile dal sorgente del motore")
+    assert _MATH_EXPRESSION_RE.pattern == pattern
+
+
+# Corpi con un'espressione, nei posti dove il mirror prima non la vedeva.
+# Ogni voce e' scelta perche' dopo l'evaluazione il motore la **accetta**: e'
+# lo YAML che rende e che il language server segnalava in rosso.
+MATH_EXPRESSION_CORPUS = [
+    '(50/2)',
+    [[0, '(50/2)'], [10, 100]],
+    [['(5*2)', 50], [20, 100]],
+    [[0, '(50/2)', 'linear'], [10, 100]],
+    {'points': [[0, '(50/2)'], [10, 100]]},
+    {'points': [[0, '(50/2)']], 'type': 'linear'},
+    [[[0, '(50/2)'], [100, 100]], 'linear'],
+    [[[0, '(50/2)'], [100, 100]], 10.0, 4],
+    [[[0, 50], [100, 100]], '(5*2)', 4],
+    [[[0, 50], [100, 100]], 10.0, '(2*2)'],
+    [{'t': 0, 'v': '(50/2)'}, {'t': 10, 'v': 100}],
+    [[0, '(50/2)'], [[[0, 50], [100, 100]], 5.0, 2]],
+    # dentro il dict della distribuzione temporale: `_eval_math_expressions`
+    # ricorre sui valori, quindi anche qui la stringa non e' il valore.
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear',
+     {'type': 'geometric', 'ratio': '(3/2)'}],
+    [[0, '(pi*10)'], [10, 100]],
+]
+
+
+@pytest.mark.parametrize('raw', MATH_EXPRESSION_CORPUS,
+                         ids=lambda v: repr(v)[:60])
+def test_deviation_probability_mirror_tace_sulle_espressioni(pge, raw,
+                                                             tmp_path,
+                                                             monkeypatch):
+    """Il motore costruisce il gate dal corpo valutato: il mirror deve tacere."""
+    from granular_ls.deviation_probability import check_envelope_body
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        GateFactory = _import_pge_module('parameters.gate_factory').GateFactory
+    except Exception:
+        pytest.skip("engine senza GateFactory importabile in questo checkout")
+
+    evaluate, _ = _load_eval_math_expressions()
+    monkeypatch.chdir(tmp_path)  # il logger del motore scrive relativo alla cwd
+
+    valutato = evaluate(raw)
+    try:
+        GateFactory.create_gate(deviation_probability={'volume': valutato},
+                                param_key='volume', duration=10.0)
+        motore_accetta = True
+    except Exception:
+        motore_accetta = False
+
+    if not motore_accetta:
+        pytest.skip(f"il motore rifiuta {valutato!r} anche dopo l'evaluazione: "
+                    f"il mirror tace lo stesso, e va bene cosi'")
+
+    assert check_envelope_body(raw) is None, (
+        f"Falso positivo su {raw!r}: il Generator lo valuta a {valutato!r} e "
+        f"il motore ne costruisce il gate, ma il language server lo segnala."
+    )
+
+
+# Gli stessi posti, per il verso di lettura: `(0-1)` e' -1, che e' un verso.
+READ_DIRECTION_MATH_CORPUS = [
+    '(0-1)',
+    '(1)',
+    [[0, '(0-1)'], [10, 1]],
+    [['(5*2)', 1], [20, -1]],
+    {'points': [[0, '(0-1)'], [10, 1]]},
+    [[[0, '(0-1)'], [10, 1]], 'step'],
+    [[[0, '(0-1)'], [50, 1]], 10.0, 4],
+    [[[0, 1], [50, -1]], '(5*2)', 4],
+    [{'t': 0, 'v': '(0-1)'}, {'t': 10, 'v': 1}],
+]
+
+
+@pytest.mark.parametrize('raw', READ_DIRECTION_MATH_CORPUS,
+                         ids=lambda v: repr(v)[:60])
+def test_read_direction_mirror_tace_sulle_espressioni(pge, raw):
+    from granular_ls.read_direction import check_read_direction
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        normalize = _import_pge_module(
+            'parameters.read_direction').normalize_read_direction
+    except Exception:
+        pytest.skip("engine precede grain.read_direction (PGE #207 non ancora "
+                    "in questo checkout)")
+
+    InvalidFieldValueError = _import_pge_module(
+        'shared.exceptions').InvalidFieldValueError
+
+    evaluate, _ = _load_eval_math_expressions()
+    valutato = evaluate(raw)
+    try:
+        normalize(valutato)
+    except InvalidFieldValueError:
+        pytest.skip(f"il motore rifiuta {valutato!r} anche dopo l'evaluazione")
+
+    assert check_read_direction(raw) is None, (
+        f"Falso positivo su {raw!r}: il Generator lo valuta a {valutato!r} e "
+        f"il motore lo normalizza, ma il language server lo segnala."
+    )
+
+
+def test_il_silenzio_copre_anche_le_espressioni_che_il_motore_rifiuta(pge):
+    """L'altra meta' della parita' a senso unico, dichiarata come tale.
+
+    `(abc)` non si valuta: il motore stampa un warning e lascia la stringa,
+    poi la rifiuta. Il mirror tace lo stesso — prevedere quali espressioni
+    sopravvivono all'`eval` vorrebbe dire rifarlo. E' una diagnostica mancata,
+    non un falso positivo: il costo sta dalla parte giusta.
+    """
+    from granular_ls.deviation_probability import check_envelope_body
+    from granular_ls.read_direction import check_read_direction
+
+    evaluate, _ = _load_eval_math_expressions()
+    assert evaluate('(abc)') == '(abc)'
+    assert check_envelope_body([[0, '(abc)'], [10, 100]]) is None
+    assert check_read_direction([[0, '(abc)'], [10, 1]]) is None

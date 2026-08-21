@@ -17,9 +17,50 @@ collisione con [t, v] (elem[0] numerico), 3-tuple e loop block (len != 2),
 o il legacy [[t, v], 'marker'] (elem[0] e' UN punto, non lista di punti).
 """
 
+import re
+
 # Tipi di interpolazione validi per il group interp (mirror di
 # EnvelopeBuilder.VALID_INTERP_TYPES in PGE).
 VALID_INTERP_TYPES = ('linear', 'cubic', 'step')
+
+# Il pattern con cui il Generator riconosce un'espressione da valutare (mirror
+# di `Generator._eval_math_expressions` in PGE, src/pge/engine/generator.py).
+# La classe di caratteri e' la sua: se il motore allarga o restringe cio' che
+# valuta, questa riga e' il posto che deve seguirlo.
+_MATH_EXPRESSION_RE = re.compile(r'\(([a-zA-Z0-9+\-*/.() ]+)\)')
+
+
+def is_math_expression(value) -> bool:
+    """True se il Generator proverebbe a valutare questa stringa.
+
+    Non dice quanto ne uscirebbe — solo che il valore che il motore vede non
+    e' quello scritto nello YAML. Serve a tacere, non a decidere: chi la
+    chiama sa che su quel valore non ha piu' niente da dire.
+    """
+    return (isinstance(value, str)
+            and _MATH_EXPRESSION_RE.search(value) is not None)
+
+
+def contains_math_expression(obj) -> bool:
+    """True se una stringa da valutare compare in `obj`, a qualunque profondita'.
+
+    `_eval_math_expressions` ricorre dentro liste e dict e riconverte il
+    risultato a numero: una `(50/2)` sepolta nella Y di un breakpoint arriva
+    al parser come `25`, esattamente come farebbe da scalare. Un mirror che
+    escludesse le stringhe solo al primo livello segnalerebbe come malformato
+    un envelope che il motore costruisce — il modo peggiore in cui un language
+    server puo' sbagliarsi.
+
+    Sui dict si scende nei soli valori, come il motore: le chiavi restano
+    quelle scritte, `_eval_math_expressions` non le tocca.
+    """
+    if isinstance(obj, str):
+        return is_math_expression(obj)
+    if isinstance(obj, dict):
+        return any(contains_math_expression(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return any(contains_math_expression(item) for item in obj)
+    return False
 
 
 def is_num(x) -> bool:
