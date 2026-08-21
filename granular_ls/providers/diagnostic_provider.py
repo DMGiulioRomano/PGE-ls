@@ -3015,6 +3015,7 @@ class DiagnosticProvider:
                 if param is None or param.max_val is None:
                     continue
 
+                grain = None
                 if block is None:
                     scope_start, scope_end, indent = stream_start, stream_end, 4
                 else:
@@ -3026,6 +3027,19 @@ class DiagnosticProvider:
                     scope_start, scope_end, indent = (
                         grain['start'] + 1, grain['end'], 6
                     )
+
+                # I valori di grain.duration sono nell'unità dichiarata, e il
+                # motore li scala prima che il parser li veda: il confronto va
+                # fatto in secondi come fa lui. Il messaggio no — rispondere
+                # in secondi a chi ha scritto millisecondi è rispondere con
+                # numeri che non ha mai visto. Quindi si tiene tutto
+                # nell'unità dichiarata e si converte solo per il confronto.
+                factor, label = 1.0, ''
+                if grain is not None:
+                    unit_factor = _GRAIN_DURATION_UNIT_SECONDS.get(grain['unit'])
+                    if unit_factor is not None:
+                        factor = unit_factor
+                        label = ' ' + _GRAIN_DURATION_UNIT_LABELS[grain['unit']]
 
                 range_line = self._find_key_line_at_indent(
                     lines, scope_start, scope_end, range_key, indent)
@@ -3042,7 +3056,10 @@ class DiagnosticProvider:
                     if not isinstance(param.default, (int, float)) \
                             or isinstance(param.default, bool):
                         continue
-                    base_peak, base_is_env = float(param.default), False
+                    # Il default sta in secondi qualunque unità sia dichiarata
+                    # — il motore non lo converte — quindi qui va portato
+                    # nell'unità, non moltiplicato per il fattore come il resto.
+                    base_peak, base_is_env = float(param.default) / factor, False
                 else:
                     base_peak, base_is_env = self._peak_of(
                         lines, base_line, scope_end)
@@ -3053,31 +3070,40 @@ class DiagnosticProvider:
                 if base_is_env and range_is_env:
                     continue
 
-                # I valori di grain.duration sono nell'unità dichiarata: il
-                # motore li scala prima che il parser li veda, quindi il
-                # confronto va fatto in secondi come fa lui.
-                if block == 'grain':
-                    factor = _GRAIN_DURATION_UNIT_SECONDS.get(
-                        self._grain_block_of(
-                            grain_by_start, stream_start, stream_end)['unit'])
-                    if factor is not None:
-                        base_peak *= factor
-                        range_peak *= factor
-
                 ceiling = base_peak + range_peak
-                if ceiling <= param.max_val:
+                if ceiling * factor <= param.max_val:
                     continue
+
+                # `center` fa arrivare la banda a `base + range/2`, e la via
+                # d'uscita "cambia ancora" esiste solo se lì sta sotto il
+                # tetto. Prometterla sempre manda a fare la modifica sbagliata
+                # chi ha una coppia che sfora anche da centrata: lì l'ancora
+                # non decide se la banda sta dentro, decide solo se il motore
+                # la rifiuta o la lascia schiacciare al clamp.
+                centrata = base_peak + range_peak / 2
+                if centrata * factor <= param.max_val:
+                    coda = (
+                        "Da centrata la stessa coppia starebbe dentro, ma "
+                        "`min` promette una banda esatta e il motore la "
+                        "rifiuta al parse invece di schiacciarla col clamp."
+                    )
+                else:
+                    coda = (
+                        f"Da centrata sforerebbe anche lei "
+                        f"({self._fmt_unit_value(centrata)}{label}), ma "
+                        f"finendo sotto il safety clamp invece che rifiutata "
+                        f"al parse: cambiare ancora non la fa stare dentro, "
+                        f"va stretto il range."
+                    )
 
                 diagnostics.append(Diagnostic(
                     range=self._line_range(range_line),
                     message=(
                         f"`range_anchor: min`: la banda di `{yaml_path}` "
-                        f"arriva a {self._fmt_unit_value(ceiling)} "
+                        f"arriva a {self._fmt_unit_value(ceiling)}{label} "
                         f"(base + range) e sfora il tetto "
-                        f"{self._fmt_unit_value(param.max_val)}. "
-                        f"Da centrata la stessa coppia starebbe dentro, ma "
-                        f"`min` promette una banda esatta e il motore la "
-                        f"rifiuta al parse invece di schiacciarla col clamp."
+                        f"{self._fmt_unit_value(param.max_val / factor)}"
+                        f"{label}. {coda}"
                     ),
                     severity=DiagnosticSeverity.Error,
                     source=SOURCE,
@@ -3287,8 +3313,12 @@ class DiagnosticProvider:
 
     @staticmethod
     def _fmt_unit_value(value: float) -> str:
-        """Un valore di durata come si scrive nel messaggio: 480000 e non
-        480000.0, ma 0.0208 quando la banda in millisecondi lo richiede."""
+        """Un numero come si scrive in un messaggio, qualunque grandezza sia.
+
+        Durate, dB, gradi: la regola e' la stessa — 480000 e non 480000.0, ma
+        0.0208 quando il minimo di un campione in millisecondi lo richiede.
+        L'unita' la mette il chiamante, che e' l'unico a sapere quale sia.
+        """
         if abs(value - round(value)) < 1e-9:
             return str(int(round(value)))
         return f'{value:.4g}'

@@ -621,6 +621,9 @@ BAND_CEILING_CORPUS = [
     # (base, range) su `volume`, bounds [-120, 12] e range [0, 24]
     (-6, 24), (0, 12), (0, 12.5), (-120, 24), (6, 12), (5, 6), (-6, 18),
     (12, 0), (11.9, 0.05), (None, 24), (-6, None),
+    # sfora anche da centrata (11 + 12 = 23 > 12): il motore la rifiuta lo
+    # stesso, ma li' cambiare ancora non sarebbe la via d'uscita.
+    (11, 24),
     ([[0, -60], [10, 6]], 12), (6, [[0, 1], [10, 20]]),
     ([[0, -60], [10, 6]], [[0, 1], [10, 20]]),
     ([[0, -60], [10, -20]], 12),

@@ -67,6 +67,37 @@ def bridge():
     })
 
 
+def _bridge_con_default_grain_duration():
+    """Come la fixture `bridge`, ma con il default vero di `grain_duration`.
+
+    La fixture tiene tutti i default a 0.0, che sulla base assente rende il
+    conto insensibile all'unita'. Qui il default e' quello del motore — 0.05
+    **secondi**, qualunque `duration_unit` sia dichiarata — perche' e' la
+    condizione in cui la conversione della base si vede.
+    """
+    def spec(name, yaml_path, default=0.0):
+        return {'name': name, 'yaml_path': yaml_path, 'default': default,
+                'is_smart': True, 'exclusive_group': None,
+                'group_priority': 0, 'range_path': None,
+                'deviation_probability_key': None, 'is_internal': False}
+
+    def bounds(min_val, max_val):
+        return {'min_val': min_val, 'max_val': max_val, 'min_range': 0.0,
+                'max_range': 0.0, 'default_jitter': 0.0,
+                'variation_mode': 'additive'}
+
+    return SchemaBridge({
+        'specs': [
+            spec('grain_duration', 'grain.duration', default=0.05),
+            spec('grain_duration_range', 'grain.duration_range'),
+        ],
+        'bounds': {
+            'grain_duration': bounds(0.001, 10.0),
+            'grain_duration_range': bounds(0.0, 1.0),
+        },
+    })
+
+
 def make_context(context_type='key', current_text='',
                  parent_path=None, indent_level=2,
                  in_stream_element=True, current_key='',
@@ -406,6 +437,94 @@ class TestBandCeilingUnderAnchorMin:
         )
         msg = self._ceiling_errors(provider, yaml)[0].message
         assert '18' in msg and '12' in msg
+
+    def test_messaggio_promette_la_centrata_solo_quando_e_vero(self, bridge):
+        """`volume: -6` con `volume_range: 24` sta dentro da centrata
+        (-6 + 12 = 6 <= 12): li' cambiare ancora e' davvero la via d'uscita."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert 'centrata la stessa coppia starebbe dentro' in msg
+
+    def test_messaggio_non_promette_la_centrata_quando_sfora_anche_lei(self, bridge):
+        """`volume: 11` con `volume_range: 24`: da centrata la banda arriva a
+        23, sopra il tetto 12. Li' interviene il safety clamp invece del
+        rifiuto al parse — cambiare ancora non risolve, e prometterlo manda
+        l'utente a fare la modifica sbagliata."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: 11\n"
+            "    volume_range: 24\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert 'starebbe dentro' not in msg
+        assert 'clamp' in msg
+
+    # --- il messaggio parla l'unita' che l'utente ha scritto ---------------
+
+    def test_messaggio_in_millisecondi_riporta_i_numeri_scritti(self, bridge):
+        """9500 + 800 ms: il confronto si fa in secondi come il motore, ma il
+        messaggio non puo' rispondere con numeri che l'utente non ha mai
+        visto."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration: 9500\n"
+            "      duration_range: 800\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert '10300' in msg and '10000' in msg
+        assert 'millisecondi' in msg
+
+    def test_messaggio_in_campioni_riporta_i_numeri_scritti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: samples\n"
+            "      duration: 470000\n"
+            "      duration_range: 20000\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert '490000' in msg and '480000' in msg
+        assert 'campioni' in msg
+
+    def test_messaggio_in_secondi_resta_senza_etichetta(self, bridge):
+        """Senza `duration_unit` i numeri sono gia' quelli scritti."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration: 9.5\n"
+            "      duration_range: 0.8\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert 'millisecondi' not in msg and 'campioni' not in msg
+        assert '10.3' in msg
+
+    def test_base_dal_default_e_gia_in_secondi(self):
+        """Chiave assente: vale il default della spec, che il motore tiene in
+        secondi e non converte. Portarlo nell'unita' dichiarata (0.05 s = 50
+        ms) e non moltiplicarlo per il fattore come se fosse gia' in
+        millisecondi: li' varrebbe 0.05 ms, tre ordini di grandezza sotto, e
+        la banda 50 + 9990 = 10040 ms non risulterebbe sopra il tetto."""
+        provider = DiagnosticProvider(_bridge_con_default_grain_duration())
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration_range: 9990\n"
+        )
+        errors = self._ceiling_errors(provider, yaml)
+        assert len(errors) == 1
+        assert '10040' in errors[0].message
 
     def test_errore_ancorato_alla_riga_del_range(self, bridge):
         provider = DiagnosticProvider(bridge)
