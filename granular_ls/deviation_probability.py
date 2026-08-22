@@ -20,15 +20,20 @@ corpus perché il confronto non scada.
 
 Cosa resta fuori, deliberatamente:
 
-- **i corpi dove compare un'espressione matematica.** Il motore rifiuta le
-  stringhe (`InvalidParameterError`), ma il `Generator` valuta le espressioni
-  fra parentesi su tutto lo YAML prima che il gate le veda, **ricorrendo
-  dentro liste e dict**: `(50/2)` arriva come `25` tanto da scalare quanto
-  sepolta nella Y di un breakpoint. Distinguere l'espressione dal refuso
-  vorrebbe dire rifare `_eval_math_expressions`, quindi si tace — e si tace
-  sul corpo intero, perché il valore vero dipende da quell'espressione. Le
-  stringhe **senza** parentesi restano segnalate: quelle il motore le vede
-  come sono scritte.
+- **i corpi dove compare un'espressione matematica.** Il `Generator` valuta
+  le espressioni fra parentesi su tutto lo YAML prima che il gate le veda,
+  **ricorrendo dentro liste e dict**: `(50/2)` arriva come `25` tanto da
+  scalare quanto sepolta nella Y di un breakpoint, e `(abc)` non si valuta e
+  resta stringa. Prevedere quale delle due sopravviva vorrebbe dire rifare
+  `_eval_math_expressions`, quindi si tace — sul corpo intero, perché il
+  valore vero dipende da quell'espressione.
+
+  L'altra metà di quella funzione invece si riproduce: la conversione in
+  numero non pretende le parentesi (`"50"` arriva come `50`) ed è una
+  `try/except ValueError`. Quindi il corpo si normalizza con
+  `normalize_engine_values` prima di guardarlo, e le stringhe che restano
+  stringhe — `"abc"`, `""`, `"1e3"` — sono errori come per il motore, che su
+  quelle alza `InvalidParameterError`.
 - **i valori Y fuori da 0-100.** Il motore non li rifiuta: `150` è un
   `AlwaysGate` legittimo, non un errore di scrittura.
 - **i guard specifici di `grain.read_direction`** (percentuali del pattern in
@@ -50,6 +55,7 @@ from granular_ls.envelope_shapes import (
     is_loop_block,
     is_num,
     is_valid_point,
+    normalize_engine_values,
 )
 from granular_ls.time_distributions import (
     TIME_DISTRIBUTION_NAMES,
@@ -295,6 +301,16 @@ def _check_body(body: Any) -> Optional[DeviationProbabilityIssue]:
     # X di un punto sposta anche il punto accanto.
     if contains_math_expression(body):
         return None
+
+    # Le stringhe numeriche invece si convertono come fa il motore, così la
+    # forma si giudica sui valori che vedrà lui: `[[0, "50"]]` è una lista di
+    # breakpoint, non un corpo malformato.
+    body = normalize_engine_values(body)
+
+    if isinstance(body, str):
+        # Quel che resta stringa dopo la normalizzazione, il motore lo vede
+        # come è scritto e lo rifiuta (`InvalidParameterError`).
+        return _issue(body, FORM_HINT)
 
     if isinstance(body, dict):
         if 'points' not in body:

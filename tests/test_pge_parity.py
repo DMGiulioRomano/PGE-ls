@@ -513,9 +513,11 @@ def test_time_distribution_names_match(pge):
 # può sbagliarsi. Il corpus tiene insieme le forme valide, quelle malformate, e
 # i casi che distinguono questa chiave da `grain.read_direction`.
 #
-# Le stringhe restano fuori dal corpus di proposito: il motore le rifiuta, ma
-# il Generator valuta `(50/2)` a 25 su tutto lo YAML prima che il gate le veda,
-# e il LS non ha modo di distinguere l'espressione dal refuso.
+# Le stringhe che il `Generator` lascia intatte stanno qui: su quelle chiamare
+# `create_gate` direttamente e' fedele, perche' l'evaluazione non le tocca.
+# Quelle che invece trasforma — espressioni fra parentesi e stringhe numeriche
+# — stanno in `EVALUATED_STRING_CORPUS`, che le fa passare prima dalla
+# funzione vera del motore.
 
 DEVIATION_PROBABILITY_CORPUS = [
     # scalari e le cinque scritture che disattivano (o no) la deviazione
@@ -554,6 +556,10 @@ DEVIATION_PROBABILITY_CORPUS = [
     [[], 10.0, 4], [[[0, 50, 'bogus'], [100, 100]], 10.0, 4],
     [{'t': 0}], [{'t': 'x', 'v': 50}], [{'t': 0, 'v': 50, 'type': 'bogus'}],
     [[[0, 50], [10, 100]]],
+    # stringhe che l'evaluazione lascia intatte: il motore le vede come sono
+    # scritte e le rifiuta, quindi la decisione torna al mirror.
+    'abc', '', '1e3', 'true', '50%',
+    [[0, 'abc'], [10, 100]], {'points': [[0, 'abc']]},
     # i casi che questa chiave accetta e read_direction no: i guard di PGE #208
     # sono semantica del verso, non del formato envelope
     [[[0, 50], [150, 100]], 10.0, 4],
@@ -727,13 +733,16 @@ def test_band_ceiling_mirror_matches_engine(pge, base, mod_range, tmp_path,
 
 
 # =============================================================================
-# Le espressioni matematiche: la pipeline reale, non il solo gate
+# Le stringhe che il Generator trasforma: la pipeline reale, non il solo gate
 # =============================================================================
 #
 # `Generator._eval_math_expressions` gira su **tutto** lo YAML prima che
-# qualunque controller veda i valori, e ricorre dentro liste e dict: `(50/2)`
-# arriva come `25` tanto da scalare quanto sepolta nella Y di un breakpoint.
-# I due mirror lo sanno e tacciono sui corpi dove un'espressione compare.
+# qualunque controller veda i valori, e ricorre dentro liste e dict. Trasforma
+# due famiglie di stringhe: quelle con un'espressione fra parentesi (`(50/2)`
+# arriva come `25`) e quelle che `int`/`float` accettano anche senza parentesi
+# (`"50"` arriva come `50`), a qualunque profondita'. I due mirror la
+# rispecchiano in due modi: tacciono sulle prime, il cui esito non e'
+# prevedibile, e convertono le seconde come lui prima di guardare la forma.
 #
 # I corpus qui sopra non se ne accorgerebbero: interrogano `create_gate` e
 # `normalize_read_direction`, cioè il gradino **a valle** dell'evaluazione, e
@@ -821,10 +830,44 @@ def test_math_expression_pattern_matches_engine(pge):
     assert _MATH_EXPRESSION_RE.pattern == pattern
 
 
-# Corpi con un'espressione, nei posti dove il mirror prima non la vedeva.
+# Stringhe su cui si confronta la conversione, non la forma: quella coda della
+# funzione il mirror la riproduce invece di tacere, quindi deve dare lo stesso
+# risultato carattere per carattere.
+NUMERIC_STRING_CORPUS = [
+    '50', ' 50 ', '1.5', '.5', '-3', '0', '1_000',
+    'abc', '', '1e3', 'true', '50%', 'nan', '1,5', '+', '- 3',
+]
+
+
+@pytest.mark.parametrize('testo', NUMERIC_STRING_CORPUS,
+                         ids=lambda v: repr(v)[:20])
+def test_numeric_string_value_matches_engine(pge, testo):
+    """`numeric_string_value` decide come la coda di `_eval_math_expressions`.
+
+    E' la riga che separa la stringa che il motore vede da quella che gli
+    arriva come numero: sbagliarla in un verso segnala uno YAML che rende,
+    nell'altro tace su uno che non rende.
+    """
+    from granular_ls.envelope_shapes import numeric_string_value
+
+    evaluate, _ = _load_eval_math_expressions()
+    atteso = evaluate(testo)
+    ottenuto = numeric_string_value(testo)
+
+    if isinstance(atteso, str):
+        assert ottenuto is None, (
+            f"{testo!r}: il motore la lascia stringa, il mirror la converte a "
+            f"{ottenuto!r}")
+    else:
+        assert ottenuto == atteso, (
+            f"{testo!r}: il motore consegna {atteso!r}, il mirror {ottenuto!r}")
+
+
+# Corpi con un'espressione o una stringa numerica, nei posti dove il mirror
+# prima non le vedeva.
 # Ogni voce e' scelta perche' dopo l'evaluazione il motore la **accetta**: e'
 # lo YAML che rende e che il language server segnalava in rosso.
-MATH_EXPRESSION_CORPUS = [
+EVALUATED_STRING_CORPUS = [
     '(50/2)',
     [[0, '(50/2)'], [10, 100]],
     [['(5*2)', 50], [20, 100]],
@@ -837,6 +880,12 @@ MATH_EXPRESSION_CORPUS = [
     [[[0, 50], [100, 100]], 10.0, '(2*2)'],
     [{'t': 0, 'v': '(50/2)'}, {'t': 10, 'v': 100}],
     [[0, '(50/2)'], [[[0, 50], [100, 100]], 5.0, 2]],
+    # stringhe numeriche senza parentesi: la coda della funzione le converte
+    # lo stesso, e chiamare `create_gate` sul grezzo qui non sarebbe fedele.
+    '50', '1.5', '.5',
+    [[0, '50'], [10, '100']], [['0', 50], ['10', 100]],
+    {'points': [[0, '50'], [10, 100]]},
+    [[[0, '50'], [100, 100]], '10.0', '4'],
     # dentro il dict della distribuzione temporale: `_eval_math_expressions`
     # ricorre sui valori, quindi anche qui la stringa non e' il valore.
     [[[0, 50], [100, 100]], 10.0, 4, 'linear',
@@ -845,9 +894,9 @@ MATH_EXPRESSION_CORPUS = [
 ]
 
 
-@pytest.mark.parametrize('raw', MATH_EXPRESSION_CORPUS,
+@pytest.mark.parametrize('raw', EVALUATED_STRING_CORPUS,
                          ids=lambda v: repr(v)[:60])
-def test_deviation_probability_mirror_tace_sulle_espressioni(pge, raw,
+def test_deviation_probability_mirror_non_segnala_cio_che_il_motore_accetta(pge, raw,
                                                              tmp_path,
                                                              monkeypatch):
     """Il motore costruisce il gate dal corpo valutato: il mirror deve tacere."""
@@ -881,9 +930,12 @@ def test_deviation_probability_mirror_tace_sulle_espressioni(pge, raw,
 
 
 # Gli stessi posti, per il verso di lettura: `(0-1)` e' -1, che e' un verso.
-READ_DIRECTION_MATH_CORPUS = [
+READ_DIRECTION_EVALUATED_CORPUS = [
     '(0-1)',
     '(1)',
+    '1', '-1',
+    [[0, '1'], [10, '-1']], [['0', 1], ['10', -1]],
+    {'points': [[0, '1'], [10, '-1']]},
     [[0, '(0-1)'], [10, 1]],
     [['(5*2)', 1], [20, -1]],
     {'points': [[0, '(0-1)'], [10, 1]]},
@@ -894,9 +946,9 @@ READ_DIRECTION_MATH_CORPUS = [
 ]
 
 
-@pytest.mark.parametrize('raw', READ_DIRECTION_MATH_CORPUS,
+@pytest.mark.parametrize('raw', READ_DIRECTION_EVALUATED_CORPUS,
                          ids=lambda v: repr(v)[:60])
-def test_read_direction_mirror_tace_sulle_espressioni(pge, raw):
+def test_read_direction_mirror_non_segnala_cio_che_il_motore_accetta(pge, raw):
     from granular_ls.read_direction import check_read_direction
     from granular_ls.schema_bridge import _import_pge_module
 

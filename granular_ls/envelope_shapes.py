@@ -41,6 +41,52 @@ def is_math_expression(value) -> bool:
             and _MATH_EXPRESSION_RE.search(value) is not None)
 
 
+def numeric_string_value(value):
+    """Il numero in cui il Generator converte questa stringa, o None.
+
+    Mirror della **coda** di `_eval_math_expressions`: dopo la sostituzione
+    delle espressioni il testo viene convertito con `float(...)` se contiene
+    un punto e `int(...)` altrimenti, e resta stringa solo se la conversione
+    alza `ValueError`. La conversione non pretende le parentesi: `"50"` arriva
+    come `50` e `"1.5"` come `1.5`, mentre `"1e3"` e `"abc"` restano stringhe.
+
+    Questa meta' della funzione e' riproducibile esattamente — e' una
+    `try/except` — a differenza dell'`eval` fra parentesi, il cui esito non e'
+    prevedibile. Da qui la divisione del lavoro: sulle espressioni si tace,
+    sulle stringhe numeriche si converte come il motore e poi si decide.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return float(value) if '.' in value else int(value)
+    except ValueError:
+        return None
+
+
+def normalize_engine_values(obj):
+    """Il corpo come il Generator lo consegna, per la parte decidibile.
+
+    Converte in numero, a qualunque profondita', le stringhe che
+    `_eval_math_expressions` convertirebbe; lascia intatto tutto il resto,
+    espressioni comprese — quelle si gestiscono tacendo, non normalizzando.
+
+    Serve prima di ogni controllo di forma: senza, `[[0, "1"], [10, "-1"]]`
+    non sembra una lista di breakpoint, mentre il motore ci legge
+    `[[0, 1], [10, -1]]` e la costruisce.
+
+    Sui dict si scende nei soli valori, come il motore: le chiavi restano
+    quelle scritte.
+    """
+    if isinstance(obj, str):
+        numero = numeric_string_value(obj)
+        return obj if numero is None else numero
+    if isinstance(obj, dict):
+        return {k: normalize_engine_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [normalize_engine_values(item) for item in obj]
+    return obj
+
+
 def contains_math_expression(obj) -> bool:
     """True se una stringa da valutare compare in `obj`, a qualunque profondita'.
 

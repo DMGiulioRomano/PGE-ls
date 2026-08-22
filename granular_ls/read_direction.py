@@ -37,8 +37,13 @@ Qui se ne verifica il segno, decidibile perché quell'offset non è mai negativo
 E resta fuori ogni corpo dove compare un'espressione matematica: il `Generator`
 valuta `(...)` su tutto lo YAML — ricorrendo dentro liste e dict — prima che il
 controller veda i valori, quindi `(0-1)` arriva come `-1` e la stringa scritta
-non è il valore. Segnalarla sarebbe un falso positivo su YAML che rende. Le
-stringhe senza parentesi restano segnalate: quelle il motore le vede come sono.
+non è il valore. Segnalarla sarebbe un falso positivo su YAML che rende.
+
+La conversione in numero invece non pretende le parentesi (`"1"` arriva come
+`1`, un verso legittimo) ed è una `try/except ValueError`, cioè riproducibile:
+il valore si normalizza con `normalize_engine_values` prima di guardarlo. Le
+stringhe che restano stringhe — `"abc"`, `""`, `"1e3"` — sono errori come per
+il motore.
 """
 
 from dataclasses import dataclass
@@ -49,6 +54,7 @@ from granular_ls.envelope_shapes import (
     is_3tuple_breakpoint as _is_3tuple_breakpoint,
     is_bp_group as _is_bp_group,
     is_loop_block as _is_compact_format,
+    normalize_engine_values,
 )
 from granular_ls.time_distributions import (
     TIME_DISTRIBUTION_NAMES as _TIME_DISTRIBUTION_NAMES,
@@ -447,6 +453,10 @@ def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
         # legge il valore, si legge la sua scrittura. Il silenzio è sul corpo
         # intero, perché il verso vero dipende da quell'espressione.
         return None
+
+    # Le stringhe numeriche invece si convertono come fa il motore: `"1"` è
+    # un verso, e `[[0, "1"], [10, "-1"]]` è una lista di breakpoint.
+    raw = normalize_engine_values(raw)
 
     if raw is None:
         # Chiave vuota: a differenza di `grain.reverse`, qui è un errore.

@@ -415,3 +415,49 @@ class TestEspressioniMatematiche:
     def test_interp_sbagliato_resta_un_errore(self):
         """`linear` non ha parentesi: il motore lo vede come lo si è scritto."""
         assert not accetta([[[0, 1], [10, -1]], 'linear'])
+
+
+# =============================================================================
+# 11. Le stringhe che il Generator converte in numero, senza parentesi
+# =============================================================================
+
+class TestStringheNumeriche:
+    """
+    La coda di `_eval_math_expressions` converte in numero **ogni** stringa
+    che `int`/`float` accettano, non solo quelle con le parentesi: `"1"`
+    arriva come `1`, che e' un verso legittimo. Trattare ogni stringa come
+    tale segnalerebbe uno YAML che rende.
+
+    Quella meta' della funzione e' riproducibile esattamente — e' una
+    `try/except ValueError` — a differenza dell'`eval` fra parentesi. Quindi
+    qui non si tace: si converte come il motore e poi si decide.
+    """
+
+    def test_scalare_numerico_fra_virgolette(self):
+        assert accetta('1')
+
+    def test_scalare_numerico_negativo(self):
+        assert accetta('-1')
+
+    def test_scalare_numerico_fuori_dominio_resta_un_errore(self):
+        """`"0.5"` diventa `0.5`, che il motore rifiuta come lo rifiuta nudo."""
+        assert not accetta('0.5')
+
+    def test_stringa_non_numerica_resta_un_errore(self):
+        assert not accetta('abc')
+
+    def test_stringa_vuota_resta_un_errore(self):
+        assert not accetta('')
+
+    def test_notazione_esponenziale_non_si_converte(self):
+        """`int('1e3')` alza ValueError: il motore la lascia stringa."""
+        assert not accetta('1e3')
+
+    def test_numerica_annidata_nei_punti(self):
+        assert accetta([[0, '1'], [10, '-1']])
+
+    def test_non_numerica_annidata_resta_un_errore(self):
+        assert not accetta([[0, 'abc'], [10, 1]])
+
+    def test_numerica_nella_x(self):
+        assert accetta([['0', 1], ['10', -1]])

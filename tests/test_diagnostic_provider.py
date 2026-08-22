@@ -3225,6 +3225,76 @@ class TestDeviationProbabilityEnvelopeBody:
         assert len(errors) == 1
         assert errors[0].range.start.line == 5
 
+    # --- le stringhe: quelle che restano tali, e quelle che diventano numeri
+
+    def test_stringa_non_numerica_e_errore(self, bridge):
+        """`GateFactory._parse_raw_value` non trova ne' numero ne' struttura e
+        alza `InvalidParameterError`. Il docstring del modulo lo prometteva
+        gia'; mancava il ramo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: "abc"\n'
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_stringa_non_numerica_nella_forma_globale(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: abc\n")
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_stringa_vuota_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: ""\n'
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_stringa_numerica_non_e_errore(self, bridge):
+        """La coda di `_eval_math_expressions` converte anche senza parentesi:
+        `"50"` arriva al gate come `50`. Segnalarla sarebbe il falso positivo
+        che il ramo, preso alla lettera, avrebbe introdotto."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: "50"\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_stringa_numerica_con_decimali(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: "1.5"\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_stringa_numerica_annidata_nei_punti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: [[0, "50"], [10, "100"]]\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_stringa_non_numerica_annidata_resta_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: [[0, "abc"], [10, 100]]\n'
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_notazione_esponenziale_resta_un_errore(self, bridge):
+        """`int('1e3')` alza ValueError: il motore la lascia stringa."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: "1e3"\n'
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
     # --- la chiave scritta sulla riga del trattino -------------------------
 
     def test_chiave_sulla_riga_del_trattino_viene_letta(self, bridge):
