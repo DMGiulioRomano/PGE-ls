@@ -3170,16 +3170,46 @@ class DiagnosticProvider:
 
     @staticmethod
     def _envelope_peak(raw) -> Optional[float]:
-        """Il breakpoint più alto di un envelope già letto come struttura."""
+        """Il breakpoint più alto di un envelope già letto come struttura.
+
+        Il motore prende `max(y)` sui breakpoint **espansi**, quindi le
+        macro-forme vanno aperte invece che lette di piatto: in un ciclo
+        compatto `[pattern, end_time, n_reps]` e in un BP group
+        `[points, interp]` le Y stanno dentro l'elemento 0. Leggere
+        l'elemento 1 come Y darebbe l'`end_time` del ciclo — un numero che
+        non è una Y e che sotto `range_anchor: min` fa scattare un Error su
+        uno YAML che rende, cioè il modo peggiore di sbagliarsi.
+
+        Stessa apertura che `_extract_envelope_y_values` fa sul testo; qui la
+        struttura è già parsata, quindi si riusano le forme di
+        `envelope_shapes` invece di riconoscerle di nuovo.
+        """
         if isinstance(raw, dict):
             raw = raw.get('points')
         if not isinstance(raw, list):
             return None
-        ys = []
+
+        def _is_num(v) -> bool:
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        def _ys_of_pattern(points) -> List[float]:
+            """Le Y dei punti piatti dentro una macro-forma."""
+            return [float(pt[1]) for pt in points
+                    if isinstance(pt, list) and len(pt) >= 2 and _is_num(pt[1])]
+
+        # Macro-forma come corpo intero: le Y stanno nel suo elemento 0.
+        if is_loop_block(raw) or is_bp_group(raw):
+            ys = _ys_of_pattern(raw[0])
+            return max(ys) if ys else None
+
+        ys: List[float] = []
         for item in raw:
-            if (isinstance(item, list) and len(item) >= 2
-                    and isinstance(item[1], (int, float))
-                    and not isinstance(item[1], bool)):
+            # Le macro-forme si riconoscono per prime: un ciclo compatto ha
+            # `item[1]` numerico e cadrebbe fra i breakpoint piatti.
+            if is_loop_block(item) or is_bp_group(item):
+                ys.extend(_ys_of_pattern(item[0]))
+            elif (isinstance(item, list) and len(item) >= 2
+                    and _is_num(item[0]) and _is_num(item[1])):
                 ys.append(float(item[1]))
         return max(ys) if ys else None
 

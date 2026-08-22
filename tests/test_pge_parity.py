@@ -627,6 +627,14 @@ BAND_CEILING_CORPUS = [
     ([[0, -60], [10, 6]], 12), (6, [[0, 1], [10, 20]]),
     ([[0, -60], [10, 6]], [[0, 1], [10, 20]]),
     ([[0, -60], [10, -20]], 12),
+    # macro-forme: le Y stanno dentro l'elemento 0, e l'elemento 1 e'
+    # l'`end_time` del ciclo o l'interp del gruppo. Il motore espande e prende
+    # il picco vero; leggere l'elemento 1 come Y darebbe 10.0 al posto di 0.
+    ([[[0, 0], [100, 0]], 10.0, 2], 4),
+    ([[0, -60], [[[0, 0], [100, 0]], 10.0, 2]], 4),
+    ([[0, -60], [[[0, 9], [100, 9]], 10.0, 2]], 4),
+    ([[[0, 0], [10, 0]], 'linear'], 4),
+    ([[0, -60], [[[0, 0], [10, 0]], 'linear']], 4),
 ]
 
 

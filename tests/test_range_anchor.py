@@ -426,6 +426,64 @@ class TestBandCeilingUnderAnchorMin:
         )
         assert self._ceiling_errors(provider, yaml) == []
 
+    # --- le macro-forme dentro una lista mista -----------------------------
+
+    def test_loop_block_in_lista_mista_non_scambia_end_time_per_una_y(self, bridge):
+        """Il picco si stima dai breakpoint, e in un ciclo compatto i
+        breakpoint stanno in `item[0]`: `item[1]` e' l'`end_time`.
+
+        `[[[0, 0], [100, 0]], 10.0, 2]` ha picco 0, non 10: il motore espande
+        il ciclo e ne prende le Y, e con `volume_range: 4` la banda arriva a 4,
+        sotto il tetto 12. Leggere l'`end_time` come Y faceva scattare un
+        Error su uno YAML che rende."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume:\n"
+            "      - [0, -60]\n"
+            "      - [[[0, 0], [100, 0]], 10.0, 2]\n"
+            "    volume_range: 4\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_loop_block_in_lista_mista_segnala_sul_picco_vero(self, bridge):
+        """Con le Y del pattern davvero alte l'errore ci vuole: e' il picco
+        del ciclo, non il suo `end_time`, a portare la banda fuori tetto."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume:\n"
+            "      - [0, -60]\n"
+            "      - [[[0, 9], [100, 9]], 10.0, 2]\n"
+            "    volume_range: 4\n"
+        )
+        errors = self._ceiling_errors(provider, yaml)
+        assert len(errors) == 1
+        assert '13' in errors[0].message
+
+    def test_bp_group_in_lista_mista_scende_nei_punti(self, bridge):
+        """Stessa forma, stesso rischio: in `[points, interp]` la Y sta dentro
+        `points`, e `item[1]` e' la stringa dell'interpolazione."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume:\n"
+            "      - [0, -60]\n"
+            "      - [[[0, 0], [10, 0]], 'linear']\n"
+            "    volume_range: 4\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_ciclo_compatto_come_corpo_intero(self, bridge):
+        """Non solo dentro una lista mista: il ciclo puo' essere il corpo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: [[[0, 0], [100, 0]], 10.0, 2]\n"
+            "    volume_range: 4\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
     # --- messaggio e ancoraggio -------------------------------------------
 
     def test_messaggio_nomina_la_somma_e_il_tetto(self, bridge):
