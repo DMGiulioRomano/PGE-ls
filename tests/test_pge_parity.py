@@ -566,6 +566,11 @@ DEVIATION_PROBABILITY_CORPUS = [
     [[[100, 50], [0, 100]], 10.0, 4],
     [[[0, 50], [100, 100]], 10.0, True],
     [[[0, 50], [100, 100]], True, 4],
+    # ...e i due che il motore RIFIUTA, perche' `false` vale `0`: sono
+    # esattamente i casi che i guard sul segno e sull'arita' esistono per
+    # prendere. Il sondaggio aveva misurato un bool e generalizzato a due.
+    [[[0, 50], [100, 100]], 10.0, False],
+    [[[0, 50], [100, 100]], False, 4],
     [[0, -50], [10, 500]],
     # distribuzione temporale del ciclo
     [[[0, 50], [100, 100]], 10.0, 4, 'linear', 'exp'],

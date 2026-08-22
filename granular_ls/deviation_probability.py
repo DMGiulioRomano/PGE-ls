@@ -213,9 +213,16 @@ def _check_compact(compact: list) -> Optional[DeviationProbabilityIssue]:
     """Formato compatto `[pattern, end_time, n_reps, interp?, dist?, wrap?]`.
 
     Di `end_time` e `n_reps` si verifica quanto `is_loop_block` non garantisce
-    già: il segno e l'arità. Che `n_reps` sia un `int` e `end_time` un numero
-    lo garantisce la forma, altrimenti il corpo non sarebbe un ciclo e
-    cadrebbe fra gli elementi di una lista qualsiasi.
+    già: il segno e l'arità. La forma garantisce solo che siano
+    `isinstance(..., (int, float))` e `isinstance(..., int)` — che è quel che
+    fa il motore, e i bool lo soddisfano per sottoclasse. Il confronto va
+    quindi fatto **sul valore**, senza escluderli: `true` vale `1` e passa
+    entrambi i guard, `false` vale `0` ed è esattamente il caso che i guard
+    esistono per prendere.
+
+    Da qui la differenza col fratello `read_direction._check_compact`, che i
+    bool li rifiuta: là sono guard sul verso (PGE #208), non sul formato
+    envelope, e il motore li rifiuta davvero.
 
     Resta fuori `end_time <= time_offset`, che dipende dall'offset accumulato
     dagli elementi che precedono il ciclo in una lista mista: verificarlo
@@ -228,10 +235,10 @@ def _check_compact(compact: list) -> Optional[DeviationProbabilityIssue]:
     if issue is not None:
         return issue
 
-    if is_num(end_time) and end_time <= 0:
+    if end_time <= 0:
         return _issue(end_time, END_TIME_HINT)
 
-    if is_num(n_reps) and n_reps < 1:
+    if n_reps < 1:
         return _issue(n_reps, N_REPS_HINT)
 
     if len(compact) >= 4:

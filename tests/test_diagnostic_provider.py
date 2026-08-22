@@ -3318,6 +3318,36 @@ class TestDeviationProbabilityEnvelopeBody:
         )
         assert self._errors(provider, yaml) == []
 
+    # --- ma `false` vale `0` (review PR #48, rilievo 5) --------------------
+
+    def test_n_reps_false_e_un_errore(self, bridge):
+        """`true` vale `1` e passa; `false` vale `0`, che è esattamente il
+        caso che il guard sull'arità esiste per prendere."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, false]\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_end_time_false_e_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], false, 4]\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_end_time_booleano_vero_resta_valido(self, bridge):
+        """La regressione dall'altro lato: `true` è `1`, un istante di fine
+        positivo, e il motore lo accetta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], true, 4]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
     def test_stringa_non_segnalata(self, bridge):
         """`(50/2)` e' una stringa che il Generator valuta a 25 prima del gate:
         distinguerla da un refuso vorrebbe dire rifare _eval_math_expressions."""
