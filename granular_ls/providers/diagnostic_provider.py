@@ -127,6 +127,36 @@ _GRAIN_DURATION_UNIT_LABELS = {
     'milliseconds': 'millisecondi',
 }
 
+# Le scritture del null esplicito. YAML ne ammette tre parole più la tilde, e
+# solo con queste maiuscole: `nUll` è la stringa "nUll".
+_YAML_NULLS = frozenset(('null', 'Null', 'NULL', '~'))
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Il valore di una riga YAML senza il commento inline.
+
+    Un `#` apre un commento solo fuori dalle virgolette e preceduto da uno
+    spazio (o a inizio valore): `milliseconds  # esplicito` vale
+    `milliseconds`, mentre `"a#b"` resta intero e `50#x` pure — lì il
+    cancelletto è dentro il token, come lo legge YAML.
+
+    Serve a chi legge il valore **grezzo** dalla riga invece di passare da
+    `_safe_yaml`: senza questo il commento finisce dentro il valore, e da lì
+    dentro i messaggi e i confronti.
+    """
+    quote = None
+    for i, ch in enumerate(value):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in '"\'':
+            quote = ch
+            continue
+        if ch == '#' and (i == 0 or value[i - 1] in ' \t'):
+            return value[:i].rstrip()
+    return value
+
 
 class DiagnosticProvider:
     """
@@ -2797,7 +2827,12 @@ class DiagnosticProvider:
                 if not m:
                     n += 1
                     continue
-                key, val = m.group(1), m.group(2).strip()
+                # Il valore si legge grezzo dalla riga, quindi il commento
+                # inline va tolto qui: sotto finirebbe dentro l'unità (che
+                # smetterebbe di essere riconosciuta) e dentro lo scalare
+                # della durata (che smetterebbe di essere un numero).
+                key = m.group(1)
+                val = _strip_inline_comment(m.group(2).strip()).strip()
 
                 if key == 'read_direction':
                     info['read_direction_line'] = n
@@ -2812,8 +2847,11 @@ class DiagnosticProvider:
                     if key == 'duration':
                         info['duration_line'] = n
                         # Valore presente: inline (scalare/lista) o envelope
-                        # block-style sulle righe seguenti (indent > 6).
-                        if val:
+                        # block-style sulle righe seguenti (indent > 6). Il
+                        # null esplicito non è una durata dichiarata: il
+                        # motore fa `grain.get('duration') is None` e alza
+                        # MissingFieldError come sulla chiave assente.
+                        if val and val not in _YAML_NULLS:
                             info['has_duration'] = True
                             if not val.startswith('['):
                                 info['duration_scalar'] = val

@@ -2990,6 +2990,155 @@ class TestGrainDurationUnitMilliseconds:
 
 
 # =============================================================================
+# Il commento inline non e' parte del valore (review PR #48, rilievi 1 e 7)
+# =============================================================================
+
+
+class TestGrainCommentoInlineENull:
+    """
+    `_scan_grain_blocks` legge il valore **grezzo** dalla riga, non da
+    `_safe_yaml`: il commento inline ci restava dentro.
+
+    Costava due falsi positivi in cascata su una riga sola — l'unita' non
+    veniva riconosciuta, e con l'unita' saltava anche la soppressione dei
+    bound generici, cioe' proprio il falso positivo che quella soppressione
+    esiste per evitare. La stessa lettura grezza toglieva dal controllo lo
+    scalare della durata.
+
+    Sulla stessa riga sta il null esplicito: per il motore
+    (`grain.get('duration') is None`) non e' una durata dichiarata piu' di
+    quanto lo sia la chiave assente.
+    """
+
+    @staticmethod
+    def _grain(body: str) -> str:
+        return _stream_yaml("    grain:\n" + body)
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    # --- 1. il commento non entra nell'unita' -----------------------------
+
+    def test_commento_dopo_unita_valida_non_produce_errori(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds  # unita' esplicita\n"
+            "      duration: 50\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_commento_dopo_seconds_non_produce_errori(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: seconds  # esplicito\n"
+            "      duration: 0.05\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_soppressione_dei_bound_generici_scatta_col_commento(self, bridge):
+        """Il secondo Error della catena: `50` millisecondi misurati in
+        secondi. Senza unita' riconosciuta la soppressione non scattava."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds  # unita' esplicita\n"
+            "      duration: 50\n"
+        )
+        assert not any('fuori range' in e.message
+                       for e in self._errors(provider, yaml))
+
+    def test_unita_ignota_col_commento_resta_un_errore(self, bridge):
+        """Il commento sparisce dal valore, non il controllo sul valore."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: frames  # boh\n"
+            "      duration: 480\n"
+        )
+        msgs = [e.message for e in self._errors(provider, yaml)
+                if 'duration_unit' in e.message]
+        assert len(msgs) == 1
+        assert '`frames`' in msgs[0] and '#' not in msgs[0]
+
+    # --- 2. il commento non entra nello scalare della durata --------------
+
+    def test_durata_fuori_tetto_col_commento_resta_segnalata(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain("      duration: 50000  # oltre il tetto\n")
+        assert any('grain.duration' in e.message
+                   for e in self._errors(provider, yaml))
+
+    def test_durata_fuori_tetto_nellunita_dichiarata_col_commento(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds  # ms\n"
+            "      duration: 50000  # oltre il tetto\n"
+        )
+        assert any('millisecondi' in e.message
+                   for e in self._errors(provider, yaml))
+
+    # --- 3. il cancelletto che non apre un commento ------------------------
+
+    def test_cancelletto_dentro_le_virgolette_non_e_un_commento(self, bridge):
+        """`"a#b"` e' il valore intero: resta un'unita' ignota, e il messaggio
+        la riporta com'e' scritta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            '      duration_unit: "a#b"\n'
+            "      duration: 480\n"
+        )
+        msgs = [e.message for e in self._errors(provider, yaml)
+                if 'duration_unit' in e.message]
+        assert len(msgs) == 1 and 'a#b' in msgs[0]
+
+    def test_helper_riconosce_solo_i_commenti_veri(self):
+        """La regola sta nell'helper, e li' si verifica per esteso: YAML apre
+        un commento solo su un `#` fuori dalle virgolette e preceduto da uno
+        spazio."""
+        from granular_ls.providers.diagnostic_provider import (
+            _strip_inline_comment)
+
+        assert _strip_inline_comment('milliseconds  # nota') == 'milliseconds'
+        assert _strip_inline_comment('50 # nota') == '50'
+        assert _strip_inline_comment('# tutto commento') == ''
+        # Nessuno di questi cancelletti apre un commento.
+        assert _strip_inline_comment('50#x') == '50#x'
+        assert _strip_inline_comment('"a # b"') == '"a # b"'
+        assert _strip_inline_comment("'a # b'") == "'a # b'"
+        assert _strip_inline_comment('"a" # b') == '"a"'
+        assert _strip_inline_comment('milliseconds') == 'milliseconds'
+
+    # --- 4. il null esplicito non e' una durata dichiarata ------------------
+
+    def test_duration_null_con_unita_non_secondi_e_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: null\n"
+        )
+        assert any('esplicita' in e.message
+                   for e in self._errors(provider, yaml))
+
+    def test_duration_tilde_con_unita_non_secondi_e_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: samples\n"
+            "      duration: ~\n"
+        )
+        assert any('esplicita' in e.message
+                   for e in self._errors(provider, yaml))
+
+    def test_duration_scritta_resta_una_durata(self, bridge):
+        """La regressione: `null` non deve rendere sospetta ogni durata."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+        )
+        assert not any('esplicita' in e.message
+                       for e in self._errors(provider, yaml))
+
+
+# =============================================================================
 # deviation_probability: corpo che non si costruisce come envelope (PGE #209)
 # =============================================================================
 
