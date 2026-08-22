@@ -1059,3 +1059,103 @@ def test_il_silenzio_copre_anche_le_espressioni_che_il_motore_rifiuta(pge):
     assert evaluate('(abc)') == '(abc)'
     assert check_envelope_body([[0, '(abc)'], [10, 100]]) is None
     assert check_read_direction([[0, '(abc)'], [10, 1]]) is None
+
+
+# =============================================================================
+# `pointer.start` non e' un numero (review PR #48, rilievo 6)
+# =============================================================================
+#
+# Il guard del motore e' `not isinstance(self.start, (int, float))`
+# (`PointerController._init_params`): qualunque cosa non sia un numero, non le
+# sole strutture. Fra il testo e quel guard sta pero' il `Generator`, quindi la
+# parita' si fa sul valore **valutato**, com'e' per gli altri due mirror.
+
+POINTER_START_CORPUS = [
+    'abc', '"1e3"', '"0.5"', '"(10/2)"', '"1"', '0.5', '-3', 'true', 'null',
+    '', '[[0, 0], [10, 1]]', '{points: [[0, 0]]}', '[0, 1]',
+]
+
+
+def _pointer_start_engine_accetta(valore) -> bool:
+    """Il motore costruisce un PointerController con questo `start`?"""
+    from granular_ls.schema_bridge import _import_pge_module
+
+    PointerController = _import_pge_module(
+        'controllers.pointer_controller').PointerController
+    stream_config = _import_pge_module('core.stream_config')
+    contesto = stream_config.StreamContext.from_yaml(
+        {'stream_id': 's1', 'sample': 'f.wav', 'duration': 10.0, 'onset': 0.0},
+        sample_dur_sec=10.0,
+    )
+    try:
+        PointerController({'start': valore},
+                          stream_config.StreamConfig(context=contesto))
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.parametrize('scritto', POINTER_START_CORPUS,
+                         ids=lambda v: repr(v)[:24])
+def test_pointer_start_mirror_matches_engine(pge, scritto, tmp_path,
+                                             monkeypatch):
+    import yaml as _yaml
+
+    from granular_ls.schema_bridge import SchemaBridge
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+
+    try:
+        _pointer_start_engine_accetta(0.0)
+    except ImportError:
+        pytest.skip("PointerController non importabile senza numpy/soundfile")
+
+    monkeypatch.chdir(tmp_path)
+    evaluate, _ = _load_eval_math_expressions()
+    valutato = evaluate(_yaml.safe_load(f'v: {scritto}')['v'])
+    motore_accetta = _pointer_start_engine_accetta(valutato)
+
+    documento = (
+        "streams:\n"
+        "  - stream_id: s1\n"
+        "    sample: f.wav\n"
+        "    duration: 10.0\n"
+        "    pointer:\n"
+        f"      start: {scritto}\n"
+    )
+    provider = DiagnosticProvider(SchemaBridge.from_python_path(PGE_SRC))
+    ls_segnala = any('pointer.start' in d.message
+                     for d in provider.get_diagnostics(documento))
+
+    assert ls_segnala == (not motore_accetta), (
+        f"Drift su `start: {scritto}`: il Generator lo valuta a "
+        f"{valutato!r}, il motore {'accetta' if motore_accetta else 'rifiuta'}, "
+        f"il LS {'segnala' if ls_segnala else 'tace'}"
+    )
+
+
+def test_pointer_start_guard_del_motore_e_ancora_isinstance(pge):
+    """La riga che il mirror insegue, letta dal sorgente.
+
+    Il corpus qui sopra salta dove `numpy`/`soundfile` non ci sono — cioe'
+    nella CI del language server. Questo controllo no: se il motore stringe o
+    allarga il guard, la forma cambia qui prima che altrove.
+    """
+    import re
+    from pathlib import Path
+
+    sorgente = None
+    for candidato in ('pge/controllers/pointer_controller.py',
+                      'controllers/pointer_controller.py'):
+        percorso = Path(PGE_SRC) / candidato
+        if percorso.exists():
+            sorgente = percorso.read_text()
+            break
+    if sorgente is None:
+        pytest.skip("pointer_controller non trovato in questo checkout")
+
+    assert re.search(
+        r'if not isinstance\(\s*self\.start\s*,\s*\(\s*int\s*,\s*float\s*\)\s*\)',
+        sorgente,
+    ), ("il guard di pointer.start non e' piu' `not isinstance(self.start, "
+        "(int, float))`: il mirror in _check_pointer_start_envelope va "
+        "riallineato")

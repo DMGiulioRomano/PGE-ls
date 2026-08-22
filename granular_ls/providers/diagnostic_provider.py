@@ -38,10 +38,12 @@ from lsprotocol.types import (
 
 from granular_ls.envelope_shapes import (
     VALID_INTERP_TYPES,
+    contains_math_expression,
     is_bp_group,
     is_bp_group_candidate,
     is_loop_block,
     is_valid_point,
+    normalize_engine_values,
 )
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.voice_strategies import (
@@ -2578,11 +2580,20 @@ class DiagnosticProvider:
         "con `loop_start` come envelope."
     )
 
+    # Per quel che non e' una struttura il motore non ha un hint suo: dice
+    # solo che il valore non e' un numero, ed e' quello che serve sapere.
+    _POINTER_START_SCALAR_HINT = (
+        "e' un valore scalare: il motore pretende un numero "
+        "(`if not isinstance(self.start, (int, float))`). Se non ti serve, "
+        "ometti la chiave: il default e' 0.0 (o loop_start, con un loop "
+        "attivo)."
+    )
+
     def _check_pointer_start_envelope(
         self, lines: List[str], key_line: int, block_end: int,
     ) -> Optional[Diagnostic]:
         """
-        Segnala `pointer.start` scritto come envelope (PGE #199, PR #200).
+        Segnala `pointer.start` che non e' un numero (PGE #199, PR #200).
 
         La spec dichiara `pointer_start` con `is_smart=False`: il valore non
         diventa mai un `Parameter`, resta grezzo, e `calculate` lo somma alla
@@ -2591,22 +2602,40 @@ class DiagnosticProvider:
         `TypeError` dentro la generazione dei grani, dove non c'era piu' modo
         di dire all'utente cosa avesse scritto.
 
-        Si segnalano le **strutture** — lista di breakpoint, formato compatto,
-        BP group, dict con `points` — e non ogni valore non numerico. Una
-        stringa puo' essere legittima: il Generator valuta le espressioni fra
-        parentesi (`(10/2)` → 5.0) su tutto lo YAML prima che il
-        PointerController veda il valore.
+        Il guard del motore e' `not isinstance(self.start, (int, float))`:
+        **qualunque cosa** non sia un numero, non le sole strutture. I bool ci
+        passano per sottoclasse, e qui pure.
 
-        Ritorna None per la chiave vuota (materia di _check_missing_values) e
-        per il frammento non interpretabile, che e' il documento a meta'
-        scrittura.
+        Fra il testo e quel guard sta pero' il `Generator`, quindi la stringa
+        si giudica come lui la consegna, con la stessa divisione del lavoro di
+        `read_direction` e `deviation_probability`: su un'espressione fra
+        parentesi si tace — l'esito non e' prevedibile senza rifare l'`eval` —
+        e per il resto si converte con `normalize_engine_values`. Quel che
+        sopravvive alla normalizzazione e' esattamente quel che il motore
+        vede: `"0.5"` e' `0.5` e rende, `"1e3"` resta stringa e viene
+        rifiutata.
+
+        La chiave vuota e' compresa: `pointer.start` non ha bounds nella spec
+        (`min_val` None), quindi non entra fra i parametri numerici di
+        `_check_missing_values` e nessuno la guardava — mentre il motore su
+        `None` alza l'errore come su qualunque altro non-numero.
+
+        Ritorna None per il frammento non interpretabile, che e' il documento
+        a meta' scrittura.
         """
         found, raw = self._read_key_value(lines, key_line, block_end)
-        if not found or not isinstance(raw, (list, dict)):
+        if not found:
             return None
+        if contains_math_expression(raw):
+            return None
+        valore = normalize_engine_values(raw)
+        if isinstance(valore, (int, float)):
+            return None
+        hint = (self._POINTER_START_HINT if isinstance(raw, (list, dict))
+                else self._POINTER_START_SCALAR_HINT)
         return Diagnostic(
             range=self._line_range(key_line),
-            message=f"'pointer.start' {self._POINTER_START_HINT}",
+            message=f"'pointer.start' {hint}",
             severity=DiagnosticSeverity.Error,
             source=SOURCE,
         )

@@ -2761,11 +2761,56 @@ class TestPointerStartEnvelope:
         yaml = self._pointer("      start: (10/2)\n")
         assert self._start_errors(provider, yaml) == []
 
-    def test_chiave_vuota_non_segnalata_qui(self, bridge):
-        """`start:` senza valore e' materia di _check_missing_values."""
+    def test_stringa_numerica_non_segnalata(self, bridge):
+        """`"0.5"` il Generator la converte in numero senza bisogno di
+        parentesi: il PointerController vede `0.5` e lo accetta."""
+        provider = DiagnosticProvider(bridge)
+        for scritto in ('"0.5"', '"1"', "'-3'"):
+            yaml = self._pointer(f"      start: {scritto}\n")
+            assert self._start_errors(provider, yaml) == [], scritto
+
+    def test_booleano_non_segnalato(self, bridge):
+        """`isinstance(True, int)` è vero: il motore lo accetta, e il mirror
+        non può essere più severo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: true\n")
+        assert self._start_errors(provider, yaml) == []
+
+    # --- non solo le strutture (review PR #48, rilievo 6) -----------------
+
+    def test_stringa_che_resta_stringa_e_errore(self, bridge):
+        """Il guard del motore è `not isinstance(self.start, (int, float))`:
+        `abc` non è una struttura, ma nemmeno un numero."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: abc\n")
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_notazione_esponenziale_e_errore(self, bridge):
+        """`"1e3"` la conversione del Generator non la prende (`int('1e3')`
+        alza ValueError): resta stringa, e il motore la rifiuta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer('      start: "1e3"\n')
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_chiave_vuota_e_errore(self, bridge):
+        """`pointer.start` non ha bounds nella spec, quindi non entra fra i
+        parametri numerici di `_check_missing_values` e nessuno la guardava.
+        Il motore su `None` alza l'errore come su ogni altro non-numero."""
         provider = DiagnosticProvider(bridge)
         yaml = self._pointer("      start:\n      speed_ratio: 1.0\n")
-        assert self._start_errors(provider, yaml) == []
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_null_esplicito_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: null\n")
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_il_messaggio_dello_scalare_non_parla_di_envelope(self, bridge):
+        """L'hint sugli envelope resta dov'è utile: su una curva scritta al
+        posto di un numero, non su un refuso."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: abc\n")
+        assert 'envelope' not in self._start_errors(provider, yaml)[0].message
 
     def test_loop_start_envelope_resta_ammesso(self, bridge):
         """Il loop mobile e' proprio la strada che l'hint indica."""
