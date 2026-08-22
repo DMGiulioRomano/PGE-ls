@@ -1105,12 +1105,20 @@ POINTER_START_CORPUS = [
 
 
 def _pointer_start_engine_accetta(valore) -> bool:
-    """Il motore costruisce un PointerController con questo `start`?"""
+    """Il motore costruisce un PointerController con questo `start`?
+
+    Si intercetta il **solo** `InvalidFieldValueError`, che e' il rifiuto: un
+    `except Exception` largo trasformerebbe in "rifiuta" anche il
+    `ModuleNotFoundError` di numpy/soundfile, e la parita' misurerebbe
+    l'assenza di una dipendenza invece del guard del motore.
+    """
     from granular_ls.schema_bridge import _import_pge_module
 
     PointerController = _import_pge_module(
         'controllers.pointer_controller').PointerController
     stream_config = _import_pge_module('core.stream_config')
+    InvalidFieldValueError = _import_pge_module(
+        'shared.exceptions').InvalidFieldValueError
     contesto = stream_config.StreamContext.from_yaml(
         {'stream_id': 's1', 'sample': 'f.wav', 'duration': 10.0, 'onset': 0.0},
         sample_dur_sec=10.0,
@@ -1119,7 +1127,7 @@ def _pointer_start_engine_accetta(valore) -> bool:
         PointerController({'start': valore},
                           stream_config.StreamConfig(context=contesto))
         return True
-    except Exception:
+    except InvalidFieldValueError:
         return False
 
 
@@ -1132,10 +1140,13 @@ def test_pointer_start_mirror_matches_engine(pge, scritto, tmp_path,
     from granular_ls.schema_bridge import SchemaBridge
     from granular_ls.providers.diagnostic_provider import DiagnosticProvider
 
+    # Sonda su un valore che il motore accetta di sicuro: se qui vola
+    # qualcosa, non e' il guard — sono le dipendenze che nella CI del
+    # language server non ci sono.
     try:
-        _pointer_start_engine_accetta(0.0)
+        assert _pointer_start_engine_accetta(0.0)
     except ImportError:
-        pytest.skip("PointerController non importabile senza numpy/soundfile")
+        pytest.skip("PointerController non costruibile senza numpy/soundfile")
 
     monkeypatch.chdir(tmp_path)
     evaluate, _ = _load_eval_math_expressions()
