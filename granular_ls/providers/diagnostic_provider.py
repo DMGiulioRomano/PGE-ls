@@ -2947,8 +2947,16 @@ class DiagnosticProvider:
 
             anchor = key_line
             if issue.param_key is not None:
+                # La ricerca si ferma al blocco: in flow style la chiave
+                # interna non ha una riga propria, e scorrere fino a fine
+                # stream la farebbe combaciare con la chiave omonima di
+                # livello stream — una riga corretta, che non c'entra niente
+                # con l'errore. Senza una riga sua l'ancora resta qui.
                 param_line = self._find_key_line(
-                    lines, key_line + 1, stream_end, issue.param_key
+                    lines,
+                    key_line + 1,
+                    self._block_end(lines, key_line, stream_end, 4),
+                    issue.param_key,
                 )
                 if param_line is not None:
                     anchor = param_line
@@ -3212,6 +3220,24 @@ class DiagnosticProvider:
                     and _is_num(item[0]) and _is_num(item[1])):
                 ys.append(float(item[1]))
         return max(ys) if ys else None
+
+    @staticmethod
+    def _block_end(lines: List[str], key_line: int, limit: int,
+                   key_indent: int) -> int:
+        """La prima riga dopo `key_line` che esce dal blocco della chiave.
+
+        Il blocco finisce dove l'indentazione torna al livello della chiave o
+        sopra; le righe vuote non lo chiudono. `key_indent` si passa perche'
+        non sempre coincide con l'indentazione grezza: sulla riga del trattino
+        la chiave sta a colonna 2 ma il suo livello e' 4.
+        """
+        for n in range(key_line + 1, min(limit, len(lines))):
+            riga = lines[n]
+            if not riga.strip():
+                continue
+            if (len(riga) - len(riga.lstrip())) <= key_indent:
+                return n
+        return min(limit, len(lines))
 
     @staticmethod
     def _find_key_line(lines: List[str], start: int, end: int,

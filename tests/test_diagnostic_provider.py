@@ -3225,6 +3225,44 @@ class TestDeviationProbabilityEnvelopeBody:
         assert len(errors) == 1
         assert errors[0].range.start.line == 5
 
+    # --- l'ancoraggio non esce dal blocco ----------------------------------
+
+    def test_flow_style_ancora_alla_chiave_non_a_un_omonima_di_stream(self, bridge):
+        """In flow style la chiave interna non ha una riga propria: cercarla
+        fino a fine stream la fa combaciare con la chiave omonima di livello
+        stream, che e' corretta e non c'entra niente. Senza una riga sua,
+        l'ancora resta su `deviation_probability`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            '    deviation_probability: {volume: [1, 2, "x"]}\n'
+            "    volume: -6\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 5
+
+    def test_ancora_alla_chiave_interna_quando_la_riga_c_e(self, bridge):
+        """Il caso normale non cambia: in block style la riga esiste."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: ['x']\n"
+            "    volume: -6\n"
+        )
+        assert self._errors(provider, yaml)[0].range.start.line == 6
+
+    def test_chiave_omonima_dopo_il_blocco_non_ruba_l_ancora(self, bridge):
+        """La riga giusta e' quella dentro il blocco, non la prima trovata
+        scorrendo fino a fine stream."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: ['x']\n"
+            "    volume: -6\n"
+            "    pan: 0\n"
+        )
+        assert self._errors(provider, yaml)[0].range.start.line == 6
+
     # --- le espressioni matematiche ----------------------------------------
 
     def test_espressione_nella_y_di_un_punto(self, bridge):
