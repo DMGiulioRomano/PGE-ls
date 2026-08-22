@@ -129,6 +129,21 @@ _GRAIN_DURATION_UNIT_LABELS = {
     'milliseconds': 'millisecondi',
 }
 
+# Al singolare, per il solo posto dove il valore stampato può essere `1`: il
+# minimo in campioni. «la durata minima è un campione (1 campioni)» era una
+# frase che si contraddiceva a metà.
+_GRAIN_DURATION_UNIT_LABELS_SINGULAR = {
+    'samples': 'campione',
+    'milliseconds': 'millisecondo',
+}
+
+
+def _unit_label(unit: str, value: float) -> str:
+    """L'etichetta dell'unità, concordata col valore che accompagna."""
+    if value == 1:
+        return _GRAIN_DURATION_UNIT_LABELS_SINGULAR[unit]
+    return _GRAIN_DURATION_UNIT_LABELS[unit]
+
 # Le scritture del null esplicito. YAML ne ammette tre parole più la tilde, e
 # solo con queste maiuscole: `nUll` è la stringa "nUll".
 _YAML_NULLS = frozenset(('null', 'Null', 'NULL', '~'))
@@ -3584,7 +3599,8 @@ class DiagnosticProvider:
                     message=(
                         f"`grain.duration` = {b['duration_scalar']} {label}: "
                         f"la durata minima è un campione "
-                        f"({self._fmt_unit_value(min_in_unit)} {label})."
+                        f"({self._fmt_unit_value(min_in_unit)} "
+                        f"{_unit_label(unit, min_in_unit)})."
                     ),
                     severity=DiagnosticSeverity.Error,
                     source=SOURCE,

@@ -3145,6 +3145,26 @@ class TestGrainCommentoInlineENull:
                 if 'duration_unit' in e.message]
         assert len(msgs) == 1 and 'a#b' in msgs[0]
 
+    def test_il_minimo_in_campioni_concorda_col_valore(self):
+        """Nit: «la durata minima è un campione (1 campioni)» si contraddiceva
+        a metà."""
+        from granular_ls.providers.diagnostic_provider import _unit_label
+
+        assert _unit_label('samples', 1) == 'campione'
+        assert _unit_label('samples', 480) == 'campioni'
+        assert _unit_label('milliseconds', 1) == 'millisecondo'
+        assert _unit_label('milliseconds', 0.02083) == 'millisecondi'
+
+    def test_messaggio_del_minimo_in_campioni(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: samples\n"
+            "      duration: 0.5\n"
+        )
+        msg = [e.message for e in self._errors(provider, yaml)
+               if 'minima' in e.message][0]
+        assert '(1 campione)' in msg
+
     def test_helper_riconosce_solo_i_commenti_veri(self):
         """La regola sta nell'helper, e li' si verifica per esteso: YAML apre
         un commento solo su un `#` fuori dalle virgolette e preceduto da uno
