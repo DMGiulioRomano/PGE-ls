@@ -811,6 +811,13 @@ class TestDeviationProbabilityHover:
     L'hover portava anche due affermazioni false sulla scala: le probabilita'
     sono 0-100 (`RandomGate` confronta `uniform(0, 100)`), non 0.0-1.0, e
     `true` vale 1% come il jitter implicito, non "valori di default".
+
+    E ne portava una terza sulle altre quattro righe. "Nessuna deviazione"
+    e' vero solo senza range: tutte e quattro finiscono su
+    `_range_only_gate(has_explicit_range)`, che con un range esplicito e'
+    un `AlwaysGate` — il range applicato al 100% dei grani. Chi ha
+    `volume_range: 6` e scrive `deviation_probability: false` leggeva che
+    il range era inerte, mentre e' a piena applicazione.
     """
 
     def _doc(self, bridge):
@@ -830,13 +837,34 @@ class TestDeviationProbabilityHover:
         assert 'assente' in doc.lower()
         assert '1%' in doc
 
-    def test_dice_che_la_chiave_vuota_non_disattiva(self, bridge):
-        """E' l'unica delle cinque scritture a non disattivare la deviazione."""
+    def test_dice_che_la_chiave_vuota_e_l_eccezione(self, bridge):
+        """E' l'unica delle cinque scritture a non essere range-only."""
         doc = self._doc(bridge)
         righe_vuota = [r for r in doc.split('\n') if 'vuot' in r.lower()]
         assert any('1%' in r for r in righe_vuota), righe_vuota
-        assert any('non' in r.lower() and 'disattiva' in r.lower()
+        assert any('non' in r.lower() and 'range-only' in r.lower()
                    for r in doc.split('\n'))
+
+    # --- le altre quattro righe: range-only, non inerzia (rilievo 4) ------
+
+    def test_le_altre_quattro_righe_dicono_range_only(self, bridge):
+        doc = self._doc(bridge)
+        for riga in ('| chiave assente |', '| `deviation_probability: {}` |',
+                     '| `deviation_probability: false` |',
+                     '| `<chiave>:` vuota dentro il dict |'):
+            match = [r for r in doc.split('\n') if r.startswith(riga)]
+            assert match, riga
+            assert 'range-only' in match[0], match[0]
+
+    def test_spiega_che_range_only_non_e_inerte(self, bridge):
+        """Il punto che mancava: col range esplicito la deviazione c'e' su
+        tutti i grani, non su nessuno."""
+        doc = self._doc(bridge)
+        assert 'sempre' in doc.lower()
+        assert 'volume_range' in doc
+
+    def test_non_dice_piu_nessuna_deviazione(self, bridge):
+        assert 'nessuna deviazione' not in self._doc(bridge)
 
     def test_scala_e_zero_cento(self, bridge):
         doc = self._doc(bridge)
@@ -849,7 +877,7 @@ class TestDeviationProbabilityHover:
         doc = self._doc(bridge)
         assert 'randomizzazione globale con valori di default' not in doc
 
-    def test_dict_vuoto_e_false_disattivano(self, bridge):
+    def test_dict_vuoto_e_false_sono_nella_tabella(self, bridge):
         doc = self._doc(bridge)
         assert '`false`' in doc
         assert '{}' in doc
