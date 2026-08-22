@@ -3225,6 +3225,64 @@ class TestDeviationProbabilityEnvelopeBody:
         assert len(errors) == 1
         assert errors[0].range.start.line == 5
 
+    # --- la chiave scritta sulla riga del trattino -------------------------
+
+    def test_chiave_sulla_riga_del_trattino_viene_letta(self, bridge):
+        """La fase riconosce `deviation_probability` sulla riga del `- `, e
+        deve anche leggerne il valore: prima la riconosceva e poi usciva in
+        silenzio, perche' `- deviation_probability:` non e' una chiave nuda.
+        Il motore rifiuta `[]`, e la diagnostica taceva."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - deviation_probability: []\n"
+            '    stream_id: "a"\n'
+            "    duration: 10.0\n"
+            '    sample: "a.wav"\n'
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 1
+
+    def test_chiave_sul_trattino_con_corpo_block_style(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - deviation_probability:\n"
+            "      volume: ['x']\n"
+            '    stream_id: "a"\n'
+            "    duration: 10.0\n"
+            '    sample: "a.wav"\n'
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 2
+
+    def test_chiave_sul_trattino_con_corpo_valido_tace(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - deviation_probability: 50\n"
+            '    stream_id: "a"\n'
+            "    duration: 10.0\n"
+            '    sample: "a.wav"\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_il_blocco_sul_trattino_non_inghiotte_le_chiavi_sorelle(self, bridge):
+        """Le chiavi di livello stream che seguono non fanno parte del corpo:
+        con `stream_id` dentro il frammento il valore letto sarebbe un altro."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - deviation_probability:\n"
+            "      volume: 50\n"
+            '    stream_id: "a"\n'
+            "    duration: 10.0\n"
+            '    sample: "a.wav"\n'
+        )
+        assert self._errors(provider, yaml) == []
+
     # --- l'ancoraggio non esce dal blocco ----------------------------------
 
     def test_flow_style_ancora_alla_chiave_non_a_un_omonima_di_stream(self, bridge):

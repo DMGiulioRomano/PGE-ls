@@ -593,6 +593,35 @@ class TestBandCeilingUnderAnchorMin:
         )
         assert self._ceiling_errors(provider, yaml)[0].range.start.line == 7
 
+    def test_base_sulla_riga_del_trattino(self, bridge):
+        """La prima chiave di uno stream sta sulla riga del `- `, e da li' il
+        suo valore va letto come da qualunque altra riga: prima la lettura
+        usciva in silenzio e la banda non veniva controllata."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - volume: -6\n"
+            "    stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    range_anchor: min\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_base_sulla_riga_del_trattino_dentro_il_tetto(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - volume: -6\n"
+            "    stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    range_anchor: min\n"
+            "    volume_range: 12\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
     def test_stream_indipendenti(self, bridge):
         provider = DiagnosticProvider(bridge)
         yaml = (

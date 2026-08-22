@@ -3262,6 +3262,14 @@ class DiagnosticProvider:
         minore o uguale al suo, dedentato a colonna 0 perché `safe_load` non
         accetta un documento che comincia rientrato.
 
+        La prima chiave di un elemento di lista sta sulla riga del trattino
+        (`  - deviation_probability: []`), e lì l'indentazione grezza è quella
+        del trattino, non della chiave: il trattino si spoglia e l'indent si
+        prende dove la chiave comincia davvero. Senza, la riga non veniva
+        riconosciuta e la lettura usciva in silenzio — con le fasi che invece
+        la chiave su quella riga la riconoscono, i due lati dicevano cose
+        diverse.
+
         Returns:
             `(True, valore)` se il frammento è YAML valido e contiene la
             chiave — `valore` è `None` per la chiave scritta e lasciata vuota.
@@ -3269,8 +3277,10 @@ class DiagnosticProvider:
             scrittura, da non segnalare.
         """
         raw_line = lines[key_line]
-        key_indent = len(raw_line) - len(raw_line.lstrip())
-        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', raw_line.strip())
+        trattino = re.match(r'^\s*-\s+', raw_line)
+        key_indent = (trattino.end() if trattino
+                      else len(raw_line) - len(raw_line.lstrip()))
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', raw_line[key_indent:])
         if not m:
             return False, None
         key = m.group(1)
