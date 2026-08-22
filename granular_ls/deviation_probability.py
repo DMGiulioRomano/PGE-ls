@@ -44,7 +44,7 @@ Cosa resta fuori, deliberatamente:
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from granular_ls.envelope_shapes import (
     VALID_INTERP_TYPES,
@@ -337,7 +337,9 @@ def _check_body(body: Any) -> Optional[DeviationProbabilityIssue]:
     return None
 
 
-def check_global_value(raw: Any) -> Optional[DeviationProbabilityIssue]:
+def check_global_value(
+    raw: Any, known_keys: Optional[Iterable[str]] = None,
+) -> Optional[DeviationProbabilityIssue]:
     """
     Valida il valore globale di `deviation_probability`.
 
@@ -351,12 +353,26 @@ def check_global_value(raw: Any) -> Optional[DeviationProbabilityIssue]:
     l'unica delle cinque che **non** disattiva niente — vale jitter implicito
     all'1% (PGE #210). Non è un errore, quindi qui tace; è l'hover a doverlo
     dire.
+
+    `known_keys` sono le chiavi che il motore legge davvero. Nella mappa
+    per-parametro lui consulta solo quelle dello schema
+    (`if param_key in deviation_probability`, gate_factory): tutto il resto
+    cade nel gate range-only senza mai passare dalla costruzione
+    dell'envelope, quindi un corpo malformato sotto una chiave che non
+    esiste non è un errore per nessuno. Omettendo l'argomento si valida
+    tutto, che è il comportamento di chi non sa quali siano le chiavi vere.
+
+    Non si segnala la chiave sconosciuta in sé: nemmeno il motore lo fa, ed
+    è un'altra diagnostica.
     """
     if isinstance(raw, dict) and 'points' not in raw:
         # Mappa per-parametro: ogni valore è un envelope per conto suo.
+        allowed = None if known_keys is None else frozenset(known_keys)
         for key, value in raw.items():
             if value is None:
                 continue  # chiave a null: range-only, non un errore
+            if allowed is not None and key not in allowed:
+                continue  # chiave che il motore non consulta mai
             issue = check_envelope_body(value, param_key=key)
             if issue is not None:
                 return issue

@@ -2979,7 +2979,10 @@ class DiagnosticProvider:
                 # Frammento non interpretabile: documento a metà scrittura.
                 continue
 
-            issue = check_global_value(raw_value)
+            issue = check_global_value(
+                raw_value,
+                known_keys=self._bridge.get_deviation_probability_keys(),
+            )
             if issue is None:
                 continue
 

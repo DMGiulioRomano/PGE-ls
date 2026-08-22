@@ -106,6 +106,16 @@ def bridge():
                                               variation_mode='quantized'),
             'pitch_ratio':    make_raw_bounds(0.01, 10.0),
         },
+        # Le chiavi che il motore consulta dentro `deviation_probability:`
+        # (gate_factory: `if param_key in deviation_probability`). Gli spec
+        # sintetici qui sopra non portano `deviation_probability_key`, quindi
+        # senza questo override la mappa non avrebbe nessuna chiave nota e
+        # ogni corpo verrebbe saltato. Ricopiate dal motore reale, dove la
+        # parita' le rilegge dallo schema.
+        'deviation_probability_keys': [
+            'volume', 'pan', 'duration', 'envelope', 'reverse',
+            'read_direction', 'pointer', 'pitch',
+        ],
     }
     return SchemaBridge(raw)
 
@@ -3606,3 +3616,44 @@ class TestDeviationProbabilityEnvelopeBody:
             "      volume: [[0, meta], [10, 100]]\n"
         )
         assert len(self._errors(provider, yaml)) == 1
+
+    # --- chiavi che il motore non consulta (review PR #48, rilievo 2) ------
+
+    def test_chiave_sconosciuta_non_viene_validata(self, bridge):
+        """Il motore guarda solo le chiavi dello schema: sotto le altre non
+        costruisce niente, quindi non c'è corpo da giudicare."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      chiave_inesistente: []\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_chiave_plausibile_ma_non_dello_schema_non_viene_validata(self, bridge):
+        """`durations` e `speed_ratio` esistono nel motore, ma non fra le
+        chiavi del gate: qui valgono quanto una chiave inventata."""
+        provider = DiagnosticProvider(bridge)
+        for riga in ("      durations: []\n", "      speed_ratio: 'abc'\n"):
+            yaml = _stream_yaml("    deviation_probability:\n" + riga)
+            assert self._errors(provider, yaml) == [], riga
+
+    def test_chiave_nota_resta_validata(self, bridge):
+        """La regressione: il filtro non deve zittire le chiavi vere."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: []\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_chiave_ignota_accanto_a_una_nota_non_copre_l_errore(self, bridge):
+        """La chiave ignota non è un lasciapassare per il blocco."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      chiave_inesistente: []\n"
+            "      volume: []\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert "deviation_probability.volume" in errors[0].message

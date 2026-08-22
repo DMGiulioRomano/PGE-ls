@@ -615,6 +615,70 @@ def test_deviation_probability_mirror_matches_engine(pge, raw, tmp_path,
 
 
 # =============================================================================
+# Le chiavi che il motore consulta davvero (review PR #48, rilievo 2)
+# =============================================================================
+#
+# Nella mappa per-parametro il motore guarda solo le chiavi dello schema
+# (`if param_key in deviation_probability`, gate_factory): tutte le altre
+# cadono nel gate range-only senza passare dalla costruzione dell'envelope.
+# Un corpo malformato sotto una chiave che non esiste non e' un errore per
+# nessuno, e segnalarlo era un Error rosso su uno YAML che rende.
+
+DEVIATION_PROBABILITY_MAP_CORPUS = [
+    # chiavi che il motore non legge: qualunque corpo, nessuno dei due parla
+    {'chiave_inesistente': []},
+    {'durations': []},
+    {'speed_ratio': 'abc'},
+    {'volume_range': [[0, 50], 'x']},
+    # chiavi vere: il corpo torna a contare, da entrambi i lati
+    {'volume': []},
+    {'volume': 'abc'},
+    {'volume': [[0, 50], [10, 100]]},
+    {'volume': 50},
+    # miste: la chiave vera decide, quella ignota non aggiunge niente
+    {'chiave_inesistente': [], 'volume': [[0, 50], [10, 100]]},
+    {'chiave_inesistente': [[0, 50], [10, 100]], 'volume': []},
+]
+
+
+@pytest.mark.parametrize('mappa', DEVIATION_PROBABILITY_MAP_CORPUS,
+                         ids=lambda v: repr(v)[:60])
+def test_deviation_probability_map_mirror_matches_engine(pge, mappa, tmp_path,
+                                                         monkeypatch):
+    """Parita' sulla **mappa**, non sul singolo corpo: e' li' che si decide
+    quali chiavi vengono lette."""
+    from granular_ls.deviation_probability import check_global_value
+    from granular_ls.schema_bridge import SchemaBridge, _import_pge_module
+
+    try:
+        GateFactory = _import_pge_module('parameters.gate_factory').GateFactory
+    except Exception:
+        pytest.skip("engine senza GateFactory importabile in questo checkout")
+
+    monkeypatch.chdir(tmp_path)
+    known = SchemaBridge.from_python_path(PGE_SRC).get_deviation_probability_keys()
+
+    # Il motore costruisce un gate per parametro: rifiuta la mappa se rifiuta
+    # per almeno uno dei parametri che consulta.
+    motore_rifiuta = False
+    for param_key in known:
+        try:
+            GateFactory.create_gate(deviation_probability=mappa,
+                                    param_key=param_key, duration=10.0)
+        except Exception:
+            motore_rifiuta = True
+            break
+
+    ls_rifiuta = check_global_value(mappa, known_keys=known) is not None
+
+    assert ls_rifiuta == motore_rifiuta, (
+        f"Drift su {mappa!r}: motore "
+        f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
+        f"LS {'rifiuta' if ls_rifiuta else 'accetta'}"
+    )
+
+
+# =============================================================================
 # Il tetto della banda sotto `range_anchor: min` (issue #37)
 # =============================================================================
 #
