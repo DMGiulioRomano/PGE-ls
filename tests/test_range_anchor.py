@@ -30,6 +30,74 @@ def _bridge():
     return SchemaBridge({'specs': [], 'bounds': {}})
 
 
+@pytest.fixture
+def bridge():
+    """Bridge con le coppie base/_range che l'ancora governa.
+
+    I bound sono quelli veri del motore: `volume` arriva a 12 e il suo range a
+    24, ed è proprio quella sproporzione a rendere possibile una coppia valida
+    da centrata e fuori tetto da ancorata.
+    """
+    def spec(name, yaml_path):
+        return {'name': name, 'yaml_path': yaml_path, 'default': 0.0,
+                'is_smart': True, 'exclusive_group': None,
+                'group_priority': 0, 'range_path': None,
+                'deviation_probability_key': None, 'is_internal': False}
+
+    def bounds(min_val, max_val):
+        return {'min_val': min_val, 'max_val': max_val, 'min_range': 0.0,
+                'max_range': 0.0, 'default_jitter': 0.0,
+                'variation_mode': 'additive'}
+
+    return SchemaBridge({
+        'specs': [
+            spec('volume', 'volume'), spec('volume_range', 'volume_range'),
+            spec('pan', 'pan'), spec('pan_range', 'pan_range'),
+            spec('grain_duration', 'grain.duration'),
+            spec('grain_duration_range', 'grain.duration_range'),
+        ],
+        'bounds': {
+            'volume': bounds(-120.0, 12.0),
+            'volume_range': bounds(0.0, 24.0),
+            'pan': bounds(-3600.0, 3600.0),
+            'pan_range': bounds(0.0, 360.0),
+            'grain_duration': bounds(0.001, 10.0),
+            'grain_duration_range': bounds(0.0, 1.0),
+        },
+    })
+
+
+def _bridge_con_default_grain_duration():
+    """Come la fixture `bridge`, ma con il default vero di `grain_duration`.
+
+    La fixture tiene tutti i default a 0.0, che sulla base assente rende il
+    conto insensibile all'unita'. Qui il default e' quello del motore — 0.05
+    **secondi**, qualunque `duration_unit` sia dichiarata — perche' e' la
+    condizione in cui la conversione della base si vede.
+    """
+    def spec(name, yaml_path, default=0.0):
+        return {'name': name, 'yaml_path': yaml_path, 'default': default,
+                'is_smart': True, 'exclusive_group': None,
+                'group_priority': 0, 'range_path': None,
+                'deviation_probability_key': None, 'is_internal': False}
+
+    def bounds(min_val, max_val):
+        return {'min_val': min_val, 'max_val': max_val, 'min_range': 0.0,
+                'max_range': 0.0, 'default_jitter': 0.0,
+                'variation_mode': 'additive'}
+
+    return SchemaBridge({
+        'specs': [
+            spec('grain_duration', 'grain.duration', default=0.05),
+            spec('grain_duration_range', 'grain.duration_range'),
+        ],
+        'bounds': {
+            'grain_duration': bounds(0.001, 10.0),
+            'grain_duration_range': bounds(0.0, 1.0),
+        },
+    })
+
+
 def make_context(context_type='key', current_text='',
                  parent_path=None, indent_level=2,
                  in_stream_element=True, current_key='',
@@ -195,3 +263,451 @@ class TestRangeAnchorDiagnostic:
         diags = [d for d in self._diags(doc) if 'range_anchor' in d.message]
         assert 'center' in diags[0].message
         assert 'min' in diags[0].message
+
+
+# =============================================================================
+# Il tetto della banda sotto `range_anchor: min` (issue #37)
+# =============================================================================
+
+
+class TestBandCeilingUnderAnchorMin:
+    """
+    In modalita' `min` la banda arriva a `base + range`, quindi una coppia che
+    passa la validazione da centrata puo' sforare il tetto: `volume: -6` con
+    `volume_range: 24` sta dentro i bounds da centrata (`[-18, 6]`) e li sfora
+    da ancorata (`[-6, 18]` contro `max_val` 12).
+
+    Il motore lo tratta come **errore al parse**, non come warning: la
+    modalita' `min` promette una banda esatta, e prometterla per poi tagliarla
+    col clamp e' peggio che rifiutarla subito. La diagnostica ne rispecchia la
+    severita' e i confini — compreso quello che il motore NON controlla, cioe'
+    base e range entrambi envelope, dove il massimo della somma non e' la
+    somma dei massimi.
+    """
+
+    @staticmethod
+    def _stream(body: str) -> str:
+        return (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            + body
+        )
+
+    def _ceiling_errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'range_anchor' in d.message and 'banda' in d.message.lower()]
+
+    # --- il caso dell'issue ------------------------------------------------
+
+    def test_volume_meno_sei_con_range_ventiquattro(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_la_stessa_coppia_da_centrata_e_valida(self, bridge):
+        """Sotto `center` la banda arriva a base + range/2: nessun errore."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: center\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_ancora_assente_e_come_center(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    # --- confini del controllo --------------------------------------------
+
+    def test_banda_esattamente_al_tetto_e_valida(self, bridge):
+        """volume: 0 + range 12 = 12 = max_val: il motore accetta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: 0\n"
+            "    volume_range: 12\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_senza_range_niente_controllo(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: 6\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_pan_ha_la_sua_coppia(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    pan: 3500\n"
+            "    pan_range: 200\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_grain_duration_ha_la_sua_coppia(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration: 9.5\n"
+            "      duration_range: 0.8\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    # --- envelope ----------------------------------------------------------
+
+    def test_base_envelope_e_range_scalare_usa_il_picco(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: [[0, -60], [10, 6]]\n"
+            "    volume_range: 12\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_base_scalare_e_range_envelope_usa_il_picco(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: 6\n"
+            "    volume_range: [[0, 1], [10, 20]]\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_entrambi_envelope_non_si_controlla(self, bridge):
+        """I due picchi possono cadere in istanti diversi: il motore non
+        controlla, e un falso positivo bloccherebbe un render valido."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: [[0, -60], [10, 6]]\n"
+            "    volume_range: [[0, 1], [10, 20]]\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    # --- unita' di grain.duration -----------------------------------------
+
+    def test_duration_in_millisecondi_convertita_prima_del_confronto(self, bridge):
+        """9500 ms + 800 ms = 10.3 s: sfora, ma solo se si converte."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration: 9500\n"
+            "      duration_range: 800\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_duration_in_millisecondi_dentro_il_tetto_non_segnalata(self, bridge):
+        """50 ms + 4.5 ms non sfora niente: senza conversione sarebbero 54.5 s."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+            "      duration_range: 4.5\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    # --- le macro-forme dentro una lista mista -----------------------------
+
+    def test_loop_block_in_lista_mista_non_scambia_end_time_per_una_y(self, bridge):
+        """Il picco si stima dai breakpoint, e in un ciclo compatto i
+        breakpoint stanno in `item[0]`: `item[1]` e' l'`end_time`.
+
+        `[[[0, 0], [100, 0]], 10.0, 2]` ha picco 0, non 10: il motore espande
+        il ciclo e ne prende le Y, e con `volume_range: 4` la banda arriva a 4,
+        sotto il tetto 12. Leggere l'`end_time` come Y faceva scattare un
+        Error su uno YAML che rende."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume:\n"
+            "      - [0, -60]\n"
+            "      - [[[0, 0], [100, 0]], 10.0, 2]\n"
+            "    volume_range: 4\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_loop_block_in_lista_mista_segnala_sul_picco_vero(self, bridge):
+        """Con le Y del pattern davvero alte l'errore ci vuole: e' il picco
+        del ciclo, non il suo `end_time`, a portare la banda fuori tetto."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume:\n"
+            "      - [0, -60]\n"
+            "      - [[[0, 9], [100, 9]], 10.0, 2]\n"
+            "    volume_range: 4\n"
+        )
+        errors = self._ceiling_errors(provider, yaml)
+        assert len(errors) == 1
+        assert '13' in errors[0].message
+
+    def test_bp_group_in_lista_mista_scende_nei_punti(self, bridge):
+        """Stessa forma, stesso rischio: in `[points, interp]` la Y sta dentro
+        `points`, e `item[1]` e' la stringa dell'interpolazione."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume:\n"
+            "      - [0, -60]\n"
+            "      - [[[0, 0], [10, 0]], 'linear']\n"
+            "    volume_range: 4\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_ciclo_compatto_come_corpo_intero(self, bridge):
+        """Non solo dentro una lista mista: il ciclo puo' essere il corpo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: [[[0, 0], [100, 0]], 10.0, 2]\n"
+            "    volume_range: 4\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    # --- messaggio e ancoraggio -------------------------------------------
+
+    def test_messaggio_nomina_la_somma_e_il_tetto(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert '18' in msg and '12' in msg
+
+    def test_messaggio_promette_la_centrata_solo_quando_e_vero(self, bridge):
+        """`volume: -6` con `volume_range: 24` sta dentro da centrata
+        (-6 + 12 = 6 <= 12): li' cambiare ancora e' davvero la via d'uscita."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert 'centrata la stessa coppia starebbe dentro' in msg
+
+    def test_messaggio_non_promette_la_centrata_quando_sfora_anche_lei(self, bridge):
+        """`volume: 11` con `volume_range: 24`: da centrata la banda arriva a
+        23, sopra il tetto 12. Li' interviene il safety clamp invece del
+        rifiuto al parse — cambiare ancora non risolve, e prometterlo manda
+        l'utente a fare la modifica sbagliata."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: 11\n"
+            "    volume_range: 24\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert 'starebbe dentro' not in msg
+        assert 'clamp' in msg
+
+    # --- il messaggio parla l'unita' che l'utente ha scritto ---------------
+
+    def test_messaggio_in_millisecondi_riporta_i_numeri_scritti(self, bridge):
+        """9500 + 800 ms: il confronto si fa in secondi come il motore, ma il
+        messaggio non puo' rispondere con numeri che l'utente non ha mai
+        visto."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration: 9500\n"
+            "      duration_range: 800\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert '10300' in msg and '10000' in msg
+        assert 'millisecondi' in msg
+
+    def test_messaggio_in_campioni_riporta_i_numeri_scritti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: samples\n"
+            "      duration: 470000\n"
+            "      duration_range: 20000\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert '490000' in msg and '480000' in msg
+        assert 'campioni' in msg
+
+    def test_messaggio_in_secondi_resta_senza_etichetta(self, bridge):
+        """Senza `duration_unit` i numeri sono gia' quelli scritti."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration: 9.5\n"
+            "      duration_range: 0.8\n"
+        )
+        msg = self._ceiling_errors(provider, yaml)[0].message
+        assert 'millisecondi' not in msg and 'campioni' not in msg
+        assert '10.3' in msg
+
+    def test_base_dal_default_e_gia_in_secondi(self):
+        """Chiave assente: vale il default della spec, che il motore tiene in
+        secondi e non converte. Portarlo nell'unita' dichiarata (0.05 s = 50
+        ms) e non moltiplicarlo per il fattore come se fosse gia' in
+        millisecondi: li' varrebbe 0.05 ms, tre ordini di grandezza sotto, e
+        la banda 50 + 9990 = 10040 ms non risulterebbe sopra il tetto."""
+        provider = DiagnosticProvider(_bridge_con_default_grain_duration())
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration_range: 9990\n"
+        )
+        errors = self._ceiling_errors(provider, yaml)
+        assert len(errors) == 1
+        assert '10040' in errors[0].message
+
+    def test_errore_ancorato_alla_riga_del_range(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml)[0].range.start.line == 7
+
+    def test_base_sulla_riga_del_trattino(self, bridge):
+        """La prima chiave di uno stream sta sulla riga del `- `, e da li' il
+        suo valore va letto come da qualunque altra riga: prima la lettura
+        usciva in silenzio e la banda non veniva controllata."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - volume: -6\n"
+            "    stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    range_anchor: min\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_base_sulla_riga_del_trattino_dentro_il_tetto(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - volume: -6\n"
+            "    stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    range_anchor: min\n"
+            "    volume_range: 12\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_stream_indipendenti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+            "  - stream_id: s2\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    # --- base assente: vale il default ------------------------------------
+
+    def test_range_da_solo_usa_il_default_della_base(self, bridge):
+        """`volume_range: 24` senza `volume`: l'orchestrator passa il default
+        0.0 al parser, e 0 + 24 sfora il tetto 12."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_range_da_solo_dentro_il_tetto_non_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume_range: 12\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    # --- le stringhe che il Generator converte (review PR #48, rilievo 8) --
+
+    def test_base_stringa_numerica_e_segnalata(self, bridge):
+        """`"-6"` arriva al parser come `-6`: la banda sfora davvero."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            '    volume: "-6"\n'
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_range_stringa_numerica_e_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            '    volume_range: "24"\n'
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_stringhe_dentro_i_breakpoint_sono_segnalate(self, bridge):
+        """La conversione ricorre: le Y stringa contano come le altre."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            '    volume: [[0, "-6"], [10, "-6"]]\n'
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_stringa_numerica_sotto_il_tetto_non_segnalata(self, bridge):
+        """La regressione dall'altro lato: convertire non vuol dire segnalare."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            '    volume: "-60"\n'
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_espressione_matematica_fa_tacere(self, bridge):
+        """Su un'espressione si tace, come ovunque: prevederne l'esito
+        vorrebbe dire rifare l'`eval`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: (0-6)\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []

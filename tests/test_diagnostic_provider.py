@@ -106,6 +106,16 @@ def bridge():
                                               variation_mode='quantized'),
             'pitch_ratio':    make_raw_bounds(0.01, 10.0),
         },
+        # Le chiavi che il motore consulta dentro `deviation_probability:`
+        # (gate_factory: `if param_key in deviation_probability`). Gli spec
+        # sintetici qui sopra non portano `deviation_probability_key`, quindi
+        # senza questo override la mappa non avrebbe nessuna chiave nota e
+        # ogni corpo verrebbe saltato. Ricopiate dal motore reale, dove la
+        # parita' le rilegge dallo schema.
+        'deviation_probability_keys': [
+            'volume', 'pan', 'duration', 'envelope', 'reverse',
+            'read_direction', 'pointer', 'pitch',
+        ],
     }
     return SchemaBridge(raw)
 
@@ -2644,3 +2654,1145 @@ class TestReadDirection:
         provider = DiagnosticProvider(rd_bridge)
         yaml = self._grain("      duration: 0.05\n")
         assert self._errors(provider, yaml) == []
+
+
+# =============================================================================
+# pointer.start con un envelope (PGE #199, PR #200 — issue PGE-ls #39)
+# =============================================================================
+
+
+class TestPointerStartEnvelope:
+    """
+    `pointer.start` non accetta envelope: la spec lo dichiara `is_smart=False`,
+    quindi il valore resta grezzo e `PointerController.calculate` lo somma alla
+    posizione (`self.start + sample_position`). Con una curva al suo posto il
+    motore solleva `InvalidFieldValueError` all'inizializzazione dello stream.
+
+    Gli altri tre scalari del blocco pointer (`loop_start`, `loop_end`,
+    `loop_dur`) gli envelope li accettano davvero: la distinzione e' di `start`
+    soltanto, non dell'intero `_POINTER_SCALAR_PARAMS`.
+    """
+
+    @staticmethod
+    def _pointer(body: str) -> str:
+        return _stream_yaml("    pointer:\n" + body)
+
+    def _start_errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'pointer.start' in d.message]
+
+    # --- forme envelope rifiutate ----------------------------------------
+
+    def test_lista_di_breakpoint_inline_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[0, 0.0], [30, 0.5]]\n")
+        errors = self._start_errors(provider, yaml)
+        assert len(errors) == 1
+
+    def test_formato_compatto_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[[0, 0.0], [100, 0.5]], 30, 4]\n")
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_dict_con_points_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      start: {points: [[0, 0.0], [30, 0.5]], type: linear}\n"
+        )
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_envelope_block_style_e_errore(self, bridge):
+        """Block-style: il valore non sta sulla riga della chiave."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      start:\n"
+            "        - [0, 0.0]\n"
+            "        - [30, 0.5]\n"
+        )
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_dict_block_style_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      start:\n"
+            "        points: [[0, 0.0], [30, 0.5]]\n"
+            "        type: linear\n"
+        )
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    # --- ancoraggio e messaggio ------------------------------------------
+
+    def test_errore_ancorato_alla_riga_della_chiave(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      start:\n"
+            "        - [0, 0.0]\n"
+            "        - [30, 0.5]\n"
+        )
+        errors = self._start_errors(provider, yaml)
+        assert errors[0].range.start.line == 6  # la riga di 'start:'
+
+    def test_messaggio_indica_le_due_strade_vere(self, bridge):
+        """L'hint del motore nomina speed_ratio e il loop mobile."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[0, 0.0], [30, 0.5]]\n")
+        message = self._start_errors(provider, yaml)[0].message
+        assert 'speed_ratio' in message
+        assert 'loop_start' in message
+
+    def test_severita_error(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[0, 0.0], [30, 0.5]]\n")
+        assert self._start_errors(provider, yaml)[0].severity == \
+            DiagnosticSeverity.Error
+
+    # --- cosa NON va segnalato -------------------------------------------
+
+    def test_scalare_non_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: 1.5\n")
+        assert self._start_errors(provider, yaml) == []
+
+    def test_espressione_matematica_non_segnalata(self, bridge):
+        """`(10/2)` e' una stringa in YAML ma il Generator la valuta a 5.0
+        prima che il PointerController la veda: non e' un envelope."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: (10/2)\n")
+        assert self._start_errors(provider, yaml) == []
+
+    def test_stringa_numerica_non_segnalata(self, bridge):
+        """`"0.5"` il Generator la converte in numero senza bisogno di
+        parentesi: il PointerController vede `0.5` e lo accetta."""
+        provider = DiagnosticProvider(bridge)
+        for scritto in ('"0.5"', '"1"', "'-3'"):
+            yaml = self._pointer(f"      start: {scritto}\n")
+            assert self._start_errors(provider, yaml) == [], scritto
+
+    def test_booleano_non_segnalato(self, bridge):
+        """`isinstance(True, int)` è vero: il motore lo accetta, e il mirror
+        non può essere più severo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: true\n")
+        assert self._start_errors(provider, yaml) == []
+
+    # --- non solo le strutture (review PR #48, rilievo 6) -----------------
+
+    def test_stringa_che_resta_stringa_e_errore(self, bridge):
+        """Il guard del motore è `not isinstance(self.start, (int, float))`:
+        `abc` non è una struttura, ma nemmeno un numero."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: abc\n")
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_notazione_esponenziale_e_errore(self, bridge):
+        """`"1e3"` la conversione del Generator non la prende (`int('1e3')`
+        alza ValueError): resta stringa, e il motore la rifiuta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer('      start: "1e3"\n')
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_chiave_vuota_e_errore(self, bridge):
+        """`pointer.start` non ha bounds nella spec, quindi non entra fra i
+        parametri numerici di `_check_missing_values` e nessuno la guardava.
+        Il motore su `None` alza l'errore come su ogni altro non-numero."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start:\n      speed_ratio: 1.0\n")
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_null_esplicito_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: null\n")
+        assert len(self._start_errors(provider, yaml)) == 1
+
+    def test_il_messaggio_dello_scalare_non_parla_di_envelope(self, bridge):
+        """L'hint sugli envelope resta dov'è utile: su una curva scritta al
+        posto di un numero, non su un refuso."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: abc\n")
+        assert 'envelope' not in self._start_errors(provider, yaml)[0].message
+
+    def test_loop_start_envelope_resta_ammesso(self, bridge):
+        """Il loop mobile e' proprio la strada che l'hint indica."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      loop_start: [[0, 0.0], [30, 0.5]]\n")
+        errors = [d for d in provider.get_diagnostics(yaml)
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'loop_start' in d.message]
+        assert errors == []
+
+    def test_loop_end_e_loop_dur_envelope_restano_ammessi(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer(
+            "      loop_start: [[0, 0.0], [30, 0.5]]\n"
+            "      loop_dur: [[0, 1.0], [30, 2.0]]\n"
+        )
+        errors = [d for d in provider.get_diagnostics(yaml)
+                  if d.severity == DiagnosticSeverity.Error]
+        assert errors == []
+
+    def test_documento_a_meta_scrittura_non_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      start: [[0, 0.0], [30,\n")
+        assert self._start_errors(provider, yaml) == []
+
+    def test_start_di_un_altro_blocco_non_confuso(self, bridge):
+        """`loop_start` contiene 'start' ma non e' la chiave `start`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._pointer("      loop_start: [[0, 0.0], [30, 0.5]]\n")
+        assert self._start_errors(provider, yaml) == []
+
+
+# =============================================================================
+# grain.duration_unit: milliseconds (PGE v5.2.0 — issue PGE-ls #36)
+# =============================================================================
+
+
+class TestGrainDurationUnitMilliseconds:
+    """
+    Terza unita' di `grain.duration` / `grain.duration_range`: `milliseconds`.
+
+    A differenza di `samples` il fattore e' fisso (`SECONDS_PER_MILLISECOND`,
+    1e-3) e non dipende da `output_sr`. La motivazione della chiave e' la
+    leggibilita': la grana udibile vive fra 1 e 1000 ms, dove in secondi si
+    scrivono solo `.001` / `.0045` / `.35`.
+
+    La regola della durata esplicita, finora scritta su misura per `samples`,
+    vale ora per ogni unita' non-secondi: senza `grain.duration` la base
+    resterebbe in secondi mentre `duration_range` sarebbe nell'unita'
+    dichiarata — due domini nello stesso blocco.
+    """
+
+    @staticmethod
+    def _grain(body: str) -> str:
+        return _stream_yaml("    grain:\n" + body)
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    def _duration_errors(self, provider, yaml):
+        """Errori sul VALORE di `grain.duration`, non sulla meta-chiave che
+        la governa: 'grain.duration_unit' contiene 'grain.duration' come
+        sottostringa, e il messaggio della durata esplicita nomina entrambe."""
+        return [d for d in self._errors(provider, yaml)
+                if 'grain.duration' in d.message
+                and 'duration_unit' not in d.message]
+
+    def _missing_duration_errors(self, provider, yaml):
+        """L'errore che pretende una `grain.duration` esplicita."""
+        return [d for d in self._errors(provider, yaml)
+                if 'esplicita' in d.message]
+
+    # --- 1. YAML valido non va segnalato ----------------------------------
+
+    def test_milliseconds_e_una_unita_valida(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 50\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert not any('duration_unit' in e.message
+                       for e in self._errors(provider, yaml))
+
+    def test_esempio_della_issue_non_produce_errori(self, bridge):
+        """50 ms con +/- 4.5 ms: lo YAML dell'issue, corretto per v5.2.0."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+            "      duration_range: 4.5\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_enum_elenca_tutte_e_tre_le_unita(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 480\n"
+            "      duration_unit: frames\n"
+        )
+        msg = [e.message for e in self._errors(provider, yaml)
+               if 'duration_unit' in e.message][0]
+        assert 'milliseconds' in msg
+        assert 'samples' in msg and 'seconds' in msg
+
+    # --- 2. durata esplicita per ogni unita' non-secondi -------------------
+
+    def test_milliseconds_richiede_duration_esplicita(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 4.5\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert len(self._missing_duration_errors(provider, yaml)) == 1
+
+    def test_hint_nomina_l_unita_dichiarata_e_i_suoi_valori(self, bridge):
+        """Il messaggio non dice piu' 'campioni' a prescindere."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 4.5\n"
+            "      duration_unit: milliseconds\n"
+        )
+        msg = self._missing_duration_errors(provider, yaml)[0].message
+        assert 'millisecondi' in msg
+        assert 'campioni' not in msg
+
+    def test_samples_conserva_il_proprio_hint(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 64\n"
+            "      duration_unit: samples\n"
+        )
+        msg = self._missing_duration_errors(provider, yaml)[0].message
+        assert 'campioni' in msg
+
+    def test_seconds_non_richiede_duration_esplicita(self, bridge):
+        """In secondi il default 0.05 e' gia' nell'unita' giusta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_range: 0.01\n"
+            "      duration_unit: seconds\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- 3. bounds in millisecondi ----------------------------------------
+
+    def test_valore_in_ms_non_segnalato_contro_il_bound_in_secondi(self, bridge):
+        """50 ms non e' 50 secondi: il bound generico non deve scattare."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 50\n"
+            "      duration_unit: milliseconds\n"
+        )
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert bad == []
+
+    def test_envelope_in_ms_non_segnalato_contro_il_bound_in_secondi(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: [[0.0, 5], [10.0, 500]]\n"
+            "      duration_unit: milliseconds\n"
+        )
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert bad == []
+
+    def test_sopra_diecimila_ms_e_fuori_banda(self, bridge):
+        """10000 ms = 10 s, il tetto del parametro."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 10001\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert len(self._duration_errors(provider, yaml)) == 1
+
+    def test_diecimila_ms_esatti_sono_ammessi(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 10000\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_sotto_un_campione_e_fuori_banda(self, bridge):
+        """Il minimo resta 1 campione: a 48 kHz sono 1/48 di ms."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 0.01\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert len(self._duration_errors(provider, yaml)) == 1
+
+    def test_un_millisecondo_e_ammesso(self, bridge):
+        """La grana corta della scala udibile: 1 ms non va segnalato."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 1\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_il_minimo_in_ms_non_e_quello_in_campioni(self, bridge):
+        """0.5 e' sotto il minimo in campioni ma non in millisecondi."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 0.5\n"
+            "      duration_unit: milliseconds\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- nessuna regressione su samples e seconds -------------------------
+
+    def test_samples_resta_valido(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration: 480\n"
+            "      duration_range: 64\n"
+            "      duration_unit: samples\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_seconds_conserva_il_bound_massimo(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain("      duration: 999\n")
+        bad = [e for e in self._errors(provider, yaml)
+               if 'grain.duration' in e.message
+               and ('fuori range' in e.message or 'fuori dai bounds' in e.message)]
+        assert len(bad) == 1
+
+
+# =============================================================================
+# Il commento inline non e' parte del valore (review PR #48, rilievi 1 e 7)
+# =============================================================================
+
+
+class TestGrainCommentoInlineENull:
+    """
+    `_scan_grain_blocks` legge il valore **grezzo** dalla riga, non da
+    `_safe_yaml`: il commento inline ci restava dentro.
+
+    Costava due falsi positivi in cascata su una riga sola — l'unita' non
+    veniva riconosciuta, e con l'unita' saltava anche la soppressione dei
+    bound generici, cioe' proprio il falso positivo che quella soppressione
+    esiste per evitare. La stessa lettura grezza toglieva dal controllo lo
+    scalare della durata.
+
+    Sulla stessa riga sta il null esplicito: per il motore
+    (`grain.get('duration') is None`) non e' una durata dichiarata piu' di
+    quanto lo sia la chiave assente.
+    """
+
+    @staticmethod
+    def _grain(body: str) -> str:
+        return _stream_yaml("    grain:\n" + body)
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    # --- 1. il commento non entra nell'unita' -----------------------------
+
+    def test_commento_dopo_unita_valida_non_produce_errori(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds  # unita' esplicita\n"
+            "      duration: 50\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_commento_dopo_seconds_non_produce_errori(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: seconds  # esplicito\n"
+            "      duration: 0.05\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_soppressione_dei_bound_generici_scatta_col_commento(self, bridge):
+        """Il secondo Error della catena: `50` millisecondi misurati in
+        secondi. Senza unita' riconosciuta la soppressione non scattava."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds  # unita' esplicita\n"
+            "      duration: 50\n"
+        )
+        assert not any('fuori range' in e.message
+                       for e in self._errors(provider, yaml))
+
+    def test_unita_ignota_col_commento_resta_un_errore(self, bridge):
+        """Il commento sparisce dal valore, non il controllo sul valore."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: frames  # boh\n"
+            "      duration: 480\n"
+        )
+        msgs = [e.message for e in self._errors(provider, yaml)
+                if 'duration_unit' in e.message]
+        assert len(msgs) == 1
+        assert '`frames`' in msgs[0] and '#' not in msgs[0]
+
+    # --- 2. il commento non entra nello scalare della durata --------------
+
+    def test_durata_fuori_tetto_col_commento_resta_segnalata(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain("      duration: 50000  # oltre il tetto\n")
+        assert any('grain.duration' in e.message
+                   for e in self._errors(provider, yaml))
+
+    def test_durata_fuori_tetto_nellunita_dichiarata_col_commento(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds  # ms\n"
+            "      duration: 50000  # oltre il tetto\n"
+        )
+        assert any('millisecondi' in e.message
+                   for e in self._errors(provider, yaml))
+
+    # --- 3. il cancelletto che non apre un commento ------------------------
+
+    def test_cancelletto_dentro_le_virgolette_non_e_un_commento(self, bridge):
+        """`"a#b"` e' il valore intero: resta un'unita' ignota, e il messaggio
+        la riporta com'e' scritta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            '      duration_unit: "a#b"\n'
+            "      duration: 480\n"
+        )
+        msgs = [e.message for e in self._errors(provider, yaml)
+                if 'duration_unit' in e.message]
+        assert len(msgs) == 1 and 'a#b' in msgs[0]
+
+    def test_il_minimo_in_campioni_concorda_col_valore(self):
+        """Nit: «la durata minima è un campione (1 campioni)» si contraddiceva
+        a metà."""
+        from granular_ls.providers.diagnostic_provider import _unit_label
+
+        assert _unit_label('samples', 1) == 'campione'
+        assert _unit_label('samples', 480) == 'campioni'
+        assert _unit_label('milliseconds', 1) == 'millisecondo'
+        assert _unit_label('milliseconds', 0.02083) == 'millisecondi'
+
+    def test_messaggio_del_minimo_in_campioni(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: samples\n"
+            "      duration: 0.5\n"
+        )
+        msg = [e.message for e in self._errors(provider, yaml)
+               if 'minima' in e.message][0]
+        assert '(1 campione)' in msg
+
+    def test_helper_riconosce_solo_i_commenti_veri(self):
+        """La regola sta nell'helper, e li' si verifica per esteso: YAML apre
+        un commento solo su un `#` fuori dalle virgolette e preceduto da uno
+        spazio."""
+        from granular_ls.providers.diagnostic_provider import (
+            _strip_inline_comment)
+
+        assert _strip_inline_comment('milliseconds  # nota') == 'milliseconds'
+        assert _strip_inline_comment('50 # nota') == '50'
+        assert _strip_inline_comment('# tutto commento') == ''
+        # Nessuno di questi cancelletti apre un commento.
+        assert _strip_inline_comment('50#x') == '50#x'
+        assert _strip_inline_comment('"a # b"') == '"a # b"'
+        assert _strip_inline_comment("'a # b'") == "'a # b'"
+        assert _strip_inline_comment('"a" # b') == '"a"'
+        assert _strip_inline_comment('milliseconds') == 'milliseconds'
+
+    # --- 4. il null esplicito non e' una durata dichiarata ------------------
+
+    def test_duration_null_con_unita_non_secondi_e_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: null\n"
+        )
+        assert any('esplicita' in e.message
+                   for e in self._errors(provider, yaml))
+
+    def test_duration_tilde_con_unita_non_secondi_e_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: samples\n"
+            "      duration: ~\n"
+        )
+        assert any('esplicita' in e.message
+                   for e in self._errors(provider, yaml))
+
+    def test_duration_scritta_resta_una_durata(self, bridge):
+        """La regressione: `null` non deve rendere sospetta ogni durata."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+        )
+        assert not any('esplicita' in e.message
+                       for e in self._errors(provider, yaml))
+
+
+# =============================================================================
+# deviation_probability: corpo che non si costruisce come envelope (PGE #209)
+# =============================================================================
+
+
+class TestDeviationProbabilityEnvelopeBody:
+    """
+    Fino a PGE #209 un corpo malformato sotto `deviation_probability` veniva
+    accettato in silenzio e diventava un `AlwaysGate`: probabilita' 100%, la
+    variazione applicata a tutti i grani. Piu' l'errore era grossolano, meno il
+    sistema lo segnalava. Ora il motore solleva `InvalidFieldValueError`.
+
+    Il criterio della diagnostica e' non essere piu' severi del motore: le
+    forme accettate restano mute, comprese quelle che sorprendono (Y fuori da
+    0-100, `n_reps` booleano, percentuali del pattern fuori scala).
+    """
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'deviation_probability' in d.message]
+
+    # --- i tre corpi dell'issue -------------------------------------------
+
+    def test_lista_vuota_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      read_direction: []\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_lista_di_non_breakpoint_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: ['x']\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_dict_senza_points_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: {punti: [[0, 50]]}\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    # --- il campo e l'ancoraggio ------------------------------------------
+
+    def test_messaggio_nomina_la_chiave_per_parametro(self, bridge):
+        """Il motore attribuisce l'errore a `deviation_probability.<chiave>`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: ['x']\n"
+        )
+        assert 'deviation_probability.volume' in \
+            self._errors(provider, yaml)[0].message
+
+    def test_errore_ancorato_alla_riga_della_chiave_sbagliata(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: 50\n"
+            "      pan: ['x']\n"
+        )
+        assert self._errors(provider, yaml)[0].range.start.line == 7
+
+    def test_forma_globale_ancorata_alla_sua_riga(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: ['x']\n")
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 5
+
+    # --- le cinque scritture che non sono errori ---------------------------
+
+    def test_chiave_omessa(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        assert self._errors(provider, _stream_yaml("    volume: -6\n")) == []
+
+    def test_chiave_vuota_e_jitter_implicito_non_errore(self, bridge):
+        """La sola delle cinque a NON disattivare la deviazione: vale 1%."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability:\n    volume: -6\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_dict_vuoto_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: {}\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_false_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: false\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_chiave_a_null_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume:\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- forme valide che devono restare mute -----------------------------
+
+    def test_scalare_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: 50\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_envelope_globale_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability: [[0, 100], [0.4, 100], [1, 1]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_dict_con_points_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: {points: [[0, 50], [10, 100]]}\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_formato_compatto_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, 4, 'linear']\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_y_fuori_da_zero_cento_non_e_errore(self, bridge):
+        """Il motore non li rifiuta: 150 e' un AlwaysGate legittimo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, -50], [10, 500]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_guard_specifici_di_read_direction_non_replicati(self, bridge):
+        """Percentuali fuori scala e x decrescenti: il motore le accetta qui.
+
+        Sono semantica di `grain.read_direction` (PGE #208), non del formato
+        envelope — replicarle qui segnalerebbe YAML che rende.
+        """
+        provider = DiagnosticProvider(bridge)
+        for pattern in ("[[0, 50], [150, 100]]", "[[100, 50], [0, 100]]"):
+            yaml = _stream_yaml(
+                "    deviation_probability:\n"
+                f"      volume: [{pattern}, 10.0, 4]\n"
+            )
+            assert self._errors(provider, yaml) == [], pattern
+
+    def test_n_reps_booleano_non_e_errore_qui(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, true]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- ma `false` vale `0` (review PR #48, rilievo 5) --------------------
+
+    def test_n_reps_false_e_un_errore(self, bridge):
+        """`true` vale `1` e passa; `false` vale `0`, che è esattamente il
+        caso che il guard sull'arità esiste per prendere."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, false]\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_end_time_false_e_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], false, 4]\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_end_time_booleano_vero_resta_valido(self, bridge):
+        """La regressione dall'altro lato: `true` è `1`, un istante di fine
+        positivo, e il motore lo accetta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], true, 4]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_stringa_non_segnalata(self, bridge):
+        """`(50/2)` e' una stringa che il Generator valuta a 25 prima del gate:
+        distinguerla da un refuso vorrebbe dire rifare _eval_math_expressions."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: (50/2)\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- distribuzione temporale ------------------------------------------
+
+    def test_distribuzione_ignota_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, 4, 'linear', 'bogus']\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert 'geometric' in errors[0].message  # l'hint elenca i nomi validi
+
+    def test_parametro_estraneo_alla_distribuzione_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, 4, 'linear', "
+            "{type: geometric, ratio: 0}]\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_distribuzione_valida_non_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[[0, 50], [100, 100]], 10.0, 4, 'linear', "
+            "{type: geometric, ratio: 1.5}]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- tolleranza --------------------------------------------------------
+
+    def test_documento_a_meta_scrittura_non_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: [[0, 50], [10,\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_piu_stream_indipendenti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    deviation_probability:\n"
+            "      volume: ['x']\n"
+            "  - stream_id: s2\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    deviation_probability:\n"
+            "      volume: 50\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 5
+
+    # --- le stringhe: quelle che restano tali, e quelle che diventano numeri
+
+    def test_stringa_non_numerica_e_errore(self, bridge):
+        """`GateFactory._parse_raw_value` non trova ne' numero ne' struttura e
+        alza `InvalidParameterError`. Il docstring del modulo lo prometteva
+        gia'; mancava il ramo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: "abc"\n'
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_stringa_non_numerica_nella_forma_globale(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    deviation_probability: abc\n")
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_stringa_vuota_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: ""\n'
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_stringa_numerica_non_e_errore(self, bridge):
+        """La coda di `_eval_math_expressions` converte anche senza parentesi:
+        `"50"` arriva al gate come `50`. Segnalarla sarebbe il falso positivo
+        che il ramo, preso alla lettera, avrebbe introdotto."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: "50"\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_stringa_numerica_con_decimali(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: "1.5"\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_stringa_numerica_annidata_nei_punti(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: [[0, "50"], [10, "100"]]\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_stringa_non_numerica_annidata_resta_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: [[0, "abc"], [10, 100]]\n'
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_notazione_esponenziale_resta_un_errore(self, bridge):
+        """`int('1e3')` alza ValueError: il motore la lascia stringa."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            '      volume: "1e3"\n'
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    # --- la chiave scritta sulla riga del trattino -------------------------
+
+    def test_chiave_sulla_riga_del_trattino_viene_letta(self, bridge):
+        """La fase riconosce `deviation_probability` sulla riga del `- `, e
+        deve anche leggerne il valore: prima la riconosceva e poi usciva in
+        silenzio, perche' `- deviation_probability:` non e' una chiave nuda.
+        Il motore rifiuta `[]`, e la diagnostica taceva."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - deviation_probability: []\n"
+            '    stream_id: "a"\n'
+            "    duration: 10.0\n"
+            '    sample: "a.wav"\n'
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 1
+
+    def test_chiave_sul_trattino_con_corpo_block_style(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - deviation_probability:\n"
+            "      volume: ['x']\n"
+            '    stream_id: "a"\n'
+            "    duration: 10.0\n"
+            '    sample: "a.wav"\n'
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 2
+
+    def test_chiave_sul_trattino_con_corpo_valido_tace(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - deviation_probability: 50\n"
+            '    stream_id: "a"\n'
+            "    duration: 10.0\n"
+            '    sample: "a.wav"\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_il_blocco_sul_trattino_non_inghiotte_le_chiavi_sorelle(self, bridge):
+        """Le chiavi di livello stream che seguono non fanno parte del corpo:
+        con `stream_id` dentro il frammento il valore letto sarebbe un altro."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - deviation_probability:\n"
+            "      volume: 50\n"
+            '    stream_id: "a"\n'
+            "    duration: 10.0\n"
+            '    sample: "a.wav"\n'
+        )
+        assert self._errors(provider, yaml) == []
+
+    # --- l'ancoraggio non esce dal blocco ----------------------------------
+
+    def test_flow_style_ancora_alla_chiave_non_a_un_omonima_di_stream(self, bridge):
+        """In flow style la chiave interna non ha una riga propria: cercarla
+        fino a fine stream la fa combaciare con la chiave omonima di livello
+        stream, che e' corretta e non c'entra niente. Senza una riga sua,
+        l'ancora resta su `deviation_probability`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            '    deviation_probability: {volume: [1, 2, "x"]}\n'
+            "    volume: -6\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 5
+
+    def test_ancora_alla_chiave_interna_quando_la_riga_c_e(self, bridge):
+        """Il caso normale non cambia: in block style la riga esiste."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: ['x']\n"
+            "    volume: -6\n"
+        )
+        assert self._errors(provider, yaml)[0].range.start.line == 6
+
+    def test_chiave_omonima_dopo_il_blocco_non_ruba_l_ancora(self, bridge):
+        """La riga giusta e' quella dentro il blocco, non la prima trovata
+        scorrendo fino a fine stream."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: ['x']\n"
+            "    volume: -6\n"
+            "    pan: 0\n"
+        )
+        assert self._errors(provider, yaml)[0].range.start.line == 6
+
+    # --- le espressioni matematiche ----------------------------------------
+
+    def test_espressione_nella_y_di_un_punto(self, bridge):
+        """`Generator._eval_math_expressions` ricorre dentro liste e dict e
+        riconverte a numero: il gate vede `[[0, 25], [10, 100]]` e costruisce
+        l'envelope. Segnalarlo qui sarebbe un falso positivo su YAML che
+        rende."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, (50/2)], [10, 100]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_espressione_nella_x_di_un_punto(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[(5*2), 50], [20, 100]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_espressione_dentro_points(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: {points: [[0, (50/2)], [10, 100]]}\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_espressione_nella_forma_globale(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability: [[0, (50/2)], [10, 100]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_espressione_scalare(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: (50/2)\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_il_silenzio_e_per_chiave_non_per_blocco(self, bridge):
+        """Un'espressione sotto `volume` non rende indecidibile `pan`: sono
+        due envelope distinti, e il motore li costruisce separatamente."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, (50/2)], [10, 100]]\n"
+            "      pan: ['x']\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 7
+
+    def test_stringa_senza_parentesi_resta_un_errore(self, bridge):
+        """Il Generator la lascia stringa: il valore è quello scritto."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, meta], [10, 100]]\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    # --- chiavi che il motore non consulta (review PR #48, rilievo 2) ------
+
+    def test_chiave_sconosciuta_non_viene_validata(self, bridge):
+        """Il motore guarda solo le chiavi dello schema: sotto le altre non
+        costruisce niente, quindi non c'è corpo da giudicare."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      chiave_inesistente: []\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_chiave_plausibile_ma_non_dello_schema_non_viene_validata(self, bridge):
+        """`durations` e `speed_ratio` esistono nel motore, ma non fra le
+        chiavi del gate: qui valgono quanto una chiave inventata."""
+        provider = DiagnosticProvider(bridge)
+        for riga in ("      durations: []\n", "      speed_ratio: 'abc'\n"):
+            yaml = _stream_yaml("    deviation_probability:\n" + riga)
+            assert self._errors(provider, yaml) == [], riga
+
+    def test_chiave_nota_resta_validata(self, bridge):
+        """La regressione: il filtro non deve zittire le chiavi vere."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: []\n"
+        )
+        assert len(self._errors(provider, yaml)) == 1
+
+    # --- le Y sono probabilita', non valori del parametro (rilievo 3) -----
+    #
+    # Qui non vale `_errors`: il messaggio da NON vedere è quello dei bound
+    # generici, che la chiave `deviation_probability` non la nomina.
+
+    @staticmethod
+    def _bounds_errors(provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'fuori dai bounds' in d.message]
+
+    def test_scala_percentuale_non_prende_i_bound_del_parametro(self, bridge):
+        """La forma che l'hover insegna: 20 e 90 sono probabilità, non
+        decibel, e il gate non le confronta mai coi bound di `volume`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, 20], [10, 90]]\n"
+        )
+        assert self._bounds_errors(provider, yaml) == []
+
+    def test_scala_percentuale_block_style(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume:\n"
+            "        - [0, 20]\n"
+            "        - [10, 90]\n"
+        )
+        assert self._bounds_errors(provider, yaml) == []
+
+    def test_il_volume_di_stream_resta_dentro_i_suoi_bound(self, bridge):
+        """La regressione: la soppressione è per blocco, e il blocco finisce
+        dove finisce."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, 20], [10, 90]]\n"
+            "    volume: [[0, 20], [10, 90]]\n"
+        )
+        errors = self._bounds_errors(provider, yaml)
+        assert len(errors) == 2
+        assert all(e.range.start.line == 7 for e in errors)
+
+    def test_chiave_ignota_accanto_a_una_nota_non_copre_l_errore(self, bridge):
+        """La chiave ignota non è un lasciapassare per il blocco."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      chiave_inesistente: []\n"
+            "      volume: []\n"
+        )
+        errors = self._errors(provider, yaml)
+        assert len(errors) == 1
+        assert "deviation_probability.volume" in errors[0].message

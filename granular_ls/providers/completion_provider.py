@@ -253,9 +253,12 @@ _STREAM_CONTEXT_DOCS = {
         "- 'seconds' (default): i valori sono in secondi.\n"
         "- 'samples': i valori sono in campioni alla frequenza di output del "
         "motore (48000 Hz), convertiti in secondi al parse (scalari ed "
-        "envelope, solo i valori Y).\n\n"
-        "Con 'samples' la grain.duration va indicata esplicitamente (il "
-        "default 0.05 e' in secondi). Non e' un parametro sintetizzabile."
+        "envelope, solo i valori Y).\n"
+        "- 'milliseconds': i valori sono in millisecondi, fattore fisso "
+        "indipendente dalla frequenza di output.\n\n"
+        "Con un'unita' non-secondi la grain.duration va indicata "
+        "esplicitamente (il default 0.05 e' in secondi). Non e' un parametro "
+        "sintetizzabile."
     ),
 }
 
@@ -1362,7 +1365,8 @@ class CompletionProvider:
         )
 
     def _get_duration_unit_completions(self, current_text: str) -> List[CompletionItem]:
-        """Valori disponibili per grain.duration_unit: seconds (default) | samples."""
+        """Valori di grain.duration_unit: seconds (default) | samples |
+        milliseconds."""
         _UNITS = {
             'seconds': (
                 'Durata del grano in **secondi** (default).\n\n'
@@ -1373,6 +1377,15 @@ class CompletionProvider:
                 '(48000 Hz), convertiti in secondi al parse.\n\n'
                 'Richiede una `grain.duration` esplicita (il default 0.05 e\' '
                 'in secondi). Minimo 1 campione.'
+            ),
+            'milliseconds': (
+                'Durata del grano in **millisecondi**, convertiti in secondi '
+                'al parse. Il fattore e\' fisso e non dipende dalla frequenza '
+                'di output.\n\n'
+                'E\' la scala della grana udibile — fra 1 e 1000 ms — dove in '
+                'secondi si scrivono solo `.001` / `.0045` / `.35`.\n\n'
+                'Richiede una `grain.duration` esplicita (il default 0.05 e\' '
+                'in secondi).'
             ),
         }
         prefix = current_text.strip().strip('"\'').lower()

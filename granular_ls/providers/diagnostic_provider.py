@@ -38,10 +38,12 @@ from lsprotocol.types import (
 
 from granular_ls.envelope_shapes import (
     VALID_INTERP_TYPES,
+    contains_math_expression,
     is_bp_group,
     is_bp_group_candidate,
     is_loop_block,
     is_valid_point,
+    normalize_engine_values,
 )
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.voice_strategies import (
@@ -55,6 +57,10 @@ from granular_ls.read_direction import (
     EXCLUSIVE_HINT,
     READ_DIRECTION_PATH,
     check_read_direction,
+)
+from granular_ls.deviation_probability import (
+    DEVIATION_PROBABILITY_PATH,
+    check_global_value,
 )
 from granular_ls.pitch_units import (
     PITCH_UNIT_KEYS,
@@ -99,12 +105,74 @@ def _is_generically_checkable(yaml_path: str) -> bool:
     return (not yaml_path.startswith(_PITCH_OWNED_PREFIX)
             and yaml_path not in _READ_DIRECTION_OWNED)
 
-# grain.duration_unit (PGE #158): unità di misura di grain.duration e
-# grain.duration_range. Meta-parametro, mirror di loop_unit del pointer.
-# output_sr è una config globale del motore (48000 Hz), non impostabile
-# per-stream: qui è una costante statica come lato PGE (DEFAULT_OUTPUT_SR).
-_GRAIN_DURATION_UNITS = ('seconds', 'samples')
+# grain.duration_unit (PGE #158, terza unità in v5.2.0): unità di misura di
+# grain.duration e grain.duration_range. Meta-parametro, mirror di loop_unit
+# del pointer. output_sr è una config globale del motore (48000 Hz), non
+# impostabile per-stream: qui è una costante statica come lato PGE
+# (DEFAULT_OUTPUT_SR).
+_GRAIN_DURATION_UNITS = ('seconds', 'samples', 'milliseconds')
 _OUTPUT_SR = 48000
+
+# Quanti secondi vale una unità, per le unità che vanno convertite. Il
+# fattore, non due rami paralleli: 'samples' dipende da output_sr,
+# 'milliseconds' no (lato PGE è SECONDS_PER_MILLISECOND, costante), e
+# modellarli come lo stesso conto con un fattore diverso è ciò che tiene
+# insieme bounds, soppressione dei falsi positivi e messaggi.
+_GRAIN_DURATION_UNIT_SECONDS = {
+    'samples': 1.0 / _OUTPUT_SR,
+    'milliseconds': 1e-3,
+}
+
+# Come si chiamano i valori di quell'unità, nei messaggi.
+_GRAIN_DURATION_UNIT_LABELS = {
+    'samples': 'campioni',
+    'milliseconds': 'millisecondi',
+}
+
+# Al singolare, per il solo posto dove il valore stampato può essere `1`: il
+# minimo in campioni. «la durata minima è un campione (1 campioni)» era una
+# frase che si contraddiceva a metà.
+_GRAIN_DURATION_UNIT_LABELS_SINGULAR = {
+    'samples': 'campione',
+    'milliseconds': 'millisecondo',
+}
+
+
+def _unit_label(unit: str, value: float) -> str:
+    """L'etichetta dell'unità, concordata col valore che accompagna."""
+    if value == 1:
+        return _GRAIN_DURATION_UNIT_LABELS_SINGULAR[unit]
+    return _GRAIN_DURATION_UNIT_LABELS[unit]
+
+# Le scritture del null esplicito. YAML ne ammette tre parole più la tilde, e
+# solo con queste maiuscole: `nUll` è la stringa "nUll".
+_YAML_NULLS = frozenset(('null', 'Null', 'NULL', '~'))
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Il valore di una riga YAML senza il commento inline.
+
+    Un `#` apre un commento solo fuori dalle virgolette e preceduto da uno
+    spazio (o a inizio valore): `milliseconds  # esplicito` vale
+    `milliseconds`, mentre `"a#b"` resta intero e `50#x` pure — lì il
+    cancelletto è dentro il token, come lo legge YAML.
+
+    Serve a chi legge il valore **grezzo** dalla riga invece di passare da
+    `_safe_yaml`: senza questo il commento finisce dentro il valore, e da lì
+    dentro i messaggi e i confronti.
+    """
+    quote = None
+    for i, ch in enumerate(value):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in '"\'':
+            quote = ch
+            continue
+        if ch == '#' and (i == 0 or value[i - 1] in ' \t'):
+            return value[:i].rstrip()
+    return value
 
 
 class DiagnosticProvider:
@@ -178,20 +246,25 @@ class DiagnosticProvider:
 
         # Blocchi grain (PGE #158): scansione unica riusata da fase 4, 5 e 11.
         grain_blocks = self._scan_grain_blocks(lines, streams)
-        # Righe di grain.duration/duration_range in unità samples: i loro
-        # valori sono campioni, non secondi → esclusi dai bound generici.
-        samples_lines = self._samples_suppressed_lines(grain_blocks)
+        # Righe di grain.duration/duration_range in un'unità non-secondi: i
+        # loro valori sono campioni o millisecondi → esclusi dai bound generici.
+        scaled_lines = self._scaled_unit_suppressed_lines(grain_blocks)
 
         # Fase 4: controllo bounds numerici (valori scalari).
         diagnostics.extend(
             d for d in self._check_bounds(parsed)
-            if d.range.start.line not in samples_lines
+            if d.range.start.line not in scaled_lines
         )
+
+        # Righe dentro un blocco deviation_probability: le loro Y sono
+        # probabilità in scala 0-100, non valori del parametro omonimo.
+        dp_lines = self._deviation_probability_lines(lines, streams)
 
         # Fase 5: controllo bounds nei valori envelope (breakpoints Y).
         diagnostics.extend(
             d for d in self._check_envelope_bounds(document_text)
-            if d.range.start.line not in samples_lines
+            if d.range.start.line not in scaled_lines
+            and d.range.start.line not in dp_lines
         )
 
         # Fase 5d: validazione BP group [points, interp] (PGE #64).
@@ -232,6 +305,17 @@ class DiagnosticProvider:
         # Fase 14: grain.read_direction (PGE #207) — dominio a due valori,
         # 'step' imposto, gruppo esclusivo con grain.reverse.
         diagnostics.extend(self._check_read_direction(lines, grain_blocks))
+
+        # Fase 15: corpo di deviation_probability che non si costruisce come
+        # envelope (PGE #209). Prima diventava un AlwaysGate in silenzio.
+        diagnostics.extend(
+            self._check_deviation_probability(lines, streams)
+        )
+
+        # Fase 16: tetto della banda sotto range_anchor: min.
+        diagnostics.extend(
+            self._check_band_ceiling(lines, streams, grain_blocks)
+        )
 
         return diagnostics
 
@@ -2501,6 +2585,76 @@ class DiagnosticProvider:
 
     _POINTER_SCALAR_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
 
+    # L'hint del motore, parola per parola: le due strade vere per far
+    # variare nel tempo la posizione di lettura.
+    _POINTER_START_HINT = (
+        "e' un valore scalare — la posizione di partenza nel sample — e non "
+        "accetta envelope. Se non ti serve, ometti la chiave: il default e' "
+        "0.0 (o loop_start, con un loop attivo). Per far variare nel tempo la "
+        "posizione di lettura usa `pointer.speed_ratio`, oppure un loop mobile "
+        "con `loop_start` come envelope."
+    )
+
+    # Per quel che non e' una struttura il motore non ha un hint suo: dice
+    # solo che il valore non e' un numero, ed e' quello che serve sapere.
+    _POINTER_START_SCALAR_HINT = (
+        "e' un valore scalare: il motore pretende un numero "
+        "(`if not isinstance(self.start, (int, float))`). Se non ti serve, "
+        "ometti la chiave: il default e' 0.0 (o loop_start, con un loop "
+        "attivo)."
+    )
+
+    def _check_pointer_start_envelope(
+        self, lines: List[str], key_line: int, block_end: int,
+    ) -> Optional[Diagnostic]:
+        """
+        Segnala `pointer.start` che non e' un numero (PGE #199, PR #200).
+
+        La spec dichiara `pointer_start` con `is_smart=False`: il valore non
+        diventa mai un `Parameter`, resta grezzo, e `calculate` lo somma alla
+        posizione. Il motore lo ferma all'inizializzazione dello stream con
+        un `InvalidFieldValueError`; prima cadeva piu' a valle come
+        `TypeError` dentro la generazione dei grani, dove non c'era piu' modo
+        di dire all'utente cosa avesse scritto.
+
+        Il guard del motore e' `not isinstance(self.start, (int, float))`:
+        **qualunque cosa** non sia un numero, non le sole strutture. I bool ci
+        passano per sottoclasse, e qui pure.
+
+        Fra il testo e quel guard sta pero' il `Generator`, quindi la stringa
+        si giudica come lui la consegna, con la stessa divisione del lavoro di
+        `read_direction` e `deviation_probability`: su un'espressione fra
+        parentesi si tace — l'esito non e' prevedibile senza rifare l'`eval` —
+        e per il resto si converte con `normalize_engine_values`. Quel che
+        sopravvive alla normalizzazione e' esattamente quel che il motore
+        vede: `"0.5"` e' `0.5` e rende, `"1e3"` resta stringa e viene
+        rifiutata.
+
+        La chiave vuota e' compresa: `pointer.start` non ha bounds nella spec
+        (`min_val` None), quindi non entra fra i parametri numerici di
+        `_check_missing_values` e nessuno la guardava — mentre il motore su
+        `None` alza l'errore come su qualunque altro non-numero.
+
+        Ritorna None per il frammento non interpretabile, che e' il documento
+        a meta' scrittura.
+        """
+        found, raw = self._read_key_value(lines, key_line, block_end)
+        if not found:
+            return None
+        if contains_math_expression(raw):
+            return None
+        valore = normalize_engine_values(raw)
+        if isinstance(valore, (int, float)):
+            return None
+        hint = (self._POINTER_START_HINT if isinstance(raw, (list, dict))
+                else self._POINTER_START_SCALAR_HINT)
+        return Diagnostic(
+            range=self._line_range(key_line),
+            message=f"'pointer.start' {hint}",
+            severity=DiagnosticSeverity.Error,
+            source=SOURCE,
+        )
+
     def _check_pointer_param_bounds(
         self, document_text: str, lines: List[str],
         streams: List[Tuple[int, int, dict]], refs_dir: str,
@@ -2516,7 +2670,10 @@ class DiagnosticProvider:
               [0.0, durata_sample] se il file WAV e' leggibile,
               altrimenti solo [0.0, +inf] (controlla solo limite inferiore)
 
-        I valori envelope (che iniziano con '[') vengono ignorati.
+        I valori envelope vengono ignorati per loop_start, loop_end e
+        loop_dur, che gli envelope li accettano davvero. Per `start` no:
+        li' una curva e' un errore, e la segnala
+        _check_pointer_start_envelope.
 
         document_text resta necessario per _get_effective_unit_mode
         (helper condiviso con l'hover, lavora sul testo completo).
@@ -2597,6 +2754,15 @@ class DiagnosticProvider:
                 key, val_str = m.group(1), m.group(2).strip()
                 if key not in self._POINTER_SCALAR_PARAMS:
                     continue
+                # `start` e' il solo dei quattro a non accettare envelope:
+                # va deciso prima dello skip, che altrimenti lo rende muto.
+                if key == 'start':
+                    diag = self._check_pointer_start_envelope(
+                        lines, n, pointer_end
+                    )
+                    if diag is not None:
+                        diagnostics.append(diag)
+                        continue
                 # Salta envelope e valori vuoti
                 if not val_str or val_str.startswith('[') or val_str.startswith('#'):
                     continue
@@ -2710,7 +2876,12 @@ class DiagnosticProvider:
                 if not m:
                     n += 1
                     continue
-                key, val = m.group(1), m.group(2).strip()
+                # Il valore si legge grezzo dalla riga, quindi il commento
+                # inline va tolto qui: sotto finirebbe dentro l'unità (che
+                # smetterebbe di essere riconosciuta) e dentro lo scalare
+                # della durata (che smetterebbe di essere un numero).
+                key = m.group(1)
+                val = _strip_inline_comment(m.group(2).strip()).strip()
 
                 if key == 'read_direction':
                     info['read_direction_line'] = n
@@ -2725,8 +2896,11 @@ class DiagnosticProvider:
                     if key == 'duration':
                         info['duration_line'] = n
                         # Valore presente: inline (scalare/lista) o envelope
-                        # block-style sulle righe seguenti (indent > 6).
-                        if val:
+                        # block-style sulle righe seguenti (indent > 6). Il
+                        # null esplicito non è una durata dichiarata: il
+                        # motore fa `grain.get('duration') is None` e alza
+                        # MissingFieldError come sulla chiave assente.
+                        if val and val not in _YAML_NULLS:
                             info['has_duration'] = True
                             if not val.startswith('['):
                                 info['duration_scalar'] = val
@@ -2811,6 +2985,370 @@ class DiagnosticProvider:
 
         return diagnostics
 
+    def _check_deviation_probability(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
+        """
+        Segnala il corpo di `deviation_probability` che non si costruisce come
+        envelope (PGE #209).
+
+        Prima quel corpo veniva accettato in silenzio e diventava un
+        `AlwaysGate` — probabilità 100%, la variazione su tutti i grani, cioè
+        il gate più lontano da quanto scritto. Ora il motore lo rifiuta, e la
+        regola sta in `deviation_probability.py`.
+
+        L'ancoraggio segue il campo che il motore nominerebbe: la riga della
+        chiave per-parametro quando l'errore è suo, quella di
+        `deviation_probability` per la forma globale. Così un dict lungo non
+        manda l'utente a cercare quale delle sue chiavi non va.
+        """
+        diagnostics: List[Diagnostic] = []
+
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            key_line = None
+            for n in range(stream_start, stream_end):
+                raw = lines[n]
+                stripped = raw.strip()
+                if stripped.startswith('- '):
+                    stripped = stripped[2:].strip()
+                    leading = 4
+                else:
+                    leading = len(raw) - len(raw.lstrip())
+                if leading == 4 and re.match(
+                        r'^deviation_probability\s*:', stripped):
+                    key_line = n
+                    break
+            if key_line is None:
+                continue
+
+            found, raw_value = self._read_key_value(lines, key_line, stream_end)
+            if not found:
+                # Frammento non interpretabile: documento a metà scrittura.
+                continue
+
+            issue = check_global_value(
+                raw_value,
+                known_keys=self._bridge.get_deviation_probability_keys(),
+            )
+            if issue is None:
+                continue
+
+            anchor = key_line
+            if issue.param_key is not None:
+                # La ricerca si ferma al blocco: in flow style la chiave
+                # interna non ha una riga propria, e scorrere fino a fine
+                # stream la farebbe combaciare con la chiave omonima di
+                # livello stream — una riga corretta, che non c'entra niente
+                # con l'errore. Senza una riga sua l'ancora resta qui.
+                param_line = self._find_key_line(
+                    lines,
+                    key_line + 1,
+                    self._block_end(lines, key_line, stream_end, 4),
+                    issue.param_key,
+                )
+                if param_line is not None:
+                    anchor = param_line
+
+            diagnostics.append(Diagnostic(
+                range=self._line_range(anchor),
+                message=(
+                    f"'{issue.field}': {issue.value!r} non è ammesso. "
+                    f"{issue.hint}"
+                ),
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+
+        return diagnostics
+
+    # Le coppie base/_range che l'ancora governa, con il blocco in cui vivono.
+    # `pointer.offset_range` resta fuori: la sua base è `_dummy_fixed_zero_`,
+    # fissa a 0 e non scrivibile, quindi la banda non può sforare il tetto per
+    # colpa di quanto l'utente ha scritto come base.
+    _ANCHOR_BAND_PAIRS = (
+        (None, 'volume', 'volume_range', 'volume'),
+        (None, 'pan', 'pan_range', 'pan'),
+        ('grain', 'duration', 'duration_range', 'grain.duration'),
+    )
+
+    def _check_band_ceiling(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+        grain_blocks: List[dict],
+    ) -> List[Diagnostic]:
+        """
+        Con `range_anchor: min`, verifica che `base + range` stia sotto il
+        tetto del parametro.
+
+        Sotto l'ancora `center` la banda arriva a `base + range/2` e resta
+        gestita dal safety clamp: è il comportamento storico. Sotto `min` no —
+        la modalità promette una banda esatta, e il motore preferisce
+        rifiutarla al parse (`ParameterBoundError`) invece di schiacciarla
+        contro il tetto e lasciare l'utente convinto di avere la banda che ha
+        scritto. Da qui la severità Error, non un warning.
+
+        Si controlla solo dove il massimo della somma è calcolabile da un solo
+        lato (scalare+scalare, envelope+scalare, scalare+envelope). Con
+        entrambi envelope il massimo della somma non è la somma dei massimi —
+        i due picchi possono cadere in istanti diversi — e un falso positivo
+        bloccherebbe un render valido: lì tace anche il motore.
+
+        Il picco di un envelope è stimato dai suoi breakpoint, come lato
+        motore: con interpolazione cubica la curva può superarli, quindi la
+        stima è per difetto. L'errore cade dalla parte giusta — si lascia
+        passare una banda che sfora di poco, non se ne blocca una valida.
+        """
+        diagnostics: List[Diagnostic] = []
+        grain_by_start = {b['start']: b for b in grain_blocks}
+
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            if not self._anchor_is_min(lines, stream_start, stream_end):
+                continue
+
+            for block, base_key, range_key, yaml_path in self._ANCHOR_BAND_PAIRS:
+                param = self._params_by_yaml_path.get(yaml_path)
+                if param is None or param.max_val is None:
+                    continue
+
+                grain = None
+                if block is None:
+                    scope_start, scope_end, indent = stream_start, stream_end, 4
+                else:
+                    grain = self._grain_block_of(
+                        grain_by_start, stream_start, stream_end
+                    )
+                    if grain is None:
+                        continue
+                    scope_start, scope_end, indent = (
+                        grain['start'] + 1, grain['end'], 6
+                    )
+
+                # I valori di grain.duration sono nell'unità dichiarata, e il
+                # motore li scala prima che il parser li veda: il confronto va
+                # fatto in secondi come fa lui. Il messaggio no — rispondere
+                # in secondi a chi ha scritto millisecondi è rispondere con
+                # numeri che non ha mai visto. Quindi si tiene tutto
+                # nell'unità dichiarata e si converte solo per il confronto.
+                factor, label = 1.0, ''
+                if grain is not None:
+                    unit_factor = _GRAIN_DURATION_UNIT_SECONDS.get(grain['unit'])
+                    if unit_factor is not None:
+                        factor = unit_factor
+                        label = ' ' + _GRAIN_DURATION_UNIT_LABELS[grain['unit']]
+
+                range_line = self._find_key_line_at_indent(
+                    lines, scope_start, scope_end, range_key, indent)
+                if range_line is None:
+                    # Senza range non c'è banda: nemmeno il motore controlla.
+                    continue
+
+                base_line = self._find_key_line_at_indent(
+                    lines, scope_start, scope_end, base_key, indent)
+                if base_line is None:
+                    # Chiave assente: vale il default della spec, che è quanto
+                    # l'orchestrator passa al parser. `volume_range: 24` da
+                    # solo sfora il tetto, e tacere qui lo perderebbe.
+                    if not isinstance(param.default, (int, float)) \
+                            or isinstance(param.default, bool):
+                        continue
+                    # Il default sta in secondi qualunque unità sia dichiarata
+                    # — il motore non lo converte — quindi qui va portato
+                    # nell'unità, non moltiplicato per il fattore come il resto.
+                    base_peak, base_is_env = float(param.default) / factor, False
+                else:
+                    base_peak, base_is_env = self._peak_of(
+                        lines, base_line, scope_end)
+                range_peak, range_is_env = self._peak_of(
+                    lines, range_line, scope_end)
+                if base_peak is None or range_peak is None:
+                    continue
+                if base_is_env and range_is_env:
+                    continue
+
+                ceiling = base_peak + range_peak
+                if ceiling * factor <= param.max_val:
+                    continue
+
+                # `center` fa arrivare la banda a `base + range/2`, e la via
+                # d'uscita "cambia ancora" esiste solo se lì sta sotto il
+                # tetto. Prometterla sempre manda a fare la modifica sbagliata
+                # chi ha una coppia che sfora anche da centrata: lì l'ancora
+                # non decide se la banda sta dentro, decide solo se il motore
+                # la rifiuta o la lascia schiacciare al clamp.
+                centrata = base_peak + range_peak / 2
+                if centrata * factor <= param.max_val:
+                    coda = (
+                        "Da centrata la stessa coppia starebbe dentro, ma "
+                        "`min` promette una banda esatta e il motore la "
+                        "rifiuta al parse invece di schiacciarla col clamp."
+                    )
+                else:
+                    coda = (
+                        f"Da centrata sforerebbe anche lei "
+                        f"({self._fmt_unit_value(centrata)}{label}), ma "
+                        f"finendo sotto il safety clamp invece che rifiutata "
+                        f"al parse: cambiare ancora non la fa stare dentro, "
+                        f"va stretto il range."
+                    )
+
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(range_line),
+                    message=(
+                        f"`range_anchor: min`: la banda di `{yaml_path}` "
+                        f"arriva a {self._fmt_unit_value(ceiling)}{label} "
+                        f"(base + range) e sfora il tetto "
+                        f"{self._fmt_unit_value(param.max_val / factor)}"
+                        f"{label}. {coda}"
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+        return diagnostics
+
+    @staticmethod
+    def _grain_block_of(grain_by_start: dict, stream_start: int,
+                        stream_end: int) -> Optional[dict]:
+        """Il blocco grain di questo stream, se ne ha uno."""
+        for start, block in grain_by_start.items():
+            if stream_start <= start < stream_end:
+                return block
+        return None
+
+    def _anchor_is_min(self, lines: List[str], start: int, end: int) -> bool:
+        """True se lo stream dichiara `range_anchor: min`."""
+        for n in range(start, min(end, len(lines))):
+            m = self._RANGE_ANCHOR_VALUE.match(lines[n])
+            if m:
+                return m.group(1) == 'min'
+        return False
+
+    @staticmethod
+    def _find_key_line_at_indent(lines: List[str], start: int, end: int,
+                                 key: str, indent: int) -> Optional[int]:
+        """La riga di `key:` a un indent preciso, o None."""
+        pattern = re.compile(r'^' + re.escape(key) + r'\s*:')
+        for n in range(start, min(end, len(lines))):
+            raw = lines[n]
+            stripped = raw.strip()
+            if stripped.startswith('- '):
+                stripped = stripped[2:].strip()
+                leading = 4
+            else:
+                leading = len(raw) - len(raw.lstrip())
+            if leading == indent and pattern.match(stripped):
+                return n
+        return None
+
+    def _peak_of(self, lines: List[str], key_line: int,
+                 block_end: int) -> Tuple[Optional[float], bool]:
+        """
+        Il massimo del valore di una chiave, e se quel valore è un envelope.
+
+        Per uno scalare il massimo è il valore; per un envelope è il più alto
+        dei suoi breakpoint, che è la stessa stima che fa il motore.
+
+        Il valore si guarda come il `Generator` lo consegna, non come è
+        scritto: `"-6"` diventa `-6` a qualunque profondità, e la banda che ne
+        esce sfora davvero. Su un'espressione fra parentesi si tace invece —
+        il suo esito non è prevedibile senza rifare l'`eval`, e qui tacere
+        costa una diagnostica mancata mentre indovinare costerebbe un Error
+        su uno YAML che rende.
+
+        Returns:
+            `(picco, is_envelope)`, con picco None se il valore non è
+            interpretabile — documento a metà scrittura, un'espressione, o
+            una forma da cui non si ricava un numero.
+        """
+        found, raw = self._read_key_value(lines, key_line, block_end)
+        if not found or raw is None:
+            return None, False
+        if contains_math_expression(raw):
+            return None, False
+        raw = normalize_engine_values(raw)
+        if isinstance(raw, bool):
+            return None, False
+        if isinstance(raw, (int, float)):
+            return float(raw), False
+        ys = self._envelope_peak(raw)
+        return ys, True
+
+    @staticmethod
+    def _envelope_peak(raw) -> Optional[float]:
+        """Il breakpoint più alto di un envelope già letto come struttura.
+
+        Il motore prende `max(y)` sui breakpoint **espansi**, quindi le
+        macro-forme vanno aperte invece che lette di piatto: in un ciclo
+        compatto `[pattern, end_time, n_reps]` e in un BP group
+        `[points, interp]` le Y stanno dentro l'elemento 0. Leggere
+        l'elemento 1 come Y darebbe l'`end_time` del ciclo — un numero che
+        non è una Y e che sotto `range_anchor: min` fa scattare un Error su
+        uno YAML che rende, cioè il modo peggiore di sbagliarsi.
+
+        Stessa apertura che `_extract_envelope_y_values` fa sul testo; qui la
+        struttura è già parsata, quindi si riusano le forme di
+        `envelope_shapes` invece di riconoscerle di nuovo.
+        """
+        if isinstance(raw, dict):
+            raw = raw.get('points')
+        if not isinstance(raw, list):
+            return None
+
+        def _is_num(v) -> bool:
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        def _ys_of_pattern(points) -> List[float]:
+            """Le Y dei punti piatti dentro una macro-forma."""
+            return [float(pt[1]) for pt in points
+                    if isinstance(pt, list) and len(pt) >= 2 and _is_num(pt[1])]
+
+        # Macro-forma come corpo intero: le Y stanno nel suo elemento 0.
+        if is_loop_block(raw) or is_bp_group(raw):
+            ys = _ys_of_pattern(raw[0])
+            return max(ys) if ys else None
+
+        ys: List[float] = []
+        for item in raw:
+            # Le macro-forme si riconoscono per prime: un ciclo compatto ha
+            # `item[1]` numerico e cadrebbe fra i breakpoint piatti.
+            if is_loop_block(item) or is_bp_group(item):
+                ys.extend(_ys_of_pattern(item[0]))
+            elif (isinstance(item, list) and len(item) >= 2
+                    and _is_num(item[0]) and _is_num(item[1])):
+                ys.append(float(item[1]))
+        return max(ys) if ys else None
+
+    @staticmethod
+    def _block_end(lines: List[str], key_line: int, limit: int,
+                   key_indent: int) -> int:
+        """La prima riga dopo `key_line` che esce dal blocco della chiave.
+
+        Il blocco finisce dove l'indentazione torna al livello della chiave o
+        sopra; le righe vuote non lo chiudono. `key_indent` si passa perche'
+        non sempre coincide con l'indentazione grezza: sulla riga del trattino
+        la chiave sta a colonna 2 ma il suo livello e' 4.
+        """
+        for n in range(key_line + 1, min(limit, len(lines))):
+            riga = lines[n]
+            if not riga.strip():
+                continue
+            if (len(riga) - len(riga.lstrip())) <= key_indent:
+                return n
+        return min(limit, len(lines))
+
+    @staticmethod
+    def _find_key_line(lines: List[str], start: int, end: int,
+                       key: str) -> Optional[int]:
+        """La riga di `key:` dentro un intervallo, o None se non c'è."""
+        pattern = re.compile(r'^' + re.escape(key) + r'\s*:')
+        for n in range(start, min(end, len(lines))):
+            if pattern.match(lines[n].strip()):
+                return n
+        return None
+
     def _read_key_value(self, lines: List[str], key_line: int,
                         block_end: int) -> Tuple[bool, object]:
         """
@@ -2824,6 +3362,14 @@ class DiagnosticProvider:
         minore o uguale al suo, dedentato a colonna 0 perché `safe_load` non
         accetta un documento che comincia rientrato.
 
+        La prima chiave di un elemento di lista sta sulla riga del trattino
+        (`  - deviation_probability: []`), e lì l'indentazione grezza è quella
+        del trattino, non della chiave: il trattino si spoglia e l'indent si
+        prende dove la chiave comincia davvero. Senza, la riga non veniva
+        riconosciuta e la lettura usciva in silenzio — con le fasi che invece
+        la chiave su quella riga la riconoscono, i due lati dicevano cose
+        diverse.
+
         Returns:
             `(True, valore)` se il frammento è YAML valido e contiene la
             chiave — `valore` è `None` per la chiave scritta e lasciata vuota.
@@ -2831,8 +3377,10 @@ class DiagnosticProvider:
             scrittura, da non segnalare.
         """
         raw_line = lines[key_line]
-        key_indent = len(raw_line) - len(raw_line.lstrip())
-        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', raw_line.strip())
+        trattino = re.match(r'^\s*-\s+', raw_line)
+        key_indent = (trattino.end() if trattino
+                      else len(raw_line) - len(raw_line.lstrip()))
+        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', raw_line[key_indent:])
         if not m:
             return False, None
         key = m.group(1)
@@ -2855,13 +3403,54 @@ class DiagnosticProvider:
             return False, None
         return True, data[key]
 
-    def _samples_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
-        """Righe di duration/duration_range dentro un blocco grain in samples:
-        i loro valori sono campioni, non secondi — vanno esclusi dai bound
-        generici (in secondi) per non produrre falsi positivi."""
+    def _deviation_probability_lines(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> 'frozenset[int]':
+        """Le righe coperte da un blocco `deviation_probability:`.
+
+        Le Y scritte lì sono **probabilità**, in scala 0-100 (`RandomGate`
+        confronta `uniform(0, 100)` e clampa gli estremi), non valori del
+        parametro che porta lo stesso nome: il gate non le confronta mai con
+        i suoi bound. `_check_envelope_bounds` invece risolve la chiave per
+        nome locale, e `volume: [[0, 20], [10, 90]]` — la forma che l'hover
+        insegna — prendeva due Error contro i bound di `volume` in decibel.
+
+        Stesso mestiere di `_scaled_unit_suppressed_lines`, e per lo stesso
+        motivo: una scala diversa da quella in cui sono espressi i bound.
+
+        Serve solo ai bound degli **envelope**. Quelli scalari risolvono sul
+        path completo (`deviation_probability.volume`), che non è un
+        parametro, quindi non ci arrivano; il corpo del blocco lo giudica la
+        fase 15, che è l'unica a sapere cosa il motore ci costruisce.
+        """
+        covered: set = set()
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            for n in range(stream_start, min(stream_end, len(lines))):
+                raw = lines[n]
+                stripped = raw.strip()
+                if stripped.startswith('- '):
+                    stripped = stripped[2:].strip()
+                    leading = 4
+                else:
+                    leading = len(raw) - len(raw.lstrip())
+                if leading != 4 or not re.match(
+                        r'^deviation_probability\s*:', stripped):
+                    continue
+                covered.update(
+                    range(n, self._block_end(lines, n, stream_end, 4)))
+        return frozenset(covered)
+
+    def _scaled_unit_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
+        """Righe di duration/duration_range dentro un blocco grain in un'unità
+        non-secondi: i loro valori sono campioni o millisecondi, non secondi —
+        vanno esclusi dai bound generici (in secondi) per non produrre falsi
+        positivi. `50` in millisecondi è la grana breve, non cinquanta volte
+        il tetto del parametro."""
         suppressed: set = set()
         for b in grain_blocks:
-            if b['unit'] == 'samples':
+            if b['unit'] in _GRAIN_DURATION_UNIT_SECONDS:
                 suppressed |= b['value_lines']
         return frozenset(suppressed)
 
@@ -2927,22 +3516,40 @@ class DiagnosticProvider:
                 ))
         return diagnostics
 
+    @staticmethod
+    def _fmt_unit_value(value: float) -> str:
+        """Un numero come si scrive in un messaggio, qualunque grandezza sia.
+
+        Durate, dB, gradi: la regola e' la stessa — 480000 e non 480000.0, ma
+        0.0208 quando il minimo di un campione in millisecondi lo richiede.
+        L'unita' la mette il chiamante, che e' l'unico a sapere quale sia.
+        """
+        if abs(value - round(value)) < 1e-9:
+            return str(int(round(value)))
+        return f'{value:.4g}'
+
     def _check_grain_duration_unit(self, grain_blocks: List[dict]) -> List[Diagnostic]:
         """
-        Valida grain.duration_unit (PGE #158):
-          - unità non in {seconds, samples} → Error;
-          - con samples, grain.duration deve essere esplicita (il default
-            0.05 è in secondi e non viene convertito) → Error;
-          - con samples, valida i valori scalari di duration in [1, max]
-            campioni (max = bound massimo in secondi × output_sr).
+        Valida grain.duration_unit (PGE #158, terza unità in v5.2.0):
+          - unità non in {seconds, samples, milliseconds} → Error;
+          - con un'unità non-secondi, grain.duration deve essere esplicita
+            (il default 0.05 è in secondi e non viene convertito) → Error;
+          - con un'unità non-secondi, valida il valore scalare di duration
+            contro i bound del parametro convertiti in quell'unità.
+
+        La regola della durata esplicita vale per ogni unità non-secondi, non
+        per `samples` soltanto: senza `grain.duration` la base resterebbe in
+        secondi mentre `duration_range` sarebbe nell'unità dichiarata — due
+        domini nello stesso blocco.
+
+        I bound arrivano dal parametro (secondi) e si convertono dividendo per
+        il fattore dell'unità. Il minimo non è quello del registro ma **un
+        campione**, come lato motore, che in campioni fa 1 e in millisecondi
+        1/48: dipende da output_sr anche quando l'unità non ne dipende.
         """
         diagnostics: List[Diagnostic] = []
         grain_dur = self._params_by_yaml_path.get('grain.duration')
-        max_samples = (
-            round(grain_dur.max_val * _OUTPUT_SR)
-            if grain_dur is not None and grain_dur.max_val is not None
-            else None
-        )
+        max_seconds = grain_dur.max_val if grain_dur is not None else None
 
         for b in grain_blocks:
             unit = b['unit']
@@ -2959,46 +3566,56 @@ class DiagnosticProvider:
                 ))
                 continue
 
-            if unit != 'samples':
-                continue
+            factor = _GRAIN_DURATION_UNIT_SECONDS.get(unit)
+            if factor is None:
+                continue  # 'seconds' o chiave assente: nulla da convertire
+            label = _GRAIN_DURATION_UNIT_LABELS[unit]
 
-            # samples richiede grain.duration esplicita.
+            # Un'unità non-secondi richiede grain.duration esplicita.
             if not b['has_duration']:
                 diagnostics.append(Diagnostic(
                     range=self._line_range(b['unit_line']),
                     message=(
-                        "`grain.duration_unit: samples` richiede una "
-                        "`grain.duration` esplicita: il default 0.05 è in "
-                        "secondi e non verrebbe convertito in campioni."
+                        f"`grain.duration_unit: {unit}` richiede una "
+                        f"`grain.duration` esplicita in {label}: il default "
+                        f"0.05 è in secondi e non verrebbe convertito."
                     ),
                     severity=DiagnosticSeverity.Error,
                     source=SOURCE,
                 ))
 
-            # Bound in campioni per il valore scalare di duration.
+            # Bound del parametro, espressi nell'unità dichiarata.
+            min_in_unit = (1.0 / _OUTPUT_SR) / factor
+            max_in_unit = max_seconds / factor if max_seconds is not None else None
+
             scalar = self._try_parse_number(b['duration_scalar']) \
                 if b['duration_scalar'] is not None else None
-            if scalar is not None:
-                if scalar < 1:
-                    diagnostics.append(Diagnostic(
-                        range=self._line_range(b['duration_line']),
-                        message=(
-                            f"`grain.duration` = {b['duration_scalar']} campioni: "
-                            f"la durata minima è 1 campione."
-                        ),
-                        severity=DiagnosticSeverity.Error,
-                        source=SOURCE,
-                    ))
-                elif max_samples is not None and scalar > max_samples:
-                    diagnostics.append(Diagnostic(
-                        range=self._line_range(b['duration_line']),
-                        message=(
-                            f"`grain.duration` = {b['duration_scalar']} campioni "
-                            f"fuori range [1, {max_samples}] (max = "
-                            f"{grain_dur.max_val}s × {_OUTPUT_SR})."
-                        ),
-                        severity=DiagnosticSeverity.Error,
-                        source=SOURCE,
-                    ))
+            if scalar is None:
+                continue
+
+            if scalar < min_in_unit:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(b['duration_line']),
+                    message=(
+                        f"`grain.duration` = {b['duration_scalar']} {label}: "
+                        f"la durata minima è un campione "
+                        f"({self._fmt_unit_value(min_in_unit)} "
+                        f"{_unit_label(unit, min_in_unit)})."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+            elif max_in_unit is not None and scalar > max_in_unit:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(b['duration_line']),
+                    message=(
+                        f"`grain.duration` = {b['duration_scalar']} {label} "
+                        f"fuori range [{self._fmt_unit_value(min_in_unit)}, "
+                        f"{self._fmt_unit_value(max_in_unit)}] "
+                        f"(max = {max_seconds}s)."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
 
         return diagnostics

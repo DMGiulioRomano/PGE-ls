@@ -17,9 +17,96 @@ collisione con [t, v] (elem[0] numerico), 3-tuple e loop block (len != 2),
 o il legacy [[t, v], 'marker'] (elem[0] e' UN punto, non lista di punti).
 """
 
+import re
+
 # Tipi di interpolazione validi per il group interp (mirror di
 # EnvelopeBuilder.VALID_INTERP_TYPES in PGE).
 VALID_INTERP_TYPES = ('linear', 'cubic', 'step')
+
+# Il pattern con cui il Generator riconosce un'espressione da valutare (mirror
+# di `Generator._eval_math_expressions` in PGE, src/pge/engine/generator.py).
+# La classe di caratteri e' la sua: se il motore allarga o restringe cio' che
+# valuta, questa riga e' il posto che deve seguirlo.
+_MATH_EXPRESSION_RE = re.compile(r'\(([a-zA-Z0-9+\-*/.() ]+)\)')
+
+
+def is_math_expression(value) -> bool:
+    """True se il Generator proverebbe a valutare questa stringa.
+
+    Non dice quanto ne uscirebbe — solo che il valore che il motore vede non
+    e' quello scritto nello YAML. Serve a tacere, non a decidere: chi la
+    chiama sa che su quel valore non ha piu' niente da dire.
+    """
+    return (isinstance(value, str)
+            and _MATH_EXPRESSION_RE.search(value) is not None)
+
+
+def numeric_string_value(value):
+    """Il numero in cui il Generator converte questa stringa, o None.
+
+    Mirror della **coda** di `_eval_math_expressions`: dopo la sostituzione
+    delle espressioni il testo viene convertito con `float(...)` se contiene
+    un punto e `int(...)` altrimenti, e resta stringa solo se la conversione
+    alza `ValueError`. La conversione non pretende le parentesi: `"50"` arriva
+    come `50` e `"1.5"` come `1.5`, mentre `"1e3"` e `"abc"` restano stringhe.
+
+    Questa meta' della funzione e' riproducibile esattamente — e' una
+    `try/except` — a differenza dell'`eval` fra parentesi, il cui esito non e'
+    prevedibile. Da qui la divisione del lavoro: sulle espressioni si tace,
+    sulle stringhe numeriche si converte come il motore e poi si decide.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return float(value) if '.' in value else int(value)
+    except ValueError:
+        return None
+
+
+def normalize_engine_values(obj):
+    """Il corpo come il Generator lo consegna, per la parte decidibile.
+
+    Converte in numero, a qualunque profondita', le stringhe che
+    `_eval_math_expressions` convertirebbe; lascia intatto tutto il resto,
+    espressioni comprese — quelle si gestiscono tacendo, non normalizzando.
+
+    Serve prima di ogni controllo di forma: senza, `[[0, "1"], [10, "-1"]]`
+    non sembra una lista di breakpoint, mentre il motore ci legge
+    `[[0, 1], [10, -1]]` e la costruisce.
+
+    Sui dict si scende nei soli valori, come il motore: le chiavi restano
+    quelle scritte.
+    """
+    if isinstance(obj, str):
+        numero = numeric_string_value(obj)
+        return obj if numero is None else numero
+    if isinstance(obj, dict):
+        return {k: normalize_engine_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [normalize_engine_values(item) for item in obj]
+    return obj
+
+
+def contains_math_expression(obj) -> bool:
+    """True se una stringa da valutare compare in `obj`, a qualunque profondita'.
+
+    `_eval_math_expressions` ricorre dentro liste e dict e riconverte il
+    risultato a numero: una `(50/2)` sepolta nella Y di un breakpoint arriva
+    al parser come `25`, esattamente come farebbe da scalare. Un mirror che
+    escludesse le stringhe solo al primo livello segnalerebbe come malformato
+    un envelope che il motore costruisce — il modo peggiore in cui un language
+    server puo' sbagliarsi.
+
+    Sui dict si scende nei soli valori, come il motore: le chiavi restano
+    quelle scritte, `_eval_math_expressions` non le tocca.
+    """
+    if isinstance(obj, str):
+        return is_math_expression(obj)
+    if isinstance(obj, dict):
+        return any(contains_math_expression(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return any(contains_math_expression(item) for item in obj)
+    return False
 
 
 def is_num(x) -> bool:
@@ -95,7 +182,16 @@ def is_loop_block(item) -> bool:
     """
     True se item e' un loop block compact
     [pattern, end_time, n_reps, interp?, time_dist?, wrap?]
-    (mirror di EnvelopeBuilder._is_compact_format in PGE).
+    (mirror di EnvelopeBuilder.is_compact_format in PGE).
+
+    `end_time` e `n_reps` accettano i bool, come nel motore, che usa
+    `isinstance(..., (int, float))` e `isinstance(..., int)` nudi: `True` e'
+    un `int` per sottoclasse e li passa. La differenza non e' cosmetica —
+    decide quale messaggio riceve `[[[0, 1], [50, -1]], true, 2]`. Con il
+    riconoscimento stretto la forma non sarebbe un ciclo e l'utente
+    leggerebbe che il valore non e' un envelope; cosi' arriva al guard su
+    `end_time`, che e' il suo problema vero. Solo `wrap` pretende un bool
+    puro, ed e' il motore a pretenderlo.
     """
     if not isinstance(item, list) or not (3 <= len(item) <= 6):
         return False
@@ -104,9 +200,9 @@ def is_loop_block(item) -> bool:
     if item[0] and not all(
             isinstance(p, list) and len(p) in (2, 3) for p in item[0]):
         return False
-    if not is_num(item[1]):
+    if not isinstance(item[1], (int, float)):
         return False
-    if not isinstance(item[2], int) or isinstance(item[2], bool):
+    if not isinstance(item[2], int):
         return False
     if len(item) >= 4 and item[3] is not None and not isinstance(item[3], str):
         return False
