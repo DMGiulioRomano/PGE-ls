@@ -3646,6 +3646,50 @@ class TestDeviationProbabilityEnvelopeBody:
         )
         assert len(self._errors(provider, yaml)) == 1
 
+    # --- le Y sono probabilita', non valori del parametro (rilievo 3) -----
+    #
+    # Qui non vale `_errors`: il messaggio da NON vedere è quello dei bound
+    # generici, che la chiave `deviation_probability` non la nomina.
+
+    @staticmethod
+    def _bounds_errors(provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'fuori dai bounds' in d.message]
+
+    def test_scala_percentuale_non_prende_i_bound_del_parametro(self, bridge):
+        """La forma che l'hover insegna: 20 e 90 sono probabilità, non
+        decibel, e il gate non le confronta mai coi bound di `volume`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, 20], [10, 90]]\n"
+        )
+        assert self._bounds_errors(provider, yaml) == []
+
+    def test_scala_percentuale_block_style(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume:\n"
+            "        - [0, 20]\n"
+            "        - [10, 90]\n"
+        )
+        assert self._bounds_errors(provider, yaml) == []
+
+    def test_il_volume_di_stream_resta_dentro_i_suoi_bound(self, bridge):
+        """La regressione: la soppressione è per blocco, e il blocco finisce
+        dove finisce."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, 20], [10, 90]]\n"
+            "    volume: [[0, 20], [10, 90]]\n"
+        )
+        errors = self._bounds_errors(provider, yaml)
+        assert len(errors) == 2
+        assert all(e.range.start.line == 7 for e in errors)
+
     def test_chiave_ignota_accanto_a_una_nota_non_copre_l_errore(self, bridge):
         """La chiave ignota non è un lasciapassare per il blocco."""
         provider = DiagnosticProvider(bridge)

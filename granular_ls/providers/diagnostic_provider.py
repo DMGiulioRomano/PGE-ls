@@ -239,10 +239,15 @@ class DiagnosticProvider:
             if d.range.start.line not in scaled_lines
         )
 
+        # Righe dentro un blocco deviation_probability: le loro Y sono
+        # probabilità in scala 0-100, non valori del parametro omonimo.
+        dp_lines = self._deviation_probability_lines(lines, streams)
+
         # Fase 5: controllo bounds nei valori envelope (breakpoints Y).
         diagnostics.extend(
             d for d in self._check_envelope_bounds(document_text)
             if d.range.start.line not in scaled_lines
+            and d.range.start.line not in dp_lines
         )
 
         # Fase 5d: validazione BP group [points, interp] (PGE #64).
@@ -3343,6 +3348,45 @@ class DiagnosticProvider:
         if not isinstance(data, dict) or key not in data:
             return False, None
         return True, data[key]
+
+    def _deviation_probability_lines(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> 'frozenset[int]':
+        """Le righe coperte da un blocco `deviation_probability:`.
+
+        Le Y scritte lì sono **probabilità**, in scala 0-100 (`RandomGate`
+        confronta `uniform(0, 100)` e clampa gli estremi), non valori del
+        parametro che porta lo stesso nome: il gate non le confronta mai con
+        i suoi bound. `_check_envelope_bounds` invece risolve la chiave per
+        nome locale, e `volume: [[0, 20], [10, 90]]` — la forma che l'hover
+        insegna — prendeva due Error contro i bound di `volume` in decibel.
+
+        Stesso mestiere di `_scaled_unit_suppressed_lines`, e per lo stesso
+        motivo: una scala diversa da quella in cui sono espressi i bound.
+
+        Serve solo ai bound degli **envelope**. Quelli scalari risolvono sul
+        path completo (`deviation_probability.volume`), che non è un
+        parametro, quindi non ci arrivano; il corpo del blocco lo giudica la
+        fase 15, che è l'unica a sapere cosa il motore ci costruisce.
+        """
+        covered: set = set()
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            for n in range(stream_start, min(stream_end, len(lines))):
+                raw = lines[n]
+                stripped = raw.strip()
+                if stripped.startswith('- '):
+                    stripped = stripped[2:].strip()
+                    leading = 4
+                else:
+                    leading = len(raw) - len(raw.lstrip())
+                if leading != 4 or not re.match(
+                        r'^deviation_probability\s*:', stripped):
+                    continue
+                covered.update(
+                    range(n, self._block_end(lines, n, stream_end, 4)))
+        return frozenset(covered)
 
     def _scaled_unit_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
         """Righe di duration/duration_range dentro un blocco grain in un'unità
