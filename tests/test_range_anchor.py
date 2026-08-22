@@ -659,3 +659,55 @@ class TestBandCeilingUnderAnchorMin:
             "    volume_range: 12\n"
         )
         assert self._ceiling_errors(provider, yaml) == []
+
+    # --- le stringhe che il Generator converte (review PR #48, rilievo 8) --
+
+    def test_base_stringa_numerica_e_segnalata(self, bridge):
+        """`"-6"` arriva al parser come `-6`: la banda sfora davvero."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            '    volume: "-6"\n'
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_range_stringa_numerica_e_segnalato(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: -6\n"
+            '    volume_range: "24"\n'
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_stringhe_dentro_i_breakpoint_sono_segnalate(self, bridge):
+        """La conversione ricorre: le Y stringa contano come le altre."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            '    volume: [[0, "-6"], [10, "-6"]]\n'
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_stringa_numerica_sotto_il_tetto_non_segnalata(self, bridge):
+        """La regressione dall'altro lato: convertire non vuol dire segnalare."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            '    volume: "-60"\n'
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_espressione_matematica_fa_tacere(self, bridge):
+        """Su un'espressione si tace, come ovunque: prevederne l'esito
+        vorrebbe dire rifare l'`eval`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream(
+            "    range_anchor: min\n"
+            "    volume: (0-6)\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []

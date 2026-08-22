@@ -3236,14 +3236,24 @@ class DiagnosticProvider:
         Per uno scalare il massimo è il valore; per un envelope è il più alto
         dei suoi breakpoint, che è la stessa stima che fa il motore.
 
+        Il valore si guarda come il `Generator` lo consegna, non come è
+        scritto: `"-6"` diventa `-6` a qualunque profondità, e la banda che ne
+        esce sfora davvero. Su un'espressione fra parentesi si tace invece —
+        il suo esito non è prevedibile senza rifare l'`eval`, e qui tacere
+        costa una diagnostica mancata mentre indovinare costerebbe un Error
+        su uno YAML che rende.
+
         Returns:
             `(picco, is_envelope)`, con picco None se il valore non è
-            interpretabile — documento a metà scrittura, o una forma da cui
-            non si ricava un numero.
+            interpretabile — documento a metà scrittura, un'espressione, o
+            una forma da cui non si ricava un numero.
         """
         found, raw = self._read_key_value(lines, key_line, block_end)
         if not found or raw is None:
             return None, False
+        if contains_math_expression(raw):
+            return None, False
+        raw = normalize_engine_values(raw)
         if isinstance(raw, bool):
             return None, False
         if isinstance(raw, (int, float)):

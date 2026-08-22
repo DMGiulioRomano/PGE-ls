@@ -710,7 +710,27 @@ BAND_CEILING_CORPUS = [
     ([[0, -60], [[[0, 9], [100, 9]], 10.0, 2]], 4),
     ([[[0, 0], [10, 0]], 'linear'], 4),
     ([[0, -60], [[[0, 0], [10, 0]], 'linear']], 4),
+    # stringhe numeriche: il Generator le converte prima che il parser le
+    # veda, quindi la banda sfora davvero. Il mirror deve normalizzare come
+    # lui invece di rinunciare al confronto.
+    ('-6', 24), (-6, '24'), ('-6', '24'),
+    ([[0, '-6'], [10, '-6']], 24), (-6, [[0, '24'], [10, '24']]),
+    # e le stesse coppie sotto il tetto, per non scambiare la conversione con
+    # un Error a prescindere
+    ('-60', 24), (-6, '6'),
 ]
+
+
+def _yaml_scalar(value) -> str:
+    """Il valore come si scrive nello YAML.
+
+    Le stringhe si riquotano: senza, `'-6'` finirebbe nel documento come il
+    numero `-6` e il caso da verificare sparirebbe. Dentro le liste ci pensa
+    gia' `repr` di Python, che e' flow YAML valido.
+    """
+    if isinstance(value, str):
+        return f'"{value}"'
+    return str(value)
 
 
 def _band_ceiling_bridge():
@@ -774,17 +794,25 @@ def test_band_ceiling_mirror_matches_engine(pge, base, mod_range, tmp_path,
     # None, arriva il default della spec — è l'orchestrator a sostituirlo.
     base_engine = 0.0 if base is None else base
 
+    # Al parser i valori arrivano gia' passati dal Generator, non come sono
+    # scritti: senza questa riga le stringhe numeriche verrebbero confrontate
+    # con una pipeline che nel motore non esiste.
+    evaluate, _ = _load_eval_math_expressions()
+    base_engine = evaluate(base_engine)
+    range_engine = evaluate(mod_range)
+
     try:
-        GranularParser(_Cfg()).parse_parameter('volume', base_engine, mod_range)
+        GranularParser(_Cfg()).parse_parameter('volume', base_engine,
+                                               range_engine)
         motore_rifiuta = False
     except ParameterBoundError:
         motore_rifiuta = True
 
     body = "    range_anchor: min\n"
     if base is not None:
-        body += f"    volume: {base}\n"
+        body += f"    volume: {_yaml_scalar(base)}\n"
     if mod_range is not None:
-        body += f"    volume_range: {mod_range}\n"
+        body += f"    volume_range: {_yaml_scalar(mod_range)}\n"
     yaml = ("streams:\n  - stream_id: s1\n    duration: 10.0\n"
             "    sample: f.wav\n" + body)
 
