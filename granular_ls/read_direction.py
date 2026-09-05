@@ -33,10 +33,33 @@ Cosa resta fuori, come nel motore: `end_time <= time_offset`, che dipende
 dall'offset accumulato dagli elementi che precedono il ciclo in una lista
 mista. Verificarlo vorrebbe dire rifare la passata di `EnvelopeBuilder.parse`.
 Qui se ne verifica il segno, decidibile perché quell'offset non è mai negativo.
+
+E resta fuori ogni corpo dove compare un'espressione matematica: il `Generator`
+valuta `(...)` su tutto lo YAML — ricorrendo dentro liste e dict — prima che il
+controller veda i valori, quindi `(0-1)` arriva come `-1` e la stringa scritta
+non è il valore. Segnalarla sarebbe un falso positivo su YAML che rende.
+
+La conversione in numero invece non pretende le parentesi (`"1"` arriva come
+`1`, un verso legittimo) ed è una `try/except ValueError`, cioè riproducibile:
+il valore si normalizza con `normalize_engine_values` prima di guardarlo. Le
+stringhe che restano stringhe — `"abc"`, `""`, `"1e3"` — sono errori come per
+il motore.
 """
 
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
+
+from granular_ls.envelope_shapes import (
+    contains_math_expression,
+    is_3tuple_breakpoint as _is_3tuple_breakpoint,
+    is_bp_group as _is_bp_group,
+    is_loop_block as _is_compact_format,
+    normalize_engine_values,
+)
+from granular_ls.time_distributions import (
+    TIME_DISTRIBUTION_NAMES as _TIME_DISTRIBUTION_NAMES,
+    check_time_distribution,
+)
 
 # La chiave nello YAML: identità del campo in ogni diagnostica.
 READ_DIRECTION_PATH = 'grain.read_direction'
@@ -50,12 +73,11 @@ READ_DIRECTION_VALUES: Tuple[float, float] = (-1.0, 1.0)
 # L'unica interpolazione ammessa, e quella imposta.
 REQUIRED_INTERP = 'step'
 
-# Nomi validi della distribuzione temporale dei cicli, alias compresi
-# (mirror di TimeDistributionFactory._DISTRIBUTIONS).
-TIME_DISTRIBUTION_NAMES: Tuple[str, ...] = (
-    'exp', 'exponential', 'geo', 'geometric', 'linear', 'log',
-    'logarithmic', 'power',
-)
+# Nomi validi della distribuzione temporale dei cicli: vivono in
+# time_distributions.py, che è il registro condiviso con le altre chiavi che
+# accettano un envelope. Ri-esportati qui perché sono parte della superficie
+# storica di questo modulo.
+TIME_DISTRIBUTION_NAMES: Tuple[str, ...] = tuple(_TIME_DISTRIBUTION_NAMES)
 
 
 @dataclass(frozen=True)
@@ -224,68 +246,16 @@ EXCLUSIVE_HINT = (
 # =============================================================================
 # RICONOSCIMENTO DELLE FORME
 # =============================================================================
-# `envelope_shapes.is_loop_block` non va bene qui: esclude i bool da `end_time`
-# e `n_reps`, mentre `_is_compact_format` li accetta per sottoclasse di `int`.
-# La differenza non è cosmetica — decide quale messaggio riceve
-# `[[[0, 1], [50, -1]], true, 2]`. Con il riconoscimento stretto la forma non
-# sarebbe un ciclo e l'utente leggerebbe che il valore non è un envelope; con
-# questo arriva al guard su `end_time`, che è il suo problema vero.
+# Il riconoscimento viene da `envelope_shapes`, che è il mirror condiviso delle
+# forme. Qui c'era una copia locale di `_is_compact_format`, tenuta perché
+# `is_loop_block` escludeva i bool da `end_time` e `n_reps` mentre il motore li
+# accetta per sottoclasse di `int`: quella divergenza è stata corretta alla
+# fonte, e la copia non serve più.
 
 def _is_num(value: Any) -> bool:
     """Numero vero: `bool` è sottoclasse di `int`, ma `true` non è `+1`."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-
-def _is_compact_format(item: Any) -> bool:
-    """Mirror fedele di `EnvelopeBuilder._is_compact_format`, bool compresi."""
-    if not isinstance(item, list) or not (3 <= len(item) <= 6):
-        return False
-    if not isinstance(item[0], list):
-        return False
-    if item[0] and not all(
-            isinstance(p, list) and len(p) in (2, 3) for p in item[0]):
-        return False
-    if not isinstance(item[1], (int, float)):
-        return False
-    if not isinstance(item[2], int):
-        return False
-    if len(item) >= 4 and item[3] is not None and not isinstance(item[3], str):
-        return False
-    if len(item) >= 5 and item[4] is not None \
-            and not isinstance(item[4], (str, dict)):
-        return False
-    if len(item) == 6 and not isinstance(item[5], bool):
-        return False
-    return True
-
-
-def _is_bp_group(item: Any) -> bool:
-    """Mirror fedele di `EnvelopeBuilder._is_bp_group`."""
-    if not isinstance(item, list) or len(item) != 2:
-        return False
-    points, interp = item
-    if not isinstance(interp, str) or not isinstance(points, list):
-        return False
-    for p in points:
-        if not isinstance(p, list) or len(p) not in (2, 3):
-            return False
-        if not _is_num(p[0]) or not _is_num(p[1]):
-            return False
-        if len(p) == 3 and not isinstance(p[2], str):
-            return False
-    return True
-
-
-def _is_3tuple_breakpoint(item: Any) -> bool:
-    """Mirror fedele di `EnvelopeBuilder._is_3tuple_breakpoint`."""
-    return (isinstance(item, list) and len(item) == 3
-            and _is_num(item[0]) and _is_num(item[1])
-            and isinstance(item[2], str))
-
-
-# =============================================================================
-# VALIDAZIONE
-# =============================================================================
 
 def _issue(value: Any, hint: str) -> ReadDirectionIssue:
     return ReadDirectionIssue(value=value, hint=hint)
@@ -441,62 +411,26 @@ def _check_pattern_point(point: list,
     return _check_direction_value(point[1])
 
 
-# Bound dei costruttori del registro delle distribuzioni temporali, replicati
-# per tabella: qui non c'è TimeDistributionFactory da chiamare. Il valore è
-# (nome_parametro, predicato, ...) — vedi _check_time_dist.
-#
-# `power.exponent` chiede solo che sia un numero, e il `bool` glielo passa:
-# `true ** n` fa 1, non alza niente, e rifiutarlo qui romperebbe YAML che
-# oggi rendono. Le sorelle invece hanno bound veri, su cui i bool cadono da
-# soli (`rate: false` vale 0 e non è > 0; `base: true` vale 1 e non è > 1).
-_DIST_PARAM_SPECS = {
-    'linear': {},
-    'exponential': {'rate': lambda v: _is_num(v) and v > 0},
-    'exp': {'rate': lambda v: _is_num(v) and v > 0},
-    'logarithmic': {'base': lambda v: _is_num(v) and v > 1},
-    'log': {'base': lambda v: _is_num(v) and v > 1},
-    'geometric': {'ratio': lambda v: _is_num(v) and v > 0},
-    'geo': {'ratio': lambda v: _is_num(v) and v > 0},
-    'power': {'exponent': lambda v: isinstance(v, (int, float))},
-}
-
-
 def _check_time_dist(spec: Any) -> Optional[ReadDirectionIssue]:
-    """La distribuzione temporale del ciclo: nome dal registro, poi parametri.
+    """La distribuzione temporale del ciclo, raccontata per questa chiave.
 
-    Due passaggi come nel motore, per due ragioni diverse: il nome si legge
-    dal registro (così l'hint può elencare quelli validi, che è l'errore più
-    frequente), i parametri si controllano contro i bound dei costruttori.
-
-    Il motore i parametri li valida costruendo; qui non c'è niente da
-    costruire, quindi i bound sono replicati in `_DIST_PARAM_SPECS`. È l'unico
-    punto del modulo che può divergere dal motore senza che il resto se ne
-    accorga: `tests/test_pge_parity.py` lo copre.
+    Le regole — nome dal registro, bound dei costruttori — stanno in
+    `time_distributions.py`: sono le stesse per ogni chiave che accetta un
+    envelope, non una semantica del verso di lettura. Qui resta la
+    formulazione, che invece è di questa chiave: chi sbaglia il quinto
+    elemento scrivendo un verso va rimandato all'envelope, che è dove quei
+    vincoli sono documentati.
     """
-    nome = spec.get('type', 'linear') if isinstance(spec, dict) else spec
-    if nome is None:
-        nome = 'linear'
-    if not isinstance(nome, str) or nome.lower() not in TIME_DISTRIBUTION_NAMES:
+    issue = check_time_distribution(spec)
+    if issue is None:
+        return None
+    if issue.kind == 'name':
         return _issue(spec, DIST_NAME_HINT.format(
             disponibili=', '.join(TIME_DISTRIBUTION_NAMES)))
-
-    if not isinstance(spec, dict):
-        # Nome nudo: nessun parametro da controllare, i default sono validi.
-        return None
-
-    senza_tipo = 'type' not in spec
-    ammessi = _DIST_PARAM_SPECS[nome.lower()]
-    for chiave, valore in spec.items():
-        if chiave == 'type':
-            continue
-        # Parametro estraneo al tipo: il costruttore lo rifiuterebbe come
-        # kwarg inatteso (TypeError), che il factory riveste di ValueError.
-        if chiave not in ammessi or not ammessi[chiave](valore):
-            return _issue(spec, DIST_PARAM_HINT.format(
-                nome=nome,
-                nota=DIST_TIPO_IMPLICITO if senza_tipo else '',
-            ))
-    return None
+    return _issue(spec, DIST_PARAM_HINT.format(
+        nome=issue.nome,
+        nota=DIST_TIPO_IMPLICITO if issue.senza_tipo else '',
+    ))
 
 
 def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
@@ -514,6 +448,16 @@ def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
         `None` se il motore lo accetterebbe; il primo `ReadDirectionIssue`
         altrimenti, nello stesso ordine in cui il motore solleverebbe.
     """
+    if contains_math_expression(raw):
+        # Il `Generator` valuta le espressioni prima del parse: qui non si
+        # legge il valore, si legge la sua scrittura. Il silenzio è sul corpo
+        # intero, perché il verso vero dipende da quell'espressione.
+        return None
+
+    # Le stringhe numeriche invece si convertono come fa il motore: `"1"` è
+    # un verso, e `[[0, "1"], [10, "-1"]]` è una lista di breakpoint.
+    raw = normalize_engine_values(raw)
+
     if raw is None:
         # Chiave vuota: a differenza di `grain.reverse`, qui è un errore.
         return _issue(raw, VALUE_HINT)

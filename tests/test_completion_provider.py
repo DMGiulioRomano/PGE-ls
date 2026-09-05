@@ -1725,6 +1725,36 @@ class TestGrainDurationUnitCompletion:
         labels = [item.label for item in result]
         assert labels == ['samples']
 
+    # --- milliseconds (PGE v5.2.0, issue #36) -----------------------------
+
+    def test_milliseconds_e_fra_i_valori_offerti(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='value', current_text='',
+                           current_key='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="grain:\n  duration_unit: ")
+        assert 'milliseconds' in [item.label for item in result]
+
+    def test_milliseconds_prefix_filter(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='value', current_text='mil',
+                           current_key='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="grain:\n  duration_unit: mil")
+        assert [item.label for item in result] == ['milliseconds']
+
+    def test_doc_di_milliseconds_dice_la_scala_udibile(self, bridge):
+        """La motivazione della chiave e' la leggibilita': la grana udibile
+        vive fra 1 e 1000 ms, dove in secondi si scrivono solo .001 / .35."""
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='value', current_text='',
+                           current_key='duration_unit',
+                           parent_path=['grain'], indent_level=3)
+        result = provider.get_completions(ctx, document_text="grain:\n  duration_unit: ")
+        doc = [i for i in result if i.label == 'milliseconds'][0].documentation.value
+        assert 'esplicit' in doc.lower()
+        assert '48000' not in doc  # il fattore e' fisso, non dipende dal sample rate
+
 
 # =============================================================================
 # grain.read_direction (PGE #207)
