@@ -3796,3 +3796,81 @@ class TestDeviationProbabilityEnvelopeBody:
         errors = self._errors(provider, yaml)
         assert len(errors) == 1
         assert "deviation_probability.volume" in errors[0].message
+
+
+# =============================================================================
+# Il minimo di grain.duration è un campione, in ogni unità (review PR #48)
+# =============================================================================
+
+
+class TestGrainDurationMinimoUnCampione:
+    """
+    Il bound minimo che il motore fa rispettare su `grain.duration` non è
+    quello del registro.
+
+    `parse_parameter` passa per `get_parameter_definition(..., output_sr=...)`,
+    e per `grain_duration` quella funzione **sostituisce** `min_val` con
+    `1/output_sr` — un campione, ~20.8 µs. `output_sr` è una costante globale
+    del motore e non una chiave dello YAML, quindi l'override è sempre in
+    vigore: lo `0.001` del registro non è mai il minimo applicato.
+
+    Le due unità non-secondi il conto lo facevano già
+    (`min_in_unit = (1/output_sr)/factor`); i secondi restavano l'unica unità
+    dove il minimo era un altro — cioè l'unica dove la regola che l'hover di
+    `duration_unit` documenta («la durata minima è 1 campione in ogni unità»)
+    non valeva, e una durata fra un campione e un millisecondo prendeva un
+    Error rosso pur rendendo.
+    """
+
+    UN_CAMPIONE = 1.0 / 48000
+
+    def _bounds_errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'grain.duration' in d.message
+                and ('fuori range' in d.message or 'fuori dai bounds' in d.message)]
+
+    def test_scalare_sotto_il_minimo_del_registro_ma_sopra_un_campione(self, bridge):
+        """`0.0001` s sono 4.8 campioni: il motore li accetta."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    grain:\n      duration: 0.0001\n")
+        assert self._bounds_errors(provider, yaml) == []
+
+    def test_scalare_sotto_un_campione_resta_un_errore(self, bridge):
+        """Il minimo si è abbassato, non è sparito."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    grain:\n      duration: 0.00002\n")
+        errors = self._bounds_errors(provider, yaml)
+        assert len(errors) == 1
+
+    def test_envelope_sotto_il_minimo_del_registro_ma_sopra_un_campione(self, bridge):
+        """La Y di un envelope segue la stessa regola dello scalare: erano due
+        letture separate dei bound, e solo una aveva l'override."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    grain:\n      duration: [[0, 0.0001], [10, 0.05]]\n")
+        assert self._bounds_errors(provider, yaml) == []
+
+    def test_envelope_sotto_un_campione_resta_un_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    grain:\n      duration: [[0, 0.00001], [10, 0.05]]\n")
+        errors = self._bounds_errors(provider, yaml)
+        assert len(errors) == 1
+
+    def test_gli_altri_parametri_tengono_i_bound_del_registro(self, bridge):
+        """L'override è per `grain.duration`, non una tolleranza generale."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml("    density: 0.001\n")
+        errors = [d for d in provider.get_diagnostics(yaml)
+                  if d.severity == DiagnosticSeverity.Error
+                  and "'density'" in d.message]
+        assert len(errors) == 1
+
+    def test_il_minimo_dichiarato_e_quello_del_motore(self, bridge):
+        """Il numero, non solo il comportamento: chi legge il messaggio deve
+        poter scrivere quel valore e vederlo accettato."""
+        provider = DiagnosticProvider(bridge)
+        param = provider._params_by_yaml_path['grain.duration']
+        assert param.min_val == self.UN_CAMPIONE
+        assert param.max_val == 10.0

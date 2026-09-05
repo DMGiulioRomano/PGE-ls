@@ -311,6 +311,53 @@ def test_milliseconds_factor_matches(pge):
     assert _GRAIN_DURATION_UNIT_SECONDS['milliseconds'] == factor
 
 
+def test_output_sr_matches(pge):
+    """`_OUTPUT_SR` è una costante del motore ricopiata a mano, e da essa
+    dipendono tutti i conti sulla durata del grano: il fattore di `samples`,
+    il minimo in ogni unità, i tetti nei messaggi. Se PGE cambia sample rate
+    e questo numero resta indietro, il LS misura durate in un'unità che il
+    motore non usa più — senza dirlo."""
+    from granular_ls.providers.diagnostic_provider import _OUTPUT_SR
+    from granular_ls.schema_bridge import _import_pge_module
+    engine_sr = getattr(
+        _import_pge_module('shared.constants'), 'DEFAULT_OUTPUT_SR', None)
+    if engine_sr is None:
+        pytest.skip("engine precede DEFAULT_OUTPUT_SR")
+    assert _OUTPUT_SR == engine_sr
+
+
+def test_grain_duration_min_e_un_campione(pge):
+    """Il motore **sostituisce** il minimo di `grain_duration` col campione.
+
+    `parse_parameter` chiama `get_parameter_definition(..., output_sr=...)`, e
+    `output_sr` arriva da `StreamContext`, dove è una costante globale del
+    motore e non una chiave dello YAML: l'override è quindi sempre in vigore,
+    e il `min_val` del registro non è mai quello applicato. È la premessa di
+    `_ENGINE_MIN_OVERRIDES`, e se il motore la togliesse il LS diventerebbe
+    più permissivo del motore senza accorgersene.
+    """
+    from granular_ls.providers.diagnostic_provider import (
+        _ENGINE_MIN_OVERRIDES, _OUTPUT_SR,
+    )
+    from granular_ls.schema_bridge import _import_pge_module
+
+    definizioni = _import_pge_module('parameters.parameter_definitions')
+    get_bounds = getattr(definizioni, 'get_parameter_definition', None)
+    if get_bounds is None:
+        pytest.skip("engine senza get_parameter_definition")
+
+    dichiarato = get_bounds('grain_duration')
+    applicato = get_bounds('grain_duration', output_sr=_OUTPUT_SR)
+
+    assert applicato.min_val == 1.0 / _OUTPUT_SR
+    assert applicato.min_val < dichiarato.min_val, (
+        "l'override non abbassa più il minimo: se il registro è sceso sotto "
+        "il campione, _ENGINE_MIN_OVERRIDES ora allarga invece di stringere"
+    )
+    assert _ENGINE_MIN_OVERRIDES['grain.duration'] == applicato.min_val
+    assert applicato.max_val == dichiarato.max_val
+
+
 def test_non_seconds_units_all_have_a_factor(pge):
     """Ogni unità non-secondi dev'essere convertibile: una nuova unità che PGE
     aggiunge senza fattore qui produrrebbe bound in secondi su valori che

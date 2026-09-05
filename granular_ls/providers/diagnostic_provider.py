@@ -24,6 +24,7 @@ Algoritmo in tre fasi:
 import os
 import re
 import wave
+from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 
 import yaml
@@ -144,6 +145,31 @@ def _unit_label(unit: str, value: float) -> str:
         return _GRAIN_DURATION_UNIT_LABELS_SINGULAR[unit]
     return _GRAIN_DURATION_UNIT_LABELS[unit]
 
+
+# I bound che il motore fa rispettare davvero, dove non sono quelli del
+# registro. `parse_parameter` non legge `GRANULAR_PARAMETERS` di piatto: passa
+# per `get_parameter_definition(..., output_sr=...)`, e per `grain_duration`
+# quella funzione **sostituisce** `min_val` con `1/output_sr` — un campione.
+# `output_sr` è una costante globale del motore, non una chiave dello YAML,
+# quindi l'override è sempre in vigore: lo `0.001` del registro non è mai il
+# minimo che il motore applica.
+#
+# Enforcerlo qui costava un Error rosso su durate che rendono, e per giunta
+# proprio quelle che l'hover di `duration_unit` documenta come valide («la
+# durata minima è 1 campione in ogni unità»). Le altre due unità il conto lo
+# facevano già — `min_in_unit = (1/output_sr)/factor` in
+# `_check_grain_duration_unit` — e i secondi restavano l'unica unità dove il
+# minimo era un altro, cioè l'unica dove la regola non valeva.
+_ENGINE_MIN_OVERRIDES = {'grain.duration': 1.0 / _OUTPUT_SR}
+
+
+def _with_engine_bounds(param):
+    """Il parametro con i bound dinamici del motore al posto di quelli statici."""
+    minimo = _ENGINE_MIN_OVERRIDES.get(param.yaml_path)
+    if minimo is None or param.min_val is None or param.min_val == minimo:
+        return param
+    return replace(param, min_val=minimo)
+
 # Le scritture del null esplicito. YAML ne ammette tre parole più la tilde, e
 # solo con queste maiuscole: `nUll` è la stringa "nUll".
 _YAML_NULLS = frozenset(('null', 'Null', 'NULL', '~'))
@@ -194,7 +220,7 @@ class DiagnosticProvider:
         # Costruito una volta in __init__, non a ogni chiamata.
         # I parametri 'pitch.*' sono esclusi: il blocco e' unit-driven.
         self._params_by_yaml_path: Dict[str, ParameterInfo] = {
-            p.yaml_path: p
+            p.yaml_path: _with_engine_bounds(p)
             for p in bridge.get_all_parameters()
             if not p.is_internal
             and _is_generically_checkable(p.yaml_path)
@@ -713,12 +739,15 @@ class DiagnosticProvider:
         diagnostics = []
         lines = document_text.split('\n')
 
-        # Costruisce mappa yaml_path -> (min_val, max_val).
-        # pitch.* escluso: bounds per-unità validati da _check_pitch_block.
+        # Costruisce mappa yaml_path -> (min_val, max_val) dalla **stessa**
+        # mappa che usa il controllo sugli scalari: i due confronti sono lo
+        # stesso confronto su forme diverse, e leggendo il bridge per conto
+        # proprio questo saltava gli override dinamici del motore (il minimo
+        # di `grain.duration`, che è un campione e non lo `0.001` del
+        # registro). Il filtro pitch.* è già dentro la mappa.
         params_bounds = {}
-        for p in self._bridge.get_all_parameters():
-            if p.min_val is not None and p.max_val is not None and not p.is_internal \
-                    and _is_generically_checkable(p.yaml_path):
+        for p in self._params_by_yaml_path.values():
+            if p.min_val is not None and p.max_val is not None:
                 params_bounds[p.yaml_path] = (p.min_val, p.max_val)
 
         # Indice di risoluzione chiave -> yaml_path (chiave locale e path
