@@ -3501,8 +3501,15 @@ class DiagnosticProvider:
     _RNG_GROUP_NON_SCALAR = re.compile(r'^\s*rng_group\s*:\s*([\[{])')
 
     # range_anchor con valore inline: cattura il valore (eventualmente quotato).
+    #
+    # Il trattino fa parte del prefisso perche' la prima chiave di un elemento
+    # di lista sta sulla sua riga (`  - range_anchor: min`): senza, l'ancora
+    # scritta li' non veniva vista da nessuno dei due lettori — il valore non
+    # veniva validato contro l'enum, e il tetto della banda restava spento per
+    # tutto lo stream, cioe' proprio dove `min` promette una banda esatta.
     _RANGE_ANCHOR_VALUE = re.compile(
-        r'^\s*range_anchor\s*:\s*["\']?([A-Za-z_][A-Za-z0-9_]*)["\']?\s*(?:#.*)?$'
+        r'^\s*(?:-\s+)?range_anchor\s*:\s*["\']?([A-Za-z_][A-Za-z0-9_]*)'
+        r'["\']?\s*(?:#.*)?$'
     )
 
     def _check_range_anchor(self, lines: List[str]) -> List[Diagnostic]:

@@ -711,3 +711,83 @@ class TestBandCeilingUnderAnchorMin:
             "    volume_range: 24\n"
         )
         assert self._ceiling_errors(provider, yaml) == []
+
+
+# =============================================================================
+# L'ancora sulla riga del trattino (review PR #48)
+# =============================================================================
+
+
+class TestAncoraSullaRigaDelTrattino:
+    """
+    La prima chiave di un elemento di lista sta sulla riga del trattino
+    (`  - range_anchor: min`), dove `^\\s*range_anchor` non arriva: il trattino
+    non e' spazio.
+
+    E' lo stesso guasto che il commit `08fdf77` ha chiuso per
+    `_read_key_value`, ma su un lettore diverso, e qui costa di piu': non una
+    chiave saltata, l'intero controllo spento per lo stream. Chi scrive
+    l'ancora li' ha `min` in vigore lato motore — che rifiuta la banda al
+    parse — e nessuna diagnostica lato editor.
+
+    Lo stesso regex governa la validazione del valore contro l'enum, che sulla
+    riga del trattino taceva per la stessa ragione.
+    """
+
+    @staticmethod
+    def _stream_con_ancora(prima_riga: str, body: str) -> str:
+        return (
+            "streams:\n"
+            f"  - {prima_riga}\n"
+            "    stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            + body
+        )
+
+    def _ceiling_errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'range_anchor' in d.message and 'banda' in d.message.lower()]
+
+    def test_il_tetto_si_controlla_anche_li(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream_con_ancora(
+            "range_anchor: min",
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert len(self._ceiling_errors(provider, yaml)) == 1
+
+    def test_center_sulla_riga_del_trattino_non_accende_il_controllo(self, bridge):
+        """Il fix legge l'ancora, non la da' per `min`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream_con_ancora(
+            "range_anchor: center",
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
+
+    def test_valore_fuori_enum_sulla_riga_del_trattino(self, bridge):
+        """L'altro lettore dello stesso regex."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream_con_ancora("range_anchor: massimo", "")
+        errors = [d for d in provider.get_diagnostics(yaml)
+                  if d.severity == DiagnosticSeverity.Error
+                  and 'range_anchor' in d.message]
+        assert len(errors) == 1
+        assert errors[0].range.start.line == 1
+
+    def test_il_trattino_non_e_un_jolly(self, bridge):
+        """`-range_anchor`, senza lo spazio, non e' quella chiave: il trattino
+        entra nel prefisso solo dove YAML apre un elemento di lista."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._stream_con_ancora(
+            "stream_id: s1",
+            "    -range_anchor: min\n"
+            "    volume: -6\n"
+            "    volume_range: 24\n"
+        )
+        assert self._ceiling_errors(provider, yaml) == []
