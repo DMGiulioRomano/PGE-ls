@@ -3041,19 +3041,8 @@ class DiagnosticProvider:
 
         for stream_start, stream_end_incl, _keys in streams:
             stream_end = stream_end_incl + 1
-            key_line = None
-            for n in range(stream_start, stream_end):
-                raw = lines[n]
-                stripped = raw.strip()
-                if stripped.startswith('- '):
-                    stripped = stripped[2:].strip()
-                    leading = 4
-                else:
-                    leading = len(raw) - len(raw.lstrip())
-                if leading == 4 and re.match(
-                        r'^deviation_probability\s*:', stripped):
-                    key_line = n
-                    break
+            key_line = self._find_key_line_at_indent(
+                lines, stream_start, stream_end, DEVIATION_PROBABILITY_PATH, 4)
             if key_line is None:
                 continue
 
@@ -3470,19 +3459,14 @@ class DiagnosticProvider:
         covered: set = set()
         for stream_start, stream_end_incl, _keys in streams:
             stream_end = stream_end_incl + 1
-            for n in range(stream_start, min(stream_end, len(lines))):
-                raw = lines[n]
-                stripped = raw.strip()
-                if stripped.startswith('- '):
-                    stripped = stripped[2:].strip()
-                    leading = 4
-                else:
-                    leading = len(raw) - len(raw.lstrip())
-                if leading != 4 or not re.match(
-                        r'^deviation_probability\s*:', stripped):
-                    continue
-                covered.update(
-                    range(n, self._block_end(lines, n, stream_end, 4)))
+            # Stessa ricerca della fase 15, e per costruzione: la soppressione
+            # deve coprire il blocco che quella fase giudica, non un altro.
+            key_line = self._find_key_line_at_indent(
+                lines, stream_start, stream_end, DEVIATION_PROBABILITY_PATH, 4)
+            if key_line is None:
+                continue
+            covered.update(range(
+                key_line, self._block_end(lines, key_line, stream_end, 4)))
         return frozenset(covered)
 
     def _scaled_unit_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
