@@ -3874,3 +3874,178 @@ class TestGrainDurationMinimoUnCampione:
         param = provider._params_by_yaml_path['grain.duration']
         assert param.min_val == self.UN_CAMPIONE
         assert param.max_val == 10.0
+
+
+# =============================================================================
+# I bound nell'unità dichiarata valgono per tutto, non per il solo scalare
+# di duration (review PR #48)
+# =============================================================================
+
+
+class TestBoundNellUnitaDichiarata:
+    """
+    `_scaled_unit_suppressed_lines` toglie ai bound generici le righe di
+    `duration` / `duration_range` quando l'unità non è secondi, e ha ragione:
+    quei bound sono in secondi e i valori no. Ma toglierle e basta le lasciava
+    senza nessun controllo — l'unico rimesso nell'unità era lo scalare di
+    `duration`.
+
+    Il motore invece li scala tutti (`_pre_normalize_grain_params` passa su
+    `duration` **e** `duration_range`, scalari ed envelope) e poi li valida
+    come ogni altro parametro. Restavano fuori tre forme, tutte rifiutate dal
+    motore e tutte mute qui: `duration_range`, la Y di un envelope, e lo
+    scalare scritto fra virgolette.
+    """
+
+    @staticmethod
+    def _grain(body: str) -> str:
+        return _stream_yaml("    grain:\n" + body)
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    @pytest.fixture
+    def bridge_ms(self):
+        """Come il bridge comune, più `grain.duration_range`: nel motore è un
+        parametro suo, coi bound del range del padre già risolti."""
+        raw = {
+            'specs': [
+                make_raw_spec('grain_duration', 'grain.duration', default=0.05),
+                make_raw_spec('grain_duration_range', 'grain.duration_range',
+                              default=None),
+            ],
+            'bounds': {
+                'grain_duration': make_raw_bounds(0.001, 10.0),
+                'grain_duration_range': make_raw_bounds(0.0, 1.0),
+            },
+        }
+        return SchemaBridge(raw)
+
+    # --- duration_range ---------------------------------------------------
+
+    def test_range_fuori_tetto_in_millisecondi(self, bridge_ms):
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+            "      duration_range: 48000\n"
+        )
+        errors = [e for e in self._errors(provider, yaml)
+                  if 'duration_range' in e.message]
+        assert len(errors) == 1
+        assert 'millisecondi' in errors[0].message
+        assert '1000' in errors[0].message  # il tetto nell'unità, non 1.0s
+
+    def test_range_dentro_il_tetto_tace(self, bridge_ms):
+        """4.5 ms di banda su 50: lo YAML dell'issue #36."""
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+            "      duration_range: 4.5\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_range_fuori_tetto_in_campioni(self, bridge_ms):
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: samples\n"
+            "      duration: 2400\n"
+            "      duration_range: 96000\n"
+        )
+        errors = [e for e in self._errors(provider, yaml)
+                  if 'duration_range' in e.message]
+        assert len(errors) == 1
+        assert 'campioni' in errors[0].message
+
+    def test_range_envelope_fuori_tetto(self, bridge_ms):
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+            "      duration_range: [[0, 48000], [10, 100]]\n"
+        )
+        errors = [e for e in self._errors(provider, yaml)
+                  if 'duration_range' in e.message]
+        assert len(errors) == 1
+        assert 'envelope' in errors[0].message
+
+    # --- duration: envelope e scalare quotato ------------------------------
+
+    def test_envelope_di_duration_sopra_il_tetto(self, bridge_ms):
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: [[0, 50000], [10, 100]]\n"
+        )
+        errors = [e for e in self._errors(provider, yaml)
+                  if 'grain.duration' in e.message
+                  and 'duration_unit' not in e.message]
+        assert len(errors) == 1
+        assert '50000' in errors[0].message
+
+    def test_envelope_di_duration_sotto_un_campione(self, bridge_ms):
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: [[0, 0.001], [10, 100]]\n"
+        )
+        assert len([e for e in self._errors(provider, yaml)
+                    if 'grain.duration' in e.message
+                    and 'duration_unit' not in e.message]) == 1
+
+    def test_envelope_dentro_i_bound_tace(self, bridge_ms):
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: [[0, 50], [10, 100]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    def test_scalare_quotato_fuori_tetto(self, bridge_ms):
+        """Il `Generator` converte `"50000"` in numero prima del parser: il
+        ramo dello scalare grezzo non lo riconosce, questo sì."""
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            '      duration: "50000"\n'
+        )
+        assert len([e for e in self._errors(provider, yaml)
+                    if 'grain.duration' in e.message
+                    and 'duration_unit' not in e.message]) == 1
+
+    # --- dove si tace -----------------------------------------------------
+
+    def test_espressione_matematica_non_si_giudica(self, bridge_ms):
+        """`(50*1000)` lo valuta il `Generator`, non noi: sul corpo che la
+        contiene si tace, come ovunque nel repo."""
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: (50*1000)\n"
+        )
+        assert [e for e in self._errors(provider, yaml)
+                if 'fuori range' in e.message] == []
+
+    def test_in_secondi_restano_i_bound_generici(self, bridge_ms):
+        """Senza unità dichiarata non c'è niente da convertire: il controllo
+        è quello di sempre, e non deve raddoppiare."""
+        provider = DiagnosticProvider(bridge_ms)
+        yaml = self._grain("      duration_range: 48\n")
+        errors = [e for e in self._errors(provider, yaml)
+                  if 'duration_range' in e.message]
+        assert len(errors) == 1
+        assert 'millisecondi' not in errors[0].message
+
+    def test_senza_bound_del_range_nello_schema_tace(self, bridge):
+        """Il bridge comune non dichiara `grain.duration_range`: non sappiamo
+        i suoi bound, e non saperli non è un permesso a inventarli."""
+        provider = DiagnosticProvider(bridge)
+        yaml = self._grain(
+            "      duration_unit: milliseconds\n"
+            "      duration: 50\n"
+            "      duration_range: 48000\n"
+        )
+        assert [e for e in self._errors(provider, yaml)
+                if 'duration_range' in e.message] == []

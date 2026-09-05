@@ -375,6 +375,55 @@ def test_non_seconds_units_all_have_a_factor(pge):
 # Stream context keys (StreamContext + StreamConfig + flag Generator)
 # =============================================================================
 
+def test_le_chiavi_scalate_dall_unita_sono_due(pge):
+    """`duration_unit` governa `duration` **e** `duration_range`.
+
+    `_pre_normalize_grain_params` le scala insieme e poi il parser le valida
+    separatamente, ciascuna coi suoi bound. Il language server converte i
+    bound di entrambe: se il motore smettesse di scalarne una, o ne
+    aggiungesse una terza, qui i due lati si direbbero cose diverse sui
+    valori che l'utente scrive.
+
+    Si legge dal sorgente perché `core/stream.py` importa numpy e soundfile,
+    che la CI del language server non installa.
+    """
+    import re
+    from pathlib import Path
+
+    sorgente = None
+    for candidato in ('pge/core/stream.py', 'core/stream.py'):
+        percorso = Path(PGE_SRC) / candidato
+        if percorso.exists():
+            sorgente = percorso.read_text(encoding='utf-8')
+            break
+    if sorgente is None:
+        pytest.skip("core/stream.py non trovato in questo checkout")
+
+    assert re.search(
+        r"for key in \(\s*'duration'\s*,\s*'duration_range'\s*\)", sorgente
+    ), ("le chiavi scalate da grain.duration_unit non sono più le due che "
+        "_check_grain_duration_unit converte")
+
+
+def test_bound_del_range_di_grain_duration(pge):
+    """`grain.duration_range` porta i bound del range del padre.
+
+    È la premessa della conversione: il LS divide per il fattore dell'unità i
+    bound di `grain.duration_range`, non quelli di `grain.duration`, perché il
+    motore valida il range contro `min_range`/`max_range`. Se il bridge
+    smettesse di risolverli, dividerebbe i numeri sbagliati.
+    """
+    from granular_ls.schema_bridge import SchemaBridge
+
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    per_path = {p.yaml_path: p for p in bridge.get_all_parameters()}
+    base = per_path.get('grain.duration')
+    rng = per_path.get('grain.duration_range')
+    if base is None or rng is None:
+        pytest.skip("engine senza grain.duration/duration_range nello schema")
+    assert (rng.min_val, rng.max_val) == (base.min_range, base.max_range)
+
+
 def test_stream_context_keys_match(pge):
     from granular_ls.schema_bridge import SchemaBridge
     bridge = SchemaBridge.from_python_path(PGE_SRC)

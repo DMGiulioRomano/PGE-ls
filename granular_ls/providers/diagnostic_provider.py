@@ -320,7 +320,8 @@ class DiagnosticProvider:
         diagnostics.extend(self._check_loop_end_le_loop_start(lines, streams))
 
         # Fase 11: grain.duration_unit (PGE #158).
-        diagnostics.extend(self._check_grain_duration_unit(grain_blocks))
+        diagnostics.extend(
+            self._check_grain_duration_unit(lines, grain_blocks))
 
         # Fase 12: rng_group non-scalare (PGE #169).
         diagnostics.extend(self._check_rng_group_type(lines))
@@ -2851,6 +2852,7 @@ class DiagnosticProvider:
           - has_duration:    True se grain.duration è presente con un valore
           - duration_scalar: valore scalare di duration (str) se numerico inline
           - duration_line:   riga della chiave duration (o None)
+          - range_line:      riga della chiave duration_range (o None)
           - value_lines:     set di righe che portano valori di duration /
                              duration_range (scalare + breakpoint envelope),
                              usato per sopprimere i falsi positivi dei bound
@@ -2889,7 +2891,8 @@ class DiagnosticProvider:
                 'start': grain_start, 'end': grain_end,
                 'unit': None, 'unit_present': False, 'unit_line': None,
                 'has_duration': False, 'duration_scalar': None,
-                'duration_line': None, 'value_lines': set(),
+                'duration_line': None, 'range_line': None,
+                'value_lines': set(),
                 'read_direction_line': None, 'reverse_line': None,
             }
 
@@ -2922,6 +2925,8 @@ class DiagnosticProvider:
                     info['unit'] = val.strip('"\'') if val else None
                 elif key in ('duration', 'duration_range'):
                     info['value_lines'].add(n)
+                    if key == 'duration_range':
+                        info['range_line'] = n
                     if key == 'duration':
                         info['duration_line'] = n
                         # Valore presente: inline (scalare/lista) o envelope
@@ -3306,8 +3311,8 @@ class DiagnosticProvider:
         return ys, True
 
     @staticmethod
-    def _envelope_peak(raw) -> Optional[float]:
-        """Il breakpoint più alto di un envelope già letto come struttura.
+    def _envelope_y_values(raw) -> List[float]:
+        """Le Y di un envelope già letto come struttura.
 
         Il motore prende `max(y)` sui breakpoint **espansi**, quindi le
         macro-forme vanno aperte invece che lette di piatto: in un ciclo
@@ -3320,11 +3325,15 @@ class DiagnosticProvider:
         Stessa apertura che `_extract_envelope_y_values` fa sul testo; qui la
         struttura è già parsata, quindi si riusano le forme di
         `envelope_shapes` invece di riconoscerle di nuovo.
+
+        Lista vuota se non se ne ricava nessuna Y: una forma che non
+        riconosciamo non è una forma senza valori, quindi chi chiama non ci
+        legge dentro un permesso.
         """
         if isinstance(raw, dict):
             raw = raw.get('points')
         if not isinstance(raw, list):
-            return None
+            return []
 
         def _is_num(v) -> bool:
             return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -3336,8 +3345,7 @@ class DiagnosticProvider:
 
         # Macro-forma come corpo intero: le Y stanno nel suo elemento 0.
         if is_loop_block(raw) or is_bp_group(raw):
-            ys = _ys_of_pattern(raw[0])
-            return max(ys) if ys else None
+            return _ys_of_pattern(raw[0])
 
         ys: List[float] = []
         for item in raw:
@@ -3348,6 +3356,12 @@ class DiagnosticProvider:
             elif (isinstance(item, list) and len(item) >= 2
                     and _is_num(item[0]) and _is_num(item[1])):
                 ys.append(float(item[1]))
+        return ys
+
+    @classmethod
+    def _envelope_peak(cls, raw) -> Optional[float]:
+        """Il breakpoint più alto di un envelope, o None se non ce n'è."""
+        ys = cls._envelope_y_values(raw)
         return max(ys) if ys else None
 
     @staticmethod
@@ -3557,14 +3571,74 @@ class DiagnosticProvider:
             return str(int(round(value)))
         return f'{value:.4g}'
 
-    def _check_grain_duration_unit(self, grain_blocks: List[dict]) -> List[Diagnostic]:
+    def _unit_scaled_bound_diagnostics(
+        self, lines: List[str], block: dict, key_line: Optional[int],
+        yaml_path: str, minimo: Optional[float], massimo: Optional[float],
+        label: str, tetto_secondi: Optional[float],
+        salta_scalare: bool,
+    ) -> List[Diagnostic]:
+        """I valori di una chiave del grain confrontati coi bound nell'unità.
+
+        `_scaled_unit_suppressed_lines` toglie queste righe ai bound generici,
+        e ha ragione: quei bound sono in secondi e i valori no. Ma toglierle
+        e basta le lasciava senza nessun controllo — sotto un'unità non-secondi
+        solo lo scalare di `duration` veniva riguardato, e `duration_range`,
+        la Y di un envelope e lo scalare quotato passavano in silenzio mentre
+        il motore li rifiuta (li scala e poi li valida come tutti gli altri).
+
+        Si tace dove non c'è niente da decidere: chiave assente, frammento non
+        interpretabile, un'espressione matematica — il cui valore lo calcola il
+        `Generator` e noi no — o una forma da cui non si ricava nessuna Y.
+
+        L'ancoraggio è la riga della chiave anche per gli envelope block-style,
+        come già fa `_check_read_direction`: il valore incriminato sta nel
+        messaggio, e la chiave è dove si va a correggerlo.
+        """
+        if key_line is None or minimo is None or massimo is None:
+            return []
+        found, raw = self._read_key_value(lines, key_line, block['end'])
+        if not found or raw is None:
+            return []
+        if contains_math_expression(raw):
+            return []
+        raw = normalize_engine_values(raw)
+
+        if isinstance(raw, bool):
+            return []
+        if isinstance(raw, (int, float)):
+            if salta_scalare:
+                return []
+            valori, forma = [float(raw)], ''
+        else:
+            valori, forma = self._envelope_y_values(raw), 'valore envelope '
+
+        fuori = [v for v in valori if v < minimo or v > massimo]
+        if not fuori:
+            return []
+        tetto = (f" (max = {tetto_secondi}s)"
+                 if tetto_secondi is not None else '')
+        return [Diagnostic(
+            range=self._line_range(key_line),
+            message=(
+                f"`{yaml_path}`: {forma}{self._fmt_unit_value(fuori[0])} "
+                f"{label} fuori range "
+                f"[{self._fmt_unit_value(minimo)}, "
+                f"{self._fmt_unit_value(massimo)}]{tetto}."
+            ),
+            severity=DiagnosticSeverity.Error,
+            source=SOURCE,
+        )]
+
+    def _check_grain_duration_unit(self, lines: List[str],
+                                   grain_blocks: List[dict]) -> List[Diagnostic]:
         """
         Valida grain.duration_unit (PGE #158, terza unità in v5.2.0):
           - unità non in {seconds, samples, milliseconds} → Error;
           - con un'unità non-secondi, grain.duration deve essere esplicita
             (il default 0.05 è in secondi e non viene convertito) → Error;
-          - con un'unità non-secondi, valida il valore scalare di duration
-            contro i bound del parametro convertiti in quell'unità.
+          - con un'unità non-secondi, valida i valori di duration e
+            duration_range — scalari ed envelope — contro i bound del
+            parametro convertiti in quell'unità.
 
         La regola della durata esplicita vale per ogni unità non-secondi, non
         per `samples` soltanto: senza `grain.duration` la base resterebbe in
@@ -3617,8 +3691,38 @@ class DiagnosticProvider:
             min_in_unit = (1.0 / _OUTPUT_SR) / factor
             max_in_unit = max_seconds / factor if max_seconds is not None else None
 
+            # `grain.duration_range` è un parametro suo nel bridge, coi bound
+            # del range del padre già risolti: si converte nell'unità come la
+            # durata, perché il motore scala i due insieme e poi li valida
+            # separatamente. Assente dallo schema = non sappiamo, quindi si
+            # tace (è quel che facevano i bound generici prima della
+            # soppressione).
+            grain_rng = self._params_by_yaml_path.get('grain.duration_range')
+            range_min = (grain_rng.min_val / factor
+                         if grain_rng is not None
+                         and grain_rng.min_val is not None else None)
+            range_max = (grain_rng.max_val / factor
+                         if grain_rng is not None
+                         and grain_rng.max_val is not None else None)
+
             scalar = self._try_parse_number(b['duration_scalar']) \
                 if b['duration_scalar'] is not None else None
+
+            # Tutto ciò che lo scalare qui sotto non copre: la Y di un
+            # envelope, lo scalare scritto fra virgolette, e `duration_range`
+            # in ogni sua forma.
+            diagnostics.extend(self._unit_scaled_bound_diagnostics(
+                lines, b, b['duration_line'], 'grain.duration',
+                min_in_unit, max_in_unit, label, max_seconds,
+                salta_scalare=scalar is not None,
+            ))
+            diagnostics.extend(self._unit_scaled_bound_diagnostics(
+                lines, b, b['range_line'], 'grain.duration_range',
+                range_min, range_max, label,
+                grain_rng.max_val if grain_rng is not None else None,
+                salta_scalare=False,
+            ))
+
             if scalar is None:
                 continue
 
