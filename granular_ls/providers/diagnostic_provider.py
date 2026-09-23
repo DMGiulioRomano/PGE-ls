@@ -63,6 +63,18 @@ from granular_ls.deviation_probability import (
     DEVIATION_PROBABILITY_PATH,
     check_global_value,
 )
+from granular_ls.loop_unit import (
+    INVALID_HINT as LOOP_UNIT_INVALID_HINT,
+    LOOP_UNIT_PATH,
+    LOOP_UNIT_SCOPE,
+    LOOP_UNITS,
+    MODE_INVALID,
+    find_loop_unit,
+    loop_unit_label,
+    loop_unit_mode,
+    pointer_span,
+    rescaling_would_change,
+)
 from granular_ls.pitch_units import (
     PITCH_UNIT_KEYS,
     PITCH_UNIT_PRESETS,
@@ -107,10 +119,10 @@ def _is_generically_checkable(yaml_path: str) -> bool:
             and yaml_path not in _READ_DIRECTION_OWNED)
 
 # grain.duration_unit (PGE #158, terza unità in v5.2.0): unità di misura di
-# grain.duration e grain.duration_range. Meta-parametro, mirror di loop_unit
-# del pointer. output_sr è una config globale del motore (48000 Hz), non
-# impostabile per-stream: qui è una costante statica come lato PGE
-# (DEFAULT_OUTPUT_SR).
+# grain.duration e grain.duration_range. Meta-parametro, gemello di loop_unit
+# del pointer (stesso default con un nome, stesso vocabolario chiuso).
+# output_sr è una config globale del motore (48000 Hz), non impostabile
+# per-stream: qui è una costante statica come lato PGE (DEFAULT_OUTPUT_SR).
 _GRAIN_DURATION_UNITS = ('seconds', 'samples', 'milliseconds')
 _OUTPUT_SR = 48000
 
@@ -343,6 +355,13 @@ class DiagnosticProvider:
         diagnostics.extend(
             self._check_band_ceiling(lines, streams, grain_blocks)
         )
+
+        # Fase 17: pointer.loop_unit fuori vocabolario (PGE #222).
+        diagnostics.extend(self._check_loop_unit(lines, streams))
+
+        # Fase 18: posizioni che #222 ha spostato in silenzio (ponytail,
+        # PGE #242: se ne va con l'avviso [LOOP_UNIT] del motore).
+        diagnostics.extend(self._check_loop_unit_migration(lines, streams))
 
         return diagnostics
 
@@ -2613,7 +2632,10 @@ class DiagnosticProvider:
         except Exception:
             return None
 
-    _POINTER_SCALAR_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
+    # Le posizioni nel sample che `loop_unit` interpreta: l'insieme e' quello
+    # del motore (`_LOOP_UNIT_SCOPE`), e lo leggono dal registry anche l'hover
+    # e i semantic token.
+    _POINTER_SCALAR_PARAMS = frozenset(LOOP_UNIT_SCOPE)
 
     # L'hint del motore, parola per parola: le due strade vere per far
     # variare nel tempo la posizione di lettura.
@@ -2693,12 +2715,16 @@ class DiagnosticProvider:
         Valida i valori scalari di start, loop_start, loop_end, loop_dur
         nel blocco pointer: di ogni stream.
 
-        Bounds applicati:
-          - normalized (loop_unit=normalized o time_mode=normalized):
+        Bounds applicati, secondo la `loop_unit` dello stream e basta — da
+        PGE #222 `time_mode` non la governa piu':
+          - normalized (`loop_unit: normalized`):
               [0.0, 1.0]
-          - absolute (default):
+          - secondi (`seconds`, `absolute` o chiave assente):
               [0.0, durata_sample] se il file WAV e' leggibile,
               altrimenti solo [0.0, +inf] (controlla solo limite inferiore)
+          - `loop_unit` fuori vocabolario: nessun controllo. Il motore rifiuta
+            l'unita' prima di guardare i valori, quindi non c'e' una scala in
+            cui misurarli; l'errore vero lo dice la fase 17 sulla sua riga.
 
         I valori envelope vengono ignorati per loop_start, loop_end e
         loop_dur, che gli envelope li accettano davvero. Per `start` no:
@@ -2750,8 +2776,10 @@ class DiagnosticProvider:
                     pointer_end = n
                     break
 
-            # Determina modalita' (normalized vs absolute)
+            # Determina modalita' (normalized, absolute o invalid)
             mode, _ = _get_effective_unit_mode(document_text, pointer_start + 1)
+            if mode == MODE_INVALID:
+                continue
 
             # Calcola i bounds
             if mode == 'normalized':
@@ -2830,6 +2858,117 @@ class DiagnosticProvider:
                         source=SOURCE,
                     ))
 
+        return diagnostics
+
+    # -------------------------------------------------------------------------
+    # FASE 17-18: pointer.loop_unit (PGE #222)
+    # -------------------------------------------------------------------------
+
+    def _check_loop_unit(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
+        """
+        Valida `pointer.loop_unit` contro il vocabolario chiuso del motore
+        (`seconds` | `absolute` | `normalized`, PGE #222).
+
+        Prima di #222 il motore testava solo `!= 'normalized'`, e ogni altro
+        valore valeva "assoluto" in silenzio: `normalised` o `Normalized`
+        rendevano, in secondi. Ora `_pre_normalize_loop_params` alza
+        `InvalidFieldValueError`, quindi e' un Error — stessa forma di
+        `grain.duration_unit`, la sua gemella.
+
+        La chiave scritta e lasciata vuota la segnala gia'
+        `_check_missing_values` (`_STRING_REQUIRED_KEYS`): qui si tace, per
+        non dirla due volte. Un `null` scritto invece passa di qui, perche' li'
+        un valore c'e' ed e' fuori vocabolario come gli altri. Il frammento a
+        meta' scrittura, che YAML non legge, non si segnala.
+        """
+        diagnostics = []
+        hint = LOOP_UNIT_INVALID_HINT[0].upper() + LOOP_UNIT_INVALID_HINT[1:]
+        for stream_start, _end, _keys in streams:
+            decl = find_loop_unit(lines, stream_start)
+            if decl is None or not decl.readable or decl.inline_empty:
+                continue
+            if loop_unit_mode(decl.value) != MODE_INVALID:
+                continue
+            diagnostics.append(Diagnostic(
+                range=self._line_range(decl.line),
+                message=(
+                    f"`{LOOP_UNIT_PATH}`: valore "
+                    f"`{loop_unit_label(decl.value)}` non valido. "
+                    f"Unità disponibili: {', '.join(LOOP_UNITS)}. {hint}."
+                ),
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+        return diagnostics
+
+    # ponytail: si toglie insieme a `_warn_loop_unit_migration` del motore,
+    # dopo una release. Il conto lo tiene PGE #242.
+    def _check_loop_unit_migration(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
+        """
+        Le posizioni nel sample che PGE #222 ha cambiato di lettura in silenzio.
+
+        Prima di #222 una `loop_unit` assente ereditava da `time_mode`: su uno
+        stream `time_mode: normalized` `start` e i parametri di loop erano
+        frazioni del file. Ora sono secondi. Lo YAML resta valido — il motore
+        non ferma niente — ma con ogni probabilita' dice un numero diverso da
+        quello che chi l'ha scritto intendeva.
+
+        E' l'avviso `[LOOP_UNIT]` che il motore stampa a render time
+        (`_warn_loop_unit_migration`), detto mentre il file si scrive, con la
+        sua stessa condizione: `time_mode: normalized`, nessuna `loop_unit`,
+        almeno una posizione che la vecchia conversione muoveva — uno zero
+        resta zero, e `start: 0` e' la forma piu' comune del corpus. Nomina le
+        chiavi nel suo ordine e sta sulla riga di `pointer:`, uno per stream,
+        come il motore ne stampa uno per stream.
+
+        Una `loop_unit` dichiarata lo zittisce anche se e' sbagliata: la
+        scelta e' stata fatta, e se non e' nel vocabolario lo dice la fase 17.
+
+        Warning, come il motore e come gl-ls per la stessa regola sugli study.
+        """
+        diagnostics = []
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            tm_line = self._find_key_line_at_indent(
+                lines, stream_start, stream_end, 'time_mode', 4)
+            if tm_line is None:
+                continue
+            found, time_mode = self._read_key_value(lines, tm_line, stream_end)
+            if not found or time_mode != 'normalized':
+                continue
+            pointer = pointer_span(lines, stream_start, stream_end)
+            if pointer is None or find_loop_unit(lines, stream_start) is not None:
+                continue
+            p_start, p_end = pointer
+            moved = []
+            for key in LOOP_UNIT_SCOPE:
+                key_line = self._find_key_line_at_indent(
+                    lines, p_start + 1, p_end, key, 6)
+                if key_line is None:
+                    continue
+                found, value = self._read_key_value(lines, key_line, p_end)
+                if found and rescaling_would_change(value):
+                    moved.append(key)
+            if not moved:
+                continue
+            diagnostics.append(Diagnostic(
+                range=self._line_range(p_start),
+                message=(
+                    f"`pointer`: {', '.join(moved)} ora in secondi. "
+                    "`loop_unit` non eredita più da `time_mode` (PGE #222): "
+                    "prima questi valori erano frazioni della durata del "
+                    "sample. Aggiungi `loop_unit: normalized` per la lettura "
+                    "di prima, `loop_unit: seconds` per confermare i secondi."
+                ),
+                severity=DiagnosticSeverity.Warning,
+                source=SOURCE,
+            ))
         return diagnostics
 
     # -------------------------------------------------------------------------

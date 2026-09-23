@@ -64,6 +64,7 @@ TRIGGER_SUGGEST = Command(
 
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.envelope_snippets import EnvelopeSnippetProvider
+from granular_ls.loop_unit import LOOP_UNITS, LOOP_UNIT_VALUE_DOCS
 from granular_ls.yaml_analyzer import YamlContext
 from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
@@ -210,7 +211,11 @@ _STREAM_CONTEXT_DOCS = {
         "Nota: con density o distribution diverse le griglie temporali si "
         "desincronizzano pur condividendo l'RNG."
     ),
-    'time_mode':           "Modalita tempo: 'absolute' (default) | 'normalized'.",
+    'time_mode': (
+        "Modalita tempo degli envelope: 'absolute' (default) | 'normalized'. "
+        "Non riguarda le posizioni nel sample del pointer: quelle le governa "
+        "loop_unit, che da PGE #222 non eredita piu' da time_mode."
+    ),
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
     'range_always_active': 'Se True, il range si applica anche senza deviation_probability.',
     'distribution_mode':   None,  # generata dinamicamente
@@ -233,18 +238,20 @@ _STREAM_CONTEXT_DOCS = {
         "Posizione iniziale di lettura nel sample (in secondi assoluti o normalizzati). "
         "Valore raw: NON accetta envelope. "
         "Default: 0.0 (inizio del sample). "
-        "Se loop_unit o time_mode e' 'normalized', il valore e' in [0.0, 1.0] "
-        "e viene scalato per la durata del sample."
+        "Con loop_unit: 'normalized' il valore e' in [0.0, 1.0] e viene "
+        "scalato per la durata del sample."
     ),
     'loop_unit': (
-        "Meta-parametro che controlla l'unita' di misura dei parametri loop "
-        "(loop_start, loop_end, loop_dur) e di start.\n\n"
+        "Meta-parametro che controlla l'unita' delle posizioni nel sample: "
+        "start, loop_start, loop_end e loop_dur.\n\n"
         "Valori accettati:\n"
-        "- 'normalized': i valori loop sono in [0.0, 1.0] e vengono scalati "
-        "moltiplicandoli per la durata del sample sorgente.\n"
-        "- 'absolute' (o assente): i valori sono in secondi assoluti.\n\n"
-        "Se assente, eredita il comportamento da time_mode dello stream. "
-        "Non e' un parametro sintetizzabile: non accetta envelope."
+        "- 'seconds' (default): i valori sono in secondi.\n"
+        "- 'absolute': alias storico di 'seconds', stessa lettura.\n"
+        "- 'normalized': i valori sono in [0.0, 1.0] e vengono scalati "
+        "moltiplicandoli per la durata del sample sorgente.\n\n"
+        "Non eredita da time_mode (PGE #222): assente vale 'seconds'. Un "
+        "valore fuori dai tre ferma il render. Non e' un parametro "
+        "sintetizzabile: non accetta envelope."
     ),
     'duration_unit': (
         "Meta-parametro che controlla l'unita' di misura di grain.duration e "
@@ -303,6 +310,10 @@ class CompletionProvider:
         # Contesto 'value' su chiave 'duration_unit': seconds | samples
         if context.context_type == 'value' and context.current_key == 'duration_unit':
             return self._get_duration_unit_completions(context.current_text)
+
+        # Contesto 'value' su chiave 'loop_unit': seconds | absolute | normalized
+        if context.context_type == 'value' and context.current_key == 'loop_unit':
+            return self._get_loop_unit_completions(context.current_text)
 
         # Contesto inline dict: 'dim: {strategy: <prefix>'
         # Rilevato quando la riga corrente matcha '<dim>: {strategy: <word>$'
@@ -1406,6 +1417,32 @@ class CompletionProvider:
             if not prefix or unit.startswith(prefix)
         ]
 
+    def _get_loop_unit_completions(self, current_text: str) -> List[CompletionItem]:
+        """Valori di pointer.loop_unit: seconds (default) | absolute | normalized.
+
+        Il vocabolario e' chiuso da PGE #222 e vive nel registry `loop_unit`,
+        nell'ordine del motore: la grafia canonica, che e' anche il default,
+        viene per prima.
+        """
+        prefix = current_text.strip().strip('"\'').lower()
+        return [
+            CompletionItem(
+                label=unit,
+                insert_text=f'"{unit}"\n$0',
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.EnumMember,
+                detail='loop unit',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'`{unit}`\n\n{LOOP_UNIT_VALUE_DOCS[unit]}',
+                ),
+                sort_text=f'{i:02d}',
+                command=TRIGGER_SUGGEST,
+            )
+            for i, unit in enumerate(LOOP_UNITS)
+            if not prefix or unit.startswith(prefix)
+        ]
+
     # -------------------------------------------------------------------------
     # SAMPLE FILE COMPLETIONS
     # -------------------------------------------------------------------------
@@ -1473,14 +1510,19 @@ class CompletionProvider:
     ) -> List[CompletionItem]:
         """
         Chiavi statiche che non sono in nessuno schema ma appartengono
-        a blocchi specifici. Attualmente: loop_unit per pointer.
+        a blocchi specifici: loop_unit per pointer, duration_unit per grain.
+
+        Entrambe hanno un vocabolario chiuso con la sua completion, quindi
+        aprono il menu dei valori appena inserite, come le chiavi stream con
+        un enum (_VALUE_TRIGGER_KEYS).
         """
         items = []
         block = context.parent_path[0] if context.parent_path else ''
 
         BLOCK_EXTRAS = {
             'pointer': [
-                ('loop_unit', ': ', 'Meta-parametro: unita dei loop.',
+                ('loop_unit', ': ',
+                 'Meta-parametro: unita delle posizioni nel sample.',
                  _STREAM_CONTEXT_DOCS.get('loop_unit', '')),
             ],
             'grain': [
@@ -1503,7 +1545,7 @@ class CompletionProvider:
                     kind=MarkupKind.Markdown,
                     value=f'**{key}**\n\n{doc}',
                 ),
-                # Nessun TRIGGER_SUGGEST: loop_unit accetta solo stringhe
+                command=TRIGGER_SUGGEST if key in _VALUE_TRIGGER_KEYS else None,
             ))
         return items
 
