@@ -58,8 +58,8 @@ from granular_ls.envelope_shapes import (
     normalize_engine_values,
 )
 from granular_ls.time_distributions import (
-    TIME_DISTRIBUTION_NAMES,
     check_time_distribution,
+    describe_issue,
 )
 
 # La chiave nello YAML: identità del campo in ogni diagnostica.
@@ -112,23 +112,6 @@ N_REPS_HINT = (
     "il numero di ripetizioni del formato compatto è un intero >= 1."
 )
 
-DIST_NAME_HINT = (
-    "il quinto elemento del formato compatto è la distribuzione temporale dei "
-    "cicli, e ne esiste un elenco chiuso: {disponibili}. Si scrive come nome "
-    "('exponential') o come dict con i suoi parametri ({{type: geometric, "
-    "ratio: 1.5}}); omettendola i cicli durano uguale."
-)
-
-DIST_PARAM_HINT = (
-    "i parametri della distribuzione '{nome}' non sono validi.{nota}"
-)
-
-DIST_TIPO_IMPLICITO = (
-    " Senza la chiave `type` la distribuzione è `linear`, che non prende "
-    "parametri: se ne volevi un'altra, dichiarane il nome."
-)
-
-
 @dataclass(frozen=True)
 class DeviationProbabilityIssue:
     """Il primo problema trovato nel corpo, con la riga a cui ancorarlo.
@@ -169,18 +152,23 @@ def _check_interp(interp: Any) -> Optional[DeviationProbabilityIssue]:
     return None
 
 
-def _check_time_dist(spec: Any) -> Optional[DeviationProbabilityIssue]:
-    """Il quinto elemento, con le regole del registro condiviso."""
-    issue = check_time_distribution(spec)
+def _check_time_dist(compact: list) -> Optional[DeviationProbabilityIssue]:
+    """Il quinto elemento, con le regole e le frasi del registro condiviso.
+
+    Sotto questa chiave il motore costruisce l'envelope direttamente
+    (`create_scaled_envelope` nel gate), quindi la coppia `(parametro,
+    n_reps)` trabocca nel punto in cui il builder espande il ciclo: dopo nome
+    e parametri, prima dell'elemento successivo della lista. Si guarda qui,
+    nello stesso ordine.
+
+    Il valore riportato è lo spec per nome e parametri, che sono suoi, e il
+    ciclo intero per l'overflow, che non è di nessuno dei due valori da solo.
+    """
+    issue = check_time_distribution(compact[4], compact[2])
     if issue is None:
         return None
-    if issue.kind == 'name':
-        return _issue(spec, DIST_NAME_HINT.format(
-            disponibili=', '.join(TIME_DISTRIBUTION_NAMES)))
-    return _issue(spec, DIST_PARAM_HINT.format(
-        nome=issue.nome,
-        nota=DIST_TIPO_IMPLICITO if issue.senza_tipo else '',
-    ))
+    valore = compact if issue.kind == 'overflow' else compact[4]
+    return _issue(valore, describe_issue(issue))
 
 
 def _check_points(points: Any, hint: str = POINTS_HINT
@@ -247,7 +235,7 @@ def _check_compact(compact: list) -> Optional[DeviationProbabilityIssue]:
             return issue
 
     if len(compact) >= 5:
-        issue = _check_time_dist(compact[4])
+        issue = _check_time_dist(compact)
         if issue is not None:
             return issue
 

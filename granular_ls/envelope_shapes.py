@@ -10,6 +10,9 @@ riconoscere le forme sintattiche di un envelope serializzato:
   - BP group (PGE #64):     [points, interp]  con points = [[t,v]|[t,v,type], ...]
   - loop block (compact):   [pattern, end_time, n_reps, interp?, time_dist?, wrap?]
 
+e le posizioni in cui il builder espande un loop block
+(`compact_block_positions`).
+
 Le regole discriminanti sono identiche a EnvelopeBuilder in PGE
 (src/pge/envelopes/envelope_builder.py): il BP group e' l'unica lista a
 2 elementi con elem[0] lista di punti ed elem[1] stringa. Nessuna
@@ -212,3 +215,34 @@ def is_loop_block(item) -> bool:
     if len(item) == 6 and not isinstance(item[5], bool):
         return False
     return True
+
+
+def compact_block_positions(body) -> list:
+    """
+    Dove `EnvelopeBuilder.parse` espande un ciclo compatto in questo corpo.
+
+    Le posizioni sono le sue, e sono due: il corpo intero, quando è lui il
+    ciclo (forma diretta), oppure gli elementi della lista — non più in fondo,
+    perché un ciclo dentro un ciclo o dentro un BP group non è una forma che
+    il builder riconosca. Un dict envelope porta il corpo sotto `points`.
+
+    Returns:
+        `None` per il corpo intero, l'indice dell'elemento altrimenti. Lista
+        vuota se il corpo non è un envelope o non contiene cicli.
+    """
+    if isinstance(body, dict):
+        body = body.get('points')
+    if not isinstance(body, list):
+        return []
+    if is_loop_block(body):
+        return [None]
+    if is_bp_group(body):
+        return []
+    return [i for i, item in enumerate(body) if is_loop_block(item)]
+
+
+def compact_blocks(body) -> list:
+    """I cicli compatti che il builder espande in questo corpo, in ordine."""
+    lista = body.get('points') if isinstance(body, dict) else body
+    return [lista if pos is None else lista[pos]
+            for pos in compact_block_positions(body)]

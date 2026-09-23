@@ -569,6 +569,62 @@ def test_read_direction_mirror_matches_engine(pge, raw):
     )
 
 
+# La coppia che trabocca sotto `grain.read_direction`: il motore valida il
+# corpo intero in `normalize_read_direction` e trabocca solo dopo, costruendo
+# l'envelope. Qui si percorre la stessa strada, e si confronta anche *quale*
+# errore arriva per primo — con un verso sbagliato piu' avanti nella lista e'
+# quello, non la coppia.
+_CICLO_RD = [[0, 1], [100, -1]]
+
+READ_DIRECTION_OVERFLOW_CORPUS = [
+    ([_CICLO_RD, 10.0, 400, 'step', {'type': 'geometric', 'ratio': 10}], 'overflow'),
+    ([_CICLO_RD, 10.0, 309, 'step', {'type': 'geometric', 'ratio': 10}], None),
+    ([_CICLO_RD, 10.0, 309, 'step', {'type': 'geometric', 'ratio': 10.0}], 'overflow'),
+    ({'points': [_CICLO_RD, 10.0, 400, 'step', {'type': 'geometric', 'ratio': 10}]},
+     'overflow'),
+    ([[0, 1], [_CICLO_RD, 20.0, 400, 'step', {'type': 'power', 'exponent': 150.0}]],
+     'overflow'),
+    ([[_CICLO_RD, 10.0, 400, 'step', {'type': 'geometric', 'ratio': 10}], [20, 0.5]],
+     'valore'),
+]
+
+
+@pytest.mark.parametrize('raw, atteso', READ_DIRECTION_OVERFLOW_CORPUS,
+                         ids=lambda v: repr(v)[:50])
+def test_read_direction_overflow_come_il_motore(pge, raw, atteso, tmp_path,
+                                               monkeypatch):
+    from granular_ls.read_direction import check_read_direction
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        normalize = _import_pge_module(
+            'parameters.read_direction').normalize_read_direction
+        create_scaled_envelope = _import_pge_module(
+            'envelopes.envelope').create_scaled_envelope
+    except Exception:
+        pytest.skip("engine senza read_direction o Envelope importabili")
+
+    eccezioni = _import_pge_module('shared.exceptions')
+    monkeypatch.chdir(tmp_path)  # il logger del builder scrive in logs/
+
+    try:
+        create_scaled_envelope(normalize(raw), 10.0, 'absolute')
+        motore = None
+    except eccezioni.ParameterBoundError:
+        motore = 'overflow'
+    except eccezioni.InvalidFieldValueError:
+        motore = 'valore'
+
+    issue = check_read_direction(raw)
+    if issue is None:
+        ls = None
+    else:
+        ls = 'overflow' if 'coppia a esplodere' in issue.hint else 'valore'
+
+    assert motore == atteso, f"il motore non da' piu' {atteso!r} su {raw!r}"
+    assert ls == motore
+
+
 def test_read_direction_in_schema_bridge(pge):
     """La chiave arriva dal bridge con i metadati che la issue prevedeva."""
     from granular_ls.schema_bridge import SchemaBridge
@@ -596,6 +652,139 @@ def test_time_distribution_names_match(pge):
     factory = _import_pge_module(
         'envelopes.time_distribution').TimeDistributionFactory
     assert set(TIME_DISTRIBUTION_NAMES) == set(factory._DISTRIBUTIONS)
+
+
+# =============================================================================
+# La coppia (parametro, n_reps) che trabocca (PGE #212, issue #45)
+# =============================================================================
+#
+# `time_distributions.check_time_distribution` non stima la soglia: rifà le
+# operazioni del motore sugli stessi tipi, quindi i due lati devono rifiutare
+# esattamente gli stessi `n_reps` — senza la banda di tolleranza che un mirror
+# in un altro linguaggio deve accettare. Il bordo si cerca sul motore per
+# bisezione e si confronta su una finestra attorno: abbastanza larga da
+# contenere i due tratti che precedono il rifiuto pulito, il `ZeroDivisionError`
+# di `geometric` (errore anche lui) e il collasso muto di `exponential` e
+# `power` (che errore non è).
+
+# (spec, n_reps oltre il bordo). Le grafie int e float dello stesso numero
+# stanno entrambe: e' l'unico punto dove il motore le distingue.
+OVERFLOW_PROBES = [
+    ('geometric', 2000),
+    ({'type': 'geometric', 'ratio': 10}, 400),
+    ({'type': 'geometric', 'ratio': 10.0}, 400),
+    ({'type': 'geo', 'ratio': 2}, 1100),
+    ({'type': 'geometric', 'ratio': 2.0}, 1100),
+    ({'type': 'geometric', 'ratio': 1.1}, 8000),
+    ({'type': 'exponential', 'rate': 0.5}, 1100),
+    ({'type': 'exp', 'rate': 0.9}, 7000),
+    ({'type': 'power', 'exponent': 150.0}, 200),
+    ({'type': 'power', 'exponent': 100.5}, 1200),
+]
+
+
+def _engine_rejects(factory, spec, n_reps) -> bool:
+    """True se il motore non costruisce la distribuzione per questo `n_reps`.
+
+    Qualunque eccezione, non solo `ParameterBoundError`: nel tratto che
+    precede il bordo `geometric` alza un `ZeroDivisionError` nudo, e il render
+    fallisce lo stesso.
+    """
+    try:
+        factory.create(spec).calculate_distribution(10.0, n_reps)
+    except Exception:
+        return True
+    return False
+
+
+def _ls_rejects(spec, n_reps) -> bool:
+    from granular_ls.time_distributions import check_time_distribution
+    issue = check_time_distribution(spec, n_reps)
+    return issue is not None and issue.kind == 'overflow'
+
+
+@pytest.mark.parametrize('spec, oltre', OVERFLOW_PROBES,
+                         ids=lambda v: repr(v)[:40])
+def test_overflow_bordo_coincide_col_motore(pge, spec, oltre):
+    from granular_ls.schema_bridge import _import_pge_module
+
+    factory = _import_pge_module(
+        'envelopes.time_distribution').TimeDistributionFactory
+
+    # Il sondaggio stesso: se la sonda non trabocca piu', va aggiornata, non
+    # confrontata su una finestra dove non succede niente.
+    assert _engine_rejects(factory, spec, oltre), \
+        f"il motore non rifiuta piu' {spec!r} a n_reps={oltre}"
+
+    basso, alto = 1, oltre  # il motore accetta `basso`, rifiuta `alto`
+    while alto - basso > 1:
+        medio = (basso + alto) // 2
+        if _engine_rejects(factory, spec, medio):
+            alto = medio
+        else:
+            basso = medio
+
+    for n_reps in range(max(1, alto - 40), alto + 4):
+        motore = _engine_rejects(factory, spec, n_reps)
+        assert _ls_rejects(spec, n_reps) == motore, (
+            f"{spec!r} a n_reps={n_reps}: il motore "
+            f"{'rifiuta' if motore else 'accetta'}, il language server no"
+        )
+
+
+@pytest.mark.parametrize('spec', [
+    {'type': 'power', 'exponent': 150},
+    {'type': 'exponential', 'rate': 2},
+    {'type': 'geometric', 'ratio': 0.5},
+    'logarithmic', 'linear',
+], ids=repr)
+def test_overflow_cio_che_non_trabocca_mai(pge, spec):
+    """Le grafie per cui il motore non ha soglia: nessun rifiuto su entrambi."""
+    from granular_ls.schema_bridge import _import_pge_module
+
+    factory = _import_pge_module(
+        'envelopes.time_distribution').TimeDistributionFactory
+    for n_reps in (1, 2, 400, 1100, 3000):
+        assert not _engine_rejects(factory, spec, n_reps)
+        assert not _ls_rejects(spec, n_reps)
+
+
+@pytest.mark.parametrize('spec, n_reps', [
+    ({'type': 'geometric', 'ratio': 10}, 400),
+    ('geometric', 2000),
+    ({'type': 'exponential', 'rate': 0.5}, 1100),
+    ({'type': 'power', 'exponent': 150.0}, 200),
+], ids=lambda v: repr(v)[:40])
+def test_overflow_la_coppia_e_quella_che_nomina_il_motore(pge, spec, n_reps):
+    """Parametro, valore e formula del messaggio sono quelli dell'errore del
+    motore: chi legge la diagnostica e poi il render deve riconoscerli."""
+    from granular_ls.schema_bridge import _import_pge_module
+    from granular_ls.time_distributions import check_time_distribution
+
+    modulo = _import_pge_module('envelopes.time_distribution')
+    bound_error = _import_pge_module('shared.exceptions').ParameterBoundError
+
+    with pytest.raises(bound_error) as preso:
+        modulo.TimeDistributionFactory.create(spec).calculate_distribution(
+            10.0, n_reps)
+    errore = preso.value
+
+    issue = check_time_distribution(spec, n_reps)
+    assert issue.param == errore.param_name
+    assert issue.param_value == errore.value
+    assert issue.formula in errore.hint
+
+
+def test_overflow_rimedi_come_il_motore(pge):
+    """I rimedi per parametro (PGE #216) sono quelli del motore."""
+    from granular_ls.schema_bridge import _import_pge_module
+    from granular_ls.time_distributions import OVERFLOW_REMEDIES
+
+    modulo = _import_pge_module('envelopes.time_distribution')
+    rimedi = getattr(modulo, '_RIMEDI_OVERFLOW', None)
+    if rimedi is None:
+        pytest.skip("engine precede i rimedi per parametro (PGE #216)")
+    assert OVERFLOW_REMEDIES == rimedi
 
 
 # =============================================================================
@@ -679,6 +868,16 @@ DEVIATION_PROBABILITY_CORPUS = [
     [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'power', 'exponent': 2}],
     [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'ratio': 1.5}],
     [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 5}],
+    # la coppia (parametro, n_reps) che trabocca (PGE #212): il bordo dipende
+    # dalla grafia, il collasso muto di `exponential` non e' un rifiuto, e il
+    # `ZeroDivisionError` di `geometric` si'
+    [[[0, 50], [100, 100]], 10.0, 400, 'linear', {'type': 'geometric', 'ratio': 10}],
+    [[[0, 50], [100, 100]], 10.0, 309, 'linear', {'type': 'geometric', 'ratio': 10}],
+    [[[0, 50], [100, 100]], 10.0, 309, 'linear', {'type': 'geometric', 'ratio': 10.0}],
+    [[[0, 50], [100, 100]], 10.0, 1024, 'linear', {'type': 'exponential', 'rate': 0.5}],
+    [[[0, 50], [100, 100]], 10.0, 1025, 'linear', {'type': 'exponential', 'rate': 0.5}],
+    [[[0, 50], [100, 100]], 10.0, 1749, 'linear', 'geometric'],
+    [[0, 50], [[[0, 50], [100, 100]], 20.0, 400, 'linear', {'type': 'geometric', 'ratio': 10}]],
 ]
 
 

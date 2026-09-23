@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
 from granular_ls.envelope_shapes import (
+    compact_blocks,
     contains_math_expression,
     is_3tuple_breakpoint as _is_3tuple_breakpoint,
     is_bp_group as _is_bp_group,
@@ -59,6 +60,7 @@ from granular_ls.envelope_shapes import (
 from granular_ls.time_distributions import (
     TIME_DISTRIBUTION_NAMES as _TIME_DISTRIBUTION_NAMES,
     check_time_distribution,
+    overflow_hint,
 )
 
 # La chiave nello YAML: identità del campo in ogni diagnostica.
@@ -458,6 +460,11 @@ def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
     # un verso, e `[[0, "1"], [10, "-1"]]` è una lista di breakpoint.
     raw = normalize_engine_values(raw)
 
+    return _check_value(raw) or _check_overflow(raw)
+
+
+def _check_value(raw: Any) -> Optional[ReadDirectionIssue]:
+    """Il valore già normalizzato: i controlli di `normalize_read_direction`."""
     if raw is None:
         # Chiave vuota: a differenza di `grain.reverse`, qui è un errore.
         return _issue(raw, VALUE_HINT)
@@ -475,3 +482,24 @@ def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
         return _check_envelope_body(raw)
 
     return _issue(raw, FORM_HINT)
+
+
+def _check_overflow(raw: Any) -> Optional[ReadDirectionIssue]:
+    """La coppia `(parametro, n_reps)` che trabocca (PGE #212).
+
+    Un passaggio a parte, e per ultimo, perché così fa il motore: valida
+    l'intero corpo in `normalize_read_direction`, dove la distribuzione si
+    crea ma non si calcola, e trabocca solo dopo, quando `create_scaled_envelope`
+    espande i cicli. Con un verso sbagliato più avanti nella lista l'errore che
+    vede per primo è quello, e qui lo stesso.
+
+    La frase è quella del registro: l'overflow nasce nella distribuzione, che
+    non sa di essere sotto il verso di lettura.
+    """
+    for ciclo in compact_blocks(raw):
+        if len(ciclo) < 5:
+            continue  # distribuzione omessa: `linear`, che non eleva niente
+        issue = check_time_distribution(ciclo[4], ciclo[2])
+        if issue is not None and issue.kind == 'overflow':
+            return _issue(ciclo, overflow_hint(issue))
+    return None
