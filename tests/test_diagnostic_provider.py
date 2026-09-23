@@ -4049,3 +4049,337 @@ class TestBoundNellUnitaDichiarata:
         )
         assert [e for e in self._errors(provider, yaml)
                 if 'duration_range' in e.message] == []
+
+
+# =============================================================================
+# Distribuzione temporale del ciclo: la coppia (parametro, n_reps) che
+# trabocca (PGE #212, issue #45), e il quinto elemento sotto ogni chiave
+# =============================================================================
+
+# Il ciclo dell'issue: `ratio: 10` e `n_reps: 400` legittimi da soli, e la
+# coppia che non sta in un float.
+_CICLO_ISSUE = ("[[[0, 5], [100, 50]], 10.0, 400, 'linear', "
+                "{type: geometric, ratio: 10}]")
+
+
+def _ciclo(n_reps=400, dist="{type: geometric, ratio: 10}",
+           pattern="[[0, 5], [100, 50]]", interp="'linear'"):
+    return f"[{pattern}, 10.0, {n_reps}, {interp}, {dist}]"
+
+
+class TestDistribuzioneTemporaleDelCiclo:
+    """
+    Il motore alza `ParameterBoundError` sulla coppia che trabocca, qualunque
+    sia la chiave: la distribuzione non sa sotto quale parametro sta. Qui la
+    diagnostica arriva in scrittura, con la stessa aritmetica del motore — e
+    quindi con la stessa distinzione fra `ratio: 10` e `ratio: 10.0`.
+
+    Sotto le chiavi che non hanno un controllo dedicato del formato compatto
+    (tutte tranne `grain.read_direction` e `deviation_probability`) il quinto
+    elemento non era validato affatto: un nome sbagliato sotto `density`
+    passava muto. Stessa regola, stessa fase.
+    """
+
+    def _errors(self, provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    def _dist_errors(self, provider, yaml):
+        return [d for d in self._errors(provider, yaml)
+                if 'distribuzione' in d.message]
+
+    def _overflow(self, provider, yaml):
+        return [d for d in self._errors(provider, yaml)
+                if 'coppia a esplodere' in d.message]
+
+    # --- l'esempio dell'issue ----------------------------------------------
+
+    def test_esempio_dell_issue_e_errore(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    density: {_CICLO_ISSUE}\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert errs[0].range.start.line == 5
+        assert "'density'" in errs[0].message
+        assert 'ratio=10' in errs[0].message
+        assert 'n_reps=400' in errs[0].message
+
+    def test_il_rimedio_e_nel_messaggio(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    density: {_CICLO_ISSUE}\n")
+        assert 'avvicina ratio a 1' in self._overflow(provider, yaml)[0].message
+
+    def test_una_sola_diagnostica(self, bridge):
+        """Nessun'altra fase dice qualcosa della coppia: un errore, non due."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    density: {_CICLO_ISSUE}\n")
+        assert len(self._errors(provider, yaml)) == 1
+
+    # --- la grafia conta ---------------------------------------------------
+
+    def test_ratio_intero_rende_a_309(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    density: {_ciclo(n_reps=309)}\n")
+        assert self._dist_errors(provider, yaml) == []
+
+    def test_ratio_float_non_rende_a_309(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density: "
+            + _ciclo(n_reps=309, dist="{type: geometric, ratio: 10.0}") + "\n")
+        assert len(self._overflow(provider, yaml)) == 1
+
+    @pytest.mark.parametrize('scritto, errore', [
+        ('"10"', False),    # il Generator la converte in int
+        ('"10.0"', True),   # ... e questa in float
+    ])
+    def test_stringa_numerica_segue_la_conversione_del_motore(
+            self, bridge, scritto, errore):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density: "
+            + _ciclo(n_reps=309, dist=f"{{type: geometric, ratio: {scritto}}}")
+            + "\n")
+        assert bool(self._overflow(provider, yaml)) is errore
+
+    def test_espressione_nel_ciclo_tace(self, bridge):
+        """`(5*2)` il motore la valuta prima di costruire: il suo esito non si
+        prevede, e sul ciclo intero si tace — nemmeno 'parametro non valido'."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density: "
+            + _ciclo(dist="{type: geometric, ratio: (5*2)}") + "\n")
+        assert self._dist_errors(provider, yaml) == []
+
+    def test_il_collasso_prima_della_soglia_non_e_errore(self, bridge):
+        """A 1024 cicli `rate: 0.5` fa durare zero ogni ciclo senza alzare
+        niente: il motore rende. Non e' un errore di scrittura."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density: "
+            + _ciclo(n_reps=1024, dist="{type: exponential, rate: 0.5}") + "\n")
+        assert self._dist_errors(provider, yaml) == []
+
+    # --- le forme dell'envelope -------------------------------------------
+
+    def test_block_style_ancorato_alla_riga_del_ciclo(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density:\n"
+            "      - [0, 5]\n"
+            f"      - {_CICLO_ISSUE}\n"
+        )
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert errs[0].range.start.line == 7
+
+    def test_dict_con_points(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    density: {{points: {_CICLO_ISSUE}}}\n")
+        assert len(self._overflow(provider, yaml)) == 1
+
+    def test_due_cicli_due_diagnostiche(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density:\n"
+            f"      - {_ciclo(n_reps=400)}\n"
+            "      - [[[0, 5], [100, 50]], 20.0, 400, 'linear', "
+            "{type: geometric, ratio: 10}]\n"
+        )
+        righe = sorted(d.range.start.line for d in self._overflow(provider, yaml))
+        assert righe == [6, 7]
+
+    # --- il quinto elemento sotto le chiavi generiche -----------------------
+
+    def test_nome_sconosciuto_sotto_density(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    density: {_ciclo(dist='bogus')}\n")
+        errs = self._dist_errors(provider, yaml)
+        assert len(errs) == 1
+        assert 'elenco chiuso' in errs[0].message
+
+    def test_parametri_non_validi_sotto_density(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density: "
+            + _ciclo(dist="{type: geometric, ratio: 0}") + "\n")
+        errs = self._dist_errors(provider, yaml)
+        assert len(errs) == 1
+        assert "'geometric'" in errs[0].message
+
+    def test_ciclo_valido_tace(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density: " + _ciclo(n_reps=4) + "\n")
+        assert self._errors(provider, yaml) == []
+
+    def test_chiave_che_il_motore_non_costruisce_tace(self, bridge):
+        """Una chiave che non diventa envelope non ha un ciclo da espandere."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(f"    appunti: {_CICLO_ISSUE}\n")
+        assert self._dist_errors(provider, yaml) == []
+
+    # --- le altre chiavi che il motore costruisce come envelope -------------
+
+    def test_blocco_grain(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    grain:\n"
+            "      duration: "
+            + _ciclo(pattern="[[0, 0.01], [100, 0.05]]") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert "'grain.duration'" in errs[0].message
+
+    def test_blocco_pitch(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    pitch:\n"
+            "      semitones: "
+            + _ciclo(pattern="[[0, 0], [100, 12]]") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert "'pitch.semitones'" in errs[0].message
+
+    def test_edo_non_e_un_envelope(self, bridge):
+        """`edo: N` sono le divisioni dell'ottava; il valore sta in `value`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    pitch:\n"
+            "      edo: 31\n"
+            "      value: " + _ciclo(pattern="[[0, 0], [100, 12]]") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert "'pitch.value'" in errs[0].message
+
+    def test_voices_num_voices(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    voices:\n"
+            "      num_voices: " + _ciclo(pattern="[[0, 1], [100, 4]]") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert "'voices.num_voices'" in errs[0].message
+
+    def test_voices_kwarg_della_strategy(self, bridge):
+        """Ogni kwarg envelope-like diventa un `Envelope` prima che la strategy
+        sia costruita (`_parse_strategy_kwarg`)."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    voices:\n"
+            "      num_voices: 2\n"
+            "      pan:\n"
+            "        strategy: step\n"
+            "        step: " + _ciclo(pattern="[[0, 0], [100, 90]]") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert "'voices.pan.step'" in errs[0].message
+
+    def test_voices_progression_non_e_un_envelope(self, bridge):
+        """`progression` e' strutturale in `chord_progression`: il motore la
+        estrae prima di convertire i kwarg."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    voices:\n"
+            "      num_voices: 3\n"
+            "      pitch:\n"
+            "        strategy: chord_progression\n"
+            "        progression: " + _ciclo(pattern="[[0, 0], [100, 4]]") + "\n")
+        assert self._overflow(provider, yaml) == []
+
+    def test_curva_della_transizione_di_finestra(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    grain:\n"
+            "      envelope:\n"
+            "        from: hanning\n"
+            "        to: expodec\n"
+            "        curve: " + _ciclo(pattern="[[0, 0], [100, 1]]") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert "'grain.envelope.curve'" in errs[0].message
+
+    def test_curva_senza_transizione_non_e_costruita(self, bridge):
+        """Senza `states` o `from`/`to` il motore non legge `curve`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    grain:\n"
+            "      envelope:\n"
+            "        curve: " + _ciclo(pattern="[[0, 0], [100, 1]]") + "\n")
+        assert self._overflow(provider, yaml) == []
+
+    # --- le chiavi con un controllo dedicato ---------------------------------
+
+    def test_deviation_probability_per_parametro(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: " + _ciclo(pattern="[[0, 50], [100, 100]]") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert 'deviation_probability.volume' in errs[0].message
+        assert errs[0].range.start.line == 6
+
+    def test_deviation_probability_chiave_non_consultata_tace(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      appunti: " + _ciclo(pattern="[[0, 50], [100, 100]]") + "\n")
+        assert self._overflow(provider, yaml) == []
+
+    def test_read_direction(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = _stream_yaml(
+            "    grain:\n"
+            "      read_direction: "
+            + _ciclo(pattern="[[0, 1], [100, -1]]", interp="'step'") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert 'read_direction' in errs[0].message
+
+    def test_read_direction_prima_il_corpo_poi_la_coppia(self, rd_bridge):
+        """Il motore valida tutto il corpo di `read_direction` prima di
+        costruire l'envelope, e l'overflow nasce nella costruzione: con un
+        verso sbagliato più avanti nella lista, l'errore che vede per primo è
+        quello."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = _stream_yaml(
+            "    grain:\n"
+            "      read_direction:\n"
+            "        - " + _ciclo(pattern="[[0, 1], [100, -1]]",
+                                  interp="'step'") + "\n"
+            "        - [20, 0.5]\n")
+        errs = [d for d in self._errors(provider, yaml)
+                if 'read_direction' in d.message]
+        assert len(errs) == 1
+        assert '0.5' in errs[0].message
+        assert 'coppia' not in errs[0].message
+
+    def test_chiave_duplicata_vale_l_ultima(self, bridge):
+        """PyYAML tiene l'ultima occorrenza, e il motore legge quella: la prima
+        non viene mai costruita. Il doppione lo segnala gia' un'altra fase."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            f"    density: {_CICLO_ISSUE}\n"
+            "    density: 50\n")
+        assert self._overflow(provider, yaml) == []
+
+    # --- tolleranza ---------------------------------------------------------
+
+    def test_stream_illeggibile_non_spegne_gli_altri(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    density: [[[0, 5], [100, 50]], 10.0,\n"
+            "  - stream_id: s2\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            f"    density: {_CICLO_ISSUE}\n"
+        )
+        errs = self._overflow(provider, yaml)
+        assert [d.range.start.line for d in errs] == [10]

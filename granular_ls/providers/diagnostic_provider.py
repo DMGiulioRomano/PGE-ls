@@ -39,6 +39,7 @@ from lsprotocol.types import (
 
 from granular_ls.envelope_shapes import (
     VALID_INTERP_TYPES,
+    compact_block_positions,
     contains_math_expression,
     is_bp_group,
     is_bp_group_candidate,
@@ -53,6 +54,10 @@ from granular_ls.voice_strategies import (
     VOICE_ENVELOPE_KEYS,
     CHORD_INTERVALS,
     get_strategy_spec,
+)
+from granular_ls.time_distributions import (
+    check_time_distribution,
+    describe_issue,
 )
 from granular_ls.read_direction import (
     EXCLUSIVE_HINT,
@@ -93,6 +98,26 @@ _PITCH_OWNED_PREFIX = 'pitch.'
 # path e' escluso dai generici per non dire due volte cose diverse sullo
 # stesso problema, come gia' per il blocco pitch.
 _READ_DIRECTION_OWNED = frozenset({READ_DIRECTION_PATH})
+
+
+# Le chiavi del blocco pitch che il motore passa a `parse_parameter`, cioè
+# quelle che possono essere un envelope: il valore nell'unità scelta, `value`
+# accanto a `edo`, e `range`. `edo: N` invece sono le divisioni dell'ottava.
+_PITCH_ENVELOPE_KEYS = PITCH_BLOCK_KEYS - frozenset({'edo'})
+
+# I kwarg di una dimensione voices che il motore estrae prima di convertire gli
+# altri in envelope (`Stream._init_voices`, `_parse_strategy_kwarg`): tutto il
+# resto, se ha forma di envelope, diventa un `Envelope` prima ancora che la
+# strategy sia costruita — anche un kwarg che la strategy poi rifiuta.
+_VOICE_STRUCTURAL_KWARGS = {
+    'pitch': frozenset({'strategy', 'unit'}),
+    'onset_offset': frozenset({'strategy'}),
+    'pointer': frozenset({'strategy', 'normalized'}),
+    'pan': frozenset({'strategy'}),
+}
+# ...più, sotto `chord_progression`, i tre strutturali della progressione.
+_CHORD_PROGRESSION_STRUCTURAL = frozenset({'progression', 'interp',
+                                           'voice_leading'})
 
 
 def _is_generically_checkable(yaml_path: str) -> bool:
@@ -226,6 +251,16 @@ class DiagnosticProvider:
             and _is_generically_checkable(p.yaml_path)
         }
 
+        # I parametri che il motore passa a `parse_parameter`, e che quindi
+        # diventano un envelope quando lo sono: gli smart, meno le chiavi di
+        # contesto dello stream (solo, mute, ...), che il bridge espone come
+        # parametri ma che il motore legge altrove.
+        contesto = frozenset(bridge.get_stream_context_keys())
+        self._envelope_param_paths = frozenset(
+            path for path, p in self._params_by_yaml_path.items()
+            if p.is_smart and path not in contesto
+        )
+
     def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
         """
         Analizza il documento e ritorna tutti i diagnostici trovati.
@@ -343,6 +378,11 @@ class DiagnosticProvider:
         diagnostics.extend(
             self._check_band_ceiling(lines, streams, grain_blocks)
         )
+
+        # Fase 17: il quinto elemento del formato compatto sotto le chiavi
+        # senza un controllo dedicato — nome, parametri, e la coppia
+        # (parametro, n_reps) che trabocca (PGE #212).
+        diagnostics.extend(self._check_time_distributions(lines, streams))
 
         return diagnostics
 
@@ -3434,6 +3474,225 @@ class DiagnosticProvider:
         if not isinstance(data, dict) or key not in data:
             return False, None
         return True, data[key]
+
+    # -------------------------------------------------------------------------
+    # FASE 17: DISTRIBUZIONE TEMPORALE DEL CICLO (PGE #212)
+    # -------------------------------------------------------------------------
+
+    def _check_time_distributions(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[Diagnostic]:
+        """
+        Il quinto elemento del formato compatto, sotto ogni chiave che il
+        motore costruisce come envelope e che non ha un controllo suo.
+
+        La distribuzione non sa sotto quale parametro sta, quindi i suoi errori
+        sono gli stessi ovunque: un nome fuori registro, parametri fuori dai
+        bound del costruttore, e la coppia `(parametro, n_reps)` che non sta in
+        un float (PGE #212) — `ratio: 10` e `n_reps: 400` legittimi da soli,
+        e insieme un render che non parte. La regola è in
+        `time_distributions.py`, con l'aritmetica del motore.
+
+        Restano fuori le due chiavi che il formato compatto lo validano già
+        per intero, `grain.read_direction` e `deviation_probability`: lì la
+        coppia la guardano i loro moduli, nell'ordine in cui il motore la
+        incontra.
+
+        Lo stream si legge come struttura, non riga per riga: le chiavi sono
+        annidate fino a tre livelli (`voices.pan.step`) e un ciclo può stare
+        a metà di una lista block-style, dove la sua riga è l'unica ancora
+        utile. `yaml.compose` dà l'una e l'altra. Uno stream a metà scrittura
+        non si legge e tace, senza spegnere gli altri.
+
+        Ancoraggio: la riga del ciclo. Il valore incriminato è nel messaggio.
+        """
+        diagnostics: List[Diagnostic] = []
+
+        for stream_start, stream_end_incl, _keys in streams:
+            letto = self._compose_stream(lines, stream_start, stream_end_incl)
+            if letto is None:
+                continue
+            stream_node, costruisci = letto
+
+            for path, value_node in self._envelope_value_nodes(stream_node,
+                                                               costruisci):
+                for ciclo, node in self._compact_block_nodes(value_node,
+                                                             costruisci):
+                    if len(ciclo) < 5:
+                        continue  # distribuzione omessa: `linear`, sempre valida
+                    issue = check_time_distribution(ciclo[4], ciclo[2])
+                    if issue is None:
+                        continue
+                    valore = ciclo if issue.kind == 'overflow' else ciclo[4]
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(
+                            stream_start + node.start_mark.line),
+                        message=(
+                            f"'{path}': {valore!r} non è ammesso. "
+                            f"{describe_issue(issue)}"
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+
+        return diagnostics
+
+    @staticmethod
+    def _compose_stream(lines: List[str], start: int, end_incl: int):
+        """
+        Il nodo YAML di uno stream, e chi ne costruisce i valori.
+
+        Le righe dello stream si leggono da sole, dedentate di due colonne
+        così che `  - stream_id: s1` diventi il primo elemento di una lista.
+        Una riga per riga, commenti e righe vuote compresi (svuotati), perché
+        le righe dei nodi tornino quelle del documento sommando `start`. La
+        prima riga a colonna 0 chiude lo stream: è una chiave di primo livello
+        dopo la lista, non roba sua.
+
+        Returns:
+            `(nodo, costruisci)`, con `costruisci(nodo)` che dà il valore
+            Python di un sotto-nodo; None se lo stream non si legge.
+        """
+        righe = []
+        for riga in lines[start:end_incl + 1]:
+            corpo = riga.lstrip()
+            if not corpo or corpo.startswith('#'):
+                righe.append('')
+                continue
+            if len(riga) - len(corpo) < 2:
+                break
+            righe.append(riga[2:])
+
+        try:
+            loader = yaml.SafeLoader('\n'.join(righe))
+            try:
+                radice = loader.get_single_node()
+            finally:
+                loader.dispose()
+        except Exception:
+            return None
+
+        if (not isinstance(radice, yaml.SequenceNode) or len(radice.value) != 1
+                or not isinstance(radice.value[0], yaml.MappingNode)):
+            return None
+
+        costruttore = yaml.SafeLoader('')
+
+        def costruisci(node):
+            try:
+                return costruttore.construct_object(node, deep=True)
+            except Exception:
+                return None
+
+        return radice.value[0], costruisci
+
+    @staticmethod
+    def _mapping_items(node):
+        """Le coppie `(chiave, nodo del valore)` di un mapping con chiavi
+        scalari; niente per qualunque altro nodo.
+
+        Una chiave ripetuta vale una volta sola, con l'ultimo valore: così la
+        costruisce PyYAML, e il motore non vede mai le occorrenze precedenti.
+        """
+        if not isinstance(node, yaml.MappingNode):
+            return
+        coppie = {}
+        for key_node, value_node in node.value:
+            if isinstance(key_node, yaml.ScalarNode):
+                coppie[key_node.value] = value_node
+        yield from coppie.items()
+
+    def _envelope_value_nodes(self, stream_node, costruisci):
+        """
+        `(path, nodo)` per ogni valore dello stream che il motore costruisce
+        come envelope, fuori dai controlli dedicati.
+
+        - i parametri dello schema, di primo livello o dentro un blocco
+          (`density`, `grain.duration`, `pointer.loop_end`, ...);
+        - il valore del blocco pitch nell'unità scelta, `value`, `range`;
+        - `voices.num_voices`, `voices.scatter` e i kwarg delle strategy;
+        - la `curve` di una finestra in transizione o multistato, l'unico
+          caso in cui il motore la legge.
+        """
+        for key, value_node in self._mapping_items(stream_node):
+            if key == DEVIATION_PROBABILITY_PATH:
+                continue  # ha il suo controllo (fase 15)
+            if key in self._envelope_param_paths:
+                yield key, value_node
+            elif key == 'pitch':
+                for sub, sub_node in self._mapping_items(value_node):
+                    if sub in _PITCH_ENVELOPE_KEYS:
+                        yield f'pitch.{sub}', sub_node
+            elif key == 'voices':
+                yield from self._voice_envelope_nodes(value_node, costruisci)
+            else:
+                for sub, sub_node in self._mapping_items(value_node):
+                    path = f'{key}.{sub}'
+                    if path in self._envelope_param_paths:
+                        yield path, sub_node
+                    elif path == 'grain.envelope':
+                        yield from self._window_curve_node(sub_node)
+
+    def _voice_envelope_nodes(self, voices_node, costruisci):
+        """I valori del blocco voices che diventano envelope."""
+        for key, value_node in self._mapping_items(voices_node):
+            if key in VOICE_ENVELOPE_KEYS:
+                yield f'voices.{key}', value_node
+                continue
+            if key not in _VOICE_STRUCTURAL_KWARGS:
+                continue
+            kwargs = dict(self._mapping_items(value_node))
+            esclusi = _VOICE_STRUCTURAL_KWARGS[key]
+            strategy = (costruisci(kwargs['strategy'])
+                        if 'strategy' in kwargs else None)
+            if key == 'pitch' and strategy == 'chord_progression':
+                esclusi = esclusi | _CHORD_PROGRESSION_STRUCTURAL
+            for kw, kw_node in kwargs.items():
+                if kw not in esclusi:
+                    yield f'voices.{key}.{kw}', kw_node
+
+    def _window_curve_node(self, envelope_node):
+        """La `curve` di `grain.envelope`, solo dove il motore la costruisce:
+        con `states` (multistato) o con `from` e `to` (transizione)."""
+        chiavi = dict(self._mapping_items(envelope_node))
+        if 'states' in chiavi or ('from' in chiavi and 'to' in chiavi):
+            if 'curve' in chiavi:
+                yield 'grain.envelope.curve', chiavi['curve']
+
+    @staticmethod
+    def _compact_block_nodes(value_node, costruisci):
+        """
+        `(ciclo, nodo)` per ogni ciclo compatto che il builder espande in
+        questo valore, con il ciclo come lo vede il motore.
+
+        Il valore si guarda dopo la conversione delle stringhe numeriche, come
+        lo consegna il `Generator`: `"10"` arriva `int` e `"10.0"` `float`, e
+        qui la grafia decide dove sta il bordo. Un ciclo con dentro
+        un'espressione fra parentesi invece si salta intero: il suo esito non
+        si prevede, e un `ratio: (5*2)` letto come stringa sarebbe un
+        «parametro non valido» su YAML che rende.
+        """
+        valore = normalize_engine_values(costruisci(value_node))
+        posizioni = compact_block_positions(valore)
+        if not posizioni:
+            return
+
+        lista, lista_node = valore, value_node
+        if isinstance(valore, dict):
+            lista = valore['points']
+            lista_node = next(
+                (n for k, n in DiagnosticProvider._mapping_items(value_node)
+                 if k == 'points'), None)
+        if not isinstance(lista_node, yaml.SequenceNode):
+            return
+
+        for pos in posizioni:
+            ciclo = lista if pos is None else lista[pos]
+            node = lista_node if pos is None else lista_node.value[pos]
+            if contains_math_expression(ciclo):
+                continue
+            yield ciclo, node
 
     def _deviation_probability_lines(
         self, lines: List[str],

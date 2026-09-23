@@ -11,7 +11,7 @@ Fornisce autocompletamento intelligente, documentazione hover e diagnostica in t
 - **Autocompletamento** — parametri stream, blocchi (`grain`, `pointer`, `pitch`, `deviation_probability`), 11 formati di envelope
 - **Snippet dinamici** — `stream_id` con counter automatico, `end_time` dalla `duration` dello stream, valori Y dai bounds del parametro
 - **Hover** — documentazione su ogni parametro: range, variation mode, exclusive group
-- **Diagnostica** — bounds scalari e envelope, exclusive group per stream, campi obbligatori mancanti, chiavi duplicate
+- **Diagnostica** — bounds scalari e envelope, exclusive group per stream, campi obbligatori mancanti, chiavi duplicate, distribuzione temporale dei cicli compatti (nome, parametri, coppia `(parametro, n_reps)` che trabocca)
 - **Go to file** — `Cmd+Click` su `sample:` apre il file audio da `refs/`
 
 ---
