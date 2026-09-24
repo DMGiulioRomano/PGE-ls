@@ -329,6 +329,15 @@ class TestEffectiveUnitMode:
                         "      loop_start: 0.2\n", time_mode='normalized')
         assert self._mode(text) == ('invalid', 'loop_unit')
 
+    @pytest.mark.parametrize('valore', ['[normalized', '*unita'])
+    def test_valore_che_il_frammento_non_legge(self, valore):
+        """A meta' scrittura, o un alias YAML che solo il documento intero
+        risolve: la scala resta ignota (`invalid`, i bounds tacciono), ma la
+        fonte lo dice — non e' un valore fuori vocabolario."""
+        text = _pointer(f"      loop_unit: {valore}\n"
+                        "      loop_start: 0.2\n")
+        assert self._mode(text) == ('invalid', 'unreadable')
+
     def test_valore_fra_virgolette(self):
         text = _pointer('      loop_unit: "normalized"\n'
                         "      loop_start: 0.2\n")
@@ -708,6 +717,20 @@ class TestLoopUnitHover:
         note = self._hover(bridge, 'start', text)
         assert 'InvalidFieldValueError' in note
         assert 'secondi assoluti' not in note
+
+    def test_nota_con_un_valore_che_non_si_legge_da_qui(self, bridge):
+        """`loop_unit: *unita` e' YAML valido, e il motore ci legge l'unita'
+        dell'ancora. La nota non puo' promettere un `InvalidFieldValueError`
+        che la fase 17, sulla stessa riga, giustamente non segnala."""
+        text = ("unita: &unita normalized\n"
+                + _pointer("      loop_unit: *unita\n"
+                           "      start: 0.2\n"))
+        note = self._hover(bridge, 'start', text)
+        assert 'InvalidFieldValueError' not in note
+        assert 'fuori vocabolario' not in note
+        assert 'non determinabile' in note
+        assert not [d for d in DiagnosticProvider(bridge).get_diagnostics(text)
+                    if 'loop_unit' in d.message]
 
     def test_il_limite_e_la_durata_del_sample_non_dello_stream(
             self, bridge, refs_dir):

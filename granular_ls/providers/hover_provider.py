@@ -304,11 +304,15 @@ def _get_effective_unit_mode(document_text: str,
     3. Se presente, il valore (letto via YAML) decide: `normalized`, le due
        grafie dei secondi, oppure un valore fuori vocabolario — che il motore
        rifiuta, e che quindi non e' un sinonimo di "assoluto".
+    4. Se il frammento non si legge (a meta' scrittura, o un alias YAML che
+       solo il documento intero risolve) la scala resta ignota come per un
+       valore fuori vocabolario, ma la fonte e' `unreadable`: non c'e' un
+       errore del motore da nominare, e la fase 17 infatti tace.
 
     Returns:
         (mode, source) dove:
             mode   : 'normalized' | 'absolute' | 'invalid'
-            source : 'loop_unit' | 'default'
+            source : 'loop_unit' | 'default' | 'unreadable'
     """
     if not document_text:
         return (MODE_ABSOLUTE, 'default')
@@ -316,7 +320,7 @@ def _get_effective_unit_mode(document_text: str,
     if decl is None:
         return (MODE_ABSOLUTE, 'default')
     if not decl.readable:
-        return (MODE_INVALID, 'loop_unit')
+        return (MODE_INVALID, 'unreadable')
     return (loop_unit_mode(decl.value), 'loop_unit')
 
 
@@ -330,6 +334,12 @@ def _unit_mode_note(mode: str, source: str,
     e' esattamente la confusione fra i due che PGE #222 ha tolto al motore.
     Senza un file leggibile il limite non si dice.
     """
+    if mode == MODE_INVALID and source == 'unreadable':
+        return (
+            '\n\n---\n'
+            '**Unità effettiva: non determinabile** — il valore di '
+            '`loop_unit` non si legge da solo come YAML.'
+        )
     if mode == MODE_INVALID:
         return (
             '\n\n---\n'
