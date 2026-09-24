@@ -74,6 +74,7 @@ from granular_ls.loop_unit import (
     loop_unit_mode,
     pointer_span,
     rescaling_would_change,
+    stream_sample,
 )
 from granular_ls.pitch_units import (
     PITCH_UNIT_KEYS,
@@ -2740,20 +2741,9 @@ class DiagnosticProvider:
 
         for stream_start, stream_end_incl, _keys in streams:
             stream_end = stream_end_incl + 1
-            # Estrai il path del sample da questo stream (chiave a indent 4)
-            sample_path_raw = ''
-            for n in range(stream_start, stream_end):
-                raw = lines[n]
-                stripped = raw.strip()
-                if stripped.startswith('- '):
-                    stripped = stripped[2:].strip()
-                leading = len(raw) - len(raw.lstrip())
-                if leading > 4:
-                    continue
-                m = re.match(r'^sample\s*:\s*(.+)', stripped)
-                if m:
-                    sample_path_raw = m.group(1).strip().strip('"\'')
-                    break
+            # Il path del sample di questo stream, letto come lo legge l'hover
+            # nella sua nota d'unita': stesso file, stesso limite.
+            sample_path_raw = stream_sample(lines, stream_start) or ''
 
             # Trova il blocco pointer: (a 4 spazi)
             pointer_start = None

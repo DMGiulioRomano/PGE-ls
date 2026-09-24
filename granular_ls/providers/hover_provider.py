@@ -45,7 +45,7 @@ from granular_ls.loop_unit import (
     MODE_NORMALIZED,
     find_loop_unit,
     loop_unit_mode,
-    stream_span,
+    stream_sample,
 )
 from granular_ls.pitch_units import (
     PITCH_BLOCK_KEYS,
@@ -318,27 +318,6 @@ def _get_effective_unit_mode(document_text: str,
     if not decl.readable:
         return (MODE_INVALID, 'loop_unit')
     return (loop_unit_mode(decl.value), 'loop_unit')
-
-
-def _get_stream_sample(document_text: str, cursor_line: int) -> Optional[str]:
-    """Il `sample` dello stream corrente, o None se non e' dichiarato."""
-    if not document_text:
-        return None
-    lines = document_text.split('\n')
-    span = stream_span(lines, cursor_line)
-    if span is None:
-        return None
-    for i in range(*span):
-        raw = lines[i]
-        stripped = raw.strip()
-        if stripped.startswith('- '):
-            stripped = stripped[2:].strip()
-        elif len(raw) - len(raw.lstrip()) > 4:
-            continue
-        m = re.match(r'^sample\s*:\s*(.+)', stripped)
-        if m:
-            return m.group(1).strip().strip('"\'') or None
-    return None
 
 
 def _unit_mode_note(mode: str, source: str,
@@ -981,12 +960,12 @@ class HoverProvider:
                          cursor_line: int) -> Optional[float]:
         """La durata del file in `sample`, se refs/ e il file sono leggibili.
 
-        Stessa lettura della fase 9 della diagnostica, perche' hover e bounds
-        devono dire lo stesso limite sulla stessa riga.
+        Stessa lettura della fase 9 della diagnostica (`stream_sample`),
+        perche' hover e bounds devono dire lo stesso limite sulla stessa riga.
         """
-        if not self._refs_dir:
+        if not self._refs_dir or not document_text:
             return None
-        sample = _get_stream_sample(document_text, cursor_line)
+        sample = stream_sample(document_text.split('\n'), cursor_line)
         if not sample:
             return None
         from granular_ls.providers.diagnostic_provider import DiagnosticProvider

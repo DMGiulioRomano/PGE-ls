@@ -124,6 +124,12 @@ def _pointer(body: str, time_mode: str = None) -> str:
     return _stream("    pointer:\n" + body, time_mode=time_mode)
 
 
+def _con_commento_su_sample(text: str) -> str:
+    """Lo stesso stream, con il sample fra virgolette e un commento in coda."""
+    return text.replace('    sample: f.wav\n',
+                        '    sample: "f.wav"  # otto secondi\n')
+
+
 def _line_of(text: str, needle: str) -> int:
     for n, line in enumerate(text.split('\n')):
         if needle in line:
@@ -223,6 +229,65 @@ class TestRescalingWouldChange:
     def test_si_muove(self, value):
         from granular_ls.loop_unit import rescaling_would_change
         assert rescaling_would_change(value) is True
+
+
+class TestStreamSample:
+    """`stream_sample`: il file la cui durata limita le posizioni in secondi.
+
+    L'hover lo nomina nella nota d'unita' e la fase 9 della diagnostica ci
+    misura i bounds: devono leggere la stessa riga allo stesso modo, e via
+    YAML, per la ragione di `find_loop_unit` — a regex il commento in coda
+    finiva nel nome del file, il file non si apriva e il limite spariva.
+    """
+
+    def _sample(self, text, needle='stream_id'):
+        from granular_ls.loop_unit import stream_sample
+        return stream_sample(text.split('\n'), _line_of(text, needle))
+
+    @pytest.mark.parametrize('riga', [
+        '    sample: f.wav',
+        '    sample: "f.wav"',
+        "    sample: 'f.wav'",
+        '    sample: f.wav  # otto secondi',
+        '    sample: "f.wav"  # otto secondi',
+    ])
+    def test_il_valore_come_lo_legge_yaml(self, riga):
+        text = _stream('').replace('    sample: f.wav', riga)
+        assert self._sample(text) == 'f.wav'
+
+    def test_sulla_riga_del_trattino(self):
+        text = ("streams:\n"
+                "  - sample: f.wav  # otto secondi\n"
+                "    stream_id: s1\n")
+        assert self._sample(text) == 'f.wav'
+
+    @pytest.mark.parametrize('riga', [
+        '    sample:',
+        '    sample:   # da scegliere',
+        '    sample: null',
+        '    sample: 3',
+    ])
+    def test_senza_un_nome_di_file(self, riga):
+        text = _stream('').replace('    sample: f.wav', riga)
+        assert self._sample(text) is None
+
+    def test_un_sample_annidato_non_e_quello_dello_stream(self):
+        text = _stream("    voices:\n"
+                       "      sample: g.wav\n").replace(
+            '    sample: f.wav\n', '')
+        assert self._sample(text) is None
+
+    def test_il_sample_di_un_altro_stream_non_conta(self):
+        text = (_stream('')
+                + "  - stream_id: s2\n"
+                  "    duration: 4.0\n")
+        assert self._sample(text, 's2') is None
+
+    def test_hover_e_diagnostica_leggono_dallo_stesso_posto(self):
+        from granular_ls import loop_unit
+        from granular_ls.providers import diagnostic_provider, hover_provider
+        assert hover_provider.stream_sample is loop_unit.stream_sample
+        assert diagnostic_provider.stream_sample is loop_unit.stream_sample
 
 
 # =============================================================================
@@ -338,6 +403,16 @@ class TestPointerBoundsDopo222:
         text = _pointer("      loop_unit: seconds\n"
                         "      start: 6.5\n", time_mode='normalized')
         assert self._errors(bridge, refs_dir, text) == []
+
+    def test_il_commento_sulla_riga_di_sample_non_toglie_il_limite(
+            self, bridge, refs_dir):
+        """`sample: "f.wav"  # otto secondi` e' `f.wav`: il falso negativo di
+        sopra, arrivato per un'altra strada. A regex il commento finiva nel
+        nome del file, il file non si apriva e 9 s passavano in silenzio."""
+        text = _con_commento_su_sample(_pointer("      loop_end: 9.0\n"))
+        errs = self._errors(bridge, refs_dir, text)
+        assert len(errs) == 1
+        assert '8.000' in errs[0].message
 
     def test_unita_sconosciuta_non_misura_la_finestra(self, bridge, refs_dir):
         """Sotto un'unita' che il motore rifiuta non c'e' una scala in cui
@@ -652,6 +727,12 @@ class TestLoopUnitHover:
         note = self._hover(bridge, 'start', text, refs_dir=refs_dir)
         assert '8.000 s' in note
         assert '10.0' not in note
+
+    def test_limite_con_un_commento_sulla_riga_di_sample(
+            self, bridge, refs_dir):
+        text = _con_commento_su_sample(_pointer("      start: 2.0\n"))
+        note = self._hover(bridge, 'start', text, refs_dir=refs_dir)
+        assert '8.000 s' in note
 
     def test_senza_file_nessun_limite_inventato(self, bridge):
         text = _pointer("      start: 2.0\n")

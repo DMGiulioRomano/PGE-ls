@@ -213,7 +213,7 @@ def pointer_span(lines: List[str], stream_start: int,
 
 
 def _read_value(lines: List[str], key_line: int, block_end: int,
-                key_indent: int) -> Tuple[bool, Any]:
+                key_indent: int, key: str = 'loop_unit') -> Tuple[bool, Any]:
     """Il valore della chiave come lo legge YAML, inline o block-style."""
     frammento = [lines[key_line][key_indent:]]
     for n in range(key_line + 1, block_end):
@@ -225,9 +225,9 @@ def _read_value(lines: List[str], key_line: int, block_end: int,
         data = yaml.safe_load('\n'.join(frammento))
     except yaml.YAMLError:
         return False, None
-    if not isinstance(data, dict) or 'loop_unit' not in data:
+    if not isinstance(data, dict) or key not in data:
         return False, None
-    return True, data['loop_unit']
+    return True, data[key]
 
 
 def find_loop_unit(lines: List[str], line: int) -> Optional[LoopUnitDecl]:
@@ -256,6 +256,39 @@ def find_loop_unit(lines: List[str], line: int) -> Optional[LoopUnitDecl]:
             line=n, readable=readable, value=value,
             inline_empty=not inline or inline.startswith('#'),
         )
+    return None
+
+
+_SAMPLE_KEY = re.compile(r'^sample\s*:')
+
+
+def stream_sample(lines: List[str], line: int) -> Optional[str]:
+    """Il `sample` dello stream che contiene `line`, o None.
+
+    E' il file la cui durata limita le posizioni in secondi: la fase 9 della
+    diagnostica ci misura i bounds e l'hover lo dice nella nota d'unita'. Lo
+    leggono di qui tutti e due, cosi' non possono dire due limiti diversi
+    sulla stessa riga. Via YAML come `loop_unit`: `sample: "a.wav"  # nota` e'
+    `a.wav`, mentre a regex il commento finiva nel nome del file, il file non
+    si apriva e il limite superiore spariva in silenzio.
+
+    La chiave e' dello stream: sulla riga del trattino o a indent 4. Senza un
+    nome di file leggibile (vuoto, `null`, un numero) la risposta e' None.
+    """
+    span = stream_span(lines, line)
+    if span is None:
+        return None
+    start, end = span
+    for n in range(start, end):
+        raw = lines[n]
+        trattino = re.match(r'^\s*-\s+', raw) if n == start else None
+        key_indent = trattino.end() if trattino else _indent(raw)
+        if not trattino and key_indent != 4:
+            continue
+        if not _SAMPLE_KEY.match(raw[key_indent:]):
+            continue
+        readable, value = _read_value(lines, n, end, key_indent, 'sample')
+        return value if readable and isinstance(value, str) and value else None
     return None
 
 
