@@ -65,6 +65,14 @@ TRIGGER_SUGGEST = Command(
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.envelope_snippets import EnvelopeSnippetProvider
 from granular_ls.loop_unit import LOOP_UNITS, LOOP_UNIT_VALUE_DOCS
+from granular_ls.range_unit import (
+    key_path,
+    range_unit_key_doc,
+    range_unit_value_doc,
+    relative_anchor_doc,
+    relative_anchor_value_doc,
+    split_path,
+)
 from granular_ls.yaml_analyzer import YamlContext
 from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
@@ -255,7 +263,9 @@ _STREAM_CONTEXT_DOCS = {
     ),
     'duration_unit': (
         "Meta-parametro che controlla l'unita' di misura di grain.duration e "
-        "grain.duration_range.\n\n"
+        "grain.duration_range. Il range solo se assoluto: con "
+        "duration_range_unit: relative e' una frazione della base e non si "
+        "converte.\n\n"
         "Valori accettati:\n"
         "- 'seconds' (default): i valori sono in secondi.\n"
         "- 'samples': i valori sono in campioni alla frequenza di output del "
@@ -314,6 +324,12 @@ class CompletionProvider:
         # Contesto 'value' su chiave 'loop_unit': seconds | absolute | normalized
         if context.context_type == 'value' and context.current_key == 'loop_unit':
             return self._get_loop_unit_completions(context.current_text)
+
+        # Contesto 'value' su una chiave `<param>_range_unit` (PGE #267):
+        # absolute | relative, dal registry del motore.
+        if (context.context_type == 'value'
+                and self._range_unit_binding_at(context) is not None):
+            return self._get_range_unit_value_completions(context.current_text)
 
         # Contesto inline dict: 'dim: {strategy: <prefix>'
         # Rilevato quando la riga corrente matcha '<dim>: {strategy: <word>$'
@@ -517,16 +533,7 @@ class CompletionProvider:
                 continue
             if key in already_present:
                 continue
-            if key == 'distribution_mode':
-                modes = self._bridge.get_distribution_modes()
-                doc = (
-                    "Variazione stocastica dei parametri: controlla la distribuzione "
-                    "applicata quando un parametro ha `mod_range`.\n\n"
-                    "Modalita' disponibili: " + ', '.join(f'`{m}`' for m in modes) +
-                    "\n\nDefault: `uniform`"
-                )
-            else:
-                doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
+            doc = self._stream_context_doc(key)
             if key in _FLAG_KEYS:
                 # Flag senza valore: inserisce solo il nome, va a capo e apre il menu
                 items.append(CompletionItem(
@@ -573,6 +580,14 @@ class CompletionProvider:
                 continue
             items.append(self._build_item_local(p))  # gia' ha TRIGGER_SUGGEST
             inserted_labels.add(p.yaml_path.split('.')[-1])
+
+        # 2-bis. Chiavi `<param>_range_unit` di stream (PGE #267): oggi il
+        # motore ne cabla una sola, in grain, ma il meccanismo e' dichiarativo.
+        items.extend(
+            item for item in self._get_range_unit_key_completions(
+                [], already_present, prefix)
+            if item.label not in inserted_labels
+        )
 
         # 3. Block keys (grain, pointer, pitch, deviation_probability, voices)
         block_keys = list(self._bridge.get_block_keys())
@@ -724,16 +739,7 @@ class CompletionProvider:
             # compositivi, non chiavi sparite.
             if key in ('stream_id', 'sample'):
                 continue
-            if key == 'distribution_mode':
-                modes = self._bridge.get_distribution_modes()
-                doc = (
-                    "Variazione stocastica dei parametri: controlla la distribuzione "
-                    "applicata quando un parametro ha `mod_range`.\n\n"
-                    "Modalita' disponibili: " + ', '.join(f'`{m}`' for m in modes) +
-                    "\n\nDefault: `uniform`"
-                )
-            else:
-                doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
+            doc = self._stream_context_doc(key)
             if key in _FLAG_KEYS:
                 items.append(CompletionItem(
                     label=key,
@@ -797,6 +803,9 @@ class CompletionProvider:
                 items.append(self._build_item_raw(p))
         # Aggiungi chiavi statiche speciali del blocco (es. loop_unit per pointer)
         items.extend(self._get_block_static_extras(context, already_present, text_prefix))
+        # Le chiavi `<param>_range_unit` del blocco, dal campo dello schema.
+        items.extend(self._get_range_unit_key_completions(
+            context.parent_path, already_present, text_prefix))
         return items
 
     # -------------------------------------------------------------------------
@@ -1276,10 +1285,17 @@ class CompletionProvider:
                 'larghezza della banda (σ = larghezza/6).'
             ),
         }
+        # Le formule sopra valgono per il range assoluto: con una chiave
+        # `<param>_range_unit: relative` (PGE #267) la banda e' un'altra.
+        unit_paths = self._range_unit_paths()
         items = []
         for anchor in anchors:
             if prefix and not anchor.lower().startswith(prefix):
                 continue
+            doc = _ANCHOR_DOCS.get(anchor, f'Ancora del range: `{anchor}`.')
+            nota = relative_anchor_value_doc(anchor, unit_paths)
+            if nota:
+                doc = f'{doc}\n\n{nota}'
             items.append(CompletionItem(
                 label=anchor,
                 insert_text=f'"{anchor}"',
@@ -1287,7 +1303,7 @@ class CompletionProvider:
                 detail='range anchor',
                 documentation=MarkupContent(
                     kind=MarkupKind.Markdown,
-                    value=_ANCHOR_DOCS.get(anchor, f'Ancora del range: `{anchor}`.'),
+                    value=doc,
                 ),
             ))
         return items
@@ -1484,6 +1500,33 @@ class CompletionProvider:
     # HELPERS
     # -------------------------------------------------------------------------
 
+    def _stream_context_doc(self, key: str) -> str:
+        """La doc di una stream context key, dove serve letta dal bridge.
+
+        `distribution_mode` elenca le modalita' registrate; `range_anchor`
+        aggiunge la banda relativa se il motore cabla una chiave
+        `<param>_range_unit` (PGE #267), perche' la banda e il tetto scritti
+        in `_STREAM_CONTEXT_DOCS` valgono per il range assoluto.
+        """
+        if key == 'distribution_mode':
+            modes = self._bridge.get_distribution_modes()
+            return (
+                "Variazione stocastica dei parametri: controlla la distribuzione "
+                "applicata quando un parametro ha `mod_range`.\n\n"
+                "Modalita' disponibili: " + ', '.join(f'`{m}`' for m in modes) +
+                "\n\nDefault: `uniform`"
+            )
+        doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
+        if key == 'range_anchor':
+            nota = relative_anchor_doc(self._range_unit_paths())
+            if nota:
+                doc = f'{doc}\n\n{nota}'
+        return doc
+
+    def _range_unit_paths(self) -> List[str]:
+        """Le chiavi `<param>_range_unit` che il motore cabla (PGE #267)."""
+        return [b.unit_path for b in self._bridge.get_range_unit_bindings()]
+
     def _build_item_raw(self, param: ParameterInfo) -> CompletionItem:
         """
         CompletionItem per parametri non-smart (is_smart=False).
@@ -1504,6 +1547,85 @@ class CompletionProvider:
             ),
             # Nessun command: non apre il menu envelope
         )
+
+    def _range_unit_binding_at(self, context: YamlContext):
+        """Il legame `<param>_range_unit` della chiave sotto il cursore, o None.
+
+        La chiave vale al suo path e solo li': `duration_range_unit` fuori dal
+        blocco grain, o annidata in un suo sottoblocco, non e' la chiave che il
+        motore legge.
+        """
+        path = key_path(context.parent_path or [], context.current_key)
+        for binding in self._bridge.get_range_unit_bindings():
+            if binding.unit_path == path:
+                return binding
+        return None
+
+    def _get_range_unit_key_completions(
+        self, parent_path: List[str], already_present: set, text_prefix: str,
+    ) -> List[CompletionItem]:
+        """Le chiavi `<param>_range_unit` che stanno sotto `parent_path`.
+
+        `[]` e' il livello dello stream; il confronto e' sul path intero, come
+        per i valori (`_range_unit_binding_at`).
+
+        Derivate da `get_range_unit_bindings`, cioe' dal campo
+        `ParameterSpec.range_unit_path`: nessun nome di chiave scritto qui.
+        Il vocabolario e' chiuso, quindi aprono il menu dei valori.
+        """
+        items = []
+        for binding in self._bridge.get_range_unit_bindings():
+            _, key = split_path(binding.unit_path)
+            if key_path(parent_path, key) != binding.unit_path:
+                continue
+            if text_prefix and not key.lower().startswith(text_prefix):
+                continue
+            if key in already_present:
+                continue
+            items.append(CompletionItem(
+                label=key,
+                insert_text=key + ': ',
+                kind=CompletionItemKind.Field,
+                detail=f'Meta-parametro: unita\' di {binding.range.yaml_path}.',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'**{key}**\n\n' + range_unit_key_doc(
+                        binding.unit_path, binding.range.yaml_path,
+                        binding.base.yaml_path,
+                        self._bridge.get_range_units(),
+                        self._bridge.get_relative_range_bounds()),
+                ),
+                command=TRIGGER_SUGGEST,
+            ))
+        return items
+
+    def _get_range_unit_value_completions(
+        self, current_text: str
+    ) -> List[CompletionItem]:
+        """Valori di una chiave `<param>_range_unit`: `RANGE_UNITS` del motore.
+
+        Nell'ordine del registry: la prima grafia e' il default.
+        """
+        prefix = current_text.strip().strip('"\'').lower()
+        bounds = self._bridge.get_relative_range_bounds()
+        return [
+            CompletionItem(
+                label=unit,
+                insert_text=f'"{unit}"\n$0',
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.EnumMember,
+                detail='range unit',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f'`{unit}`\n\n' + range_unit_value_doc(
+                        unit, bounds, is_default=i == 0),
+                ),
+                sort_text=f'{i:02d}',
+                command=TRIGGER_SUGGEST,
+            )
+            for i, unit in enumerate(self._bridge.get_range_units())
+            if not prefix or unit.lower().startswith(prefix)
+        ]
 
     def _get_block_static_extras(
         self, context, already_present: set, text_prefix: str
