@@ -681,3 +681,16 @@ class TestRangeUnitHover:
                        "      duration_range_unit: relative\n")
         doc = self._hover(bridge, 'duration', text)
         assert 'Unità del range' not in doc
+
+    @pytest.mark.parametrize('d_unit', ['[milliseconds]', '{a: 1}'])
+    def test_duration_unit_non_scalare_non_spegne_l_hover(self, bridge, d_unit):
+        """`grain.duration_unit` letto via YAML puo' essere una lista o un
+        dict: una grafia che la fase 11 rifiuta, non un motivo per perdere
+        l'hover del range. Usato come chiave di dizionario era un TypeError,
+        e con lui spariva anche la doc del parametro."""
+        text = _stream(f"      duration_unit: {d_unit}\n"
+                       "      duration: 50\n"
+                       "      duration_range: 5\n")
+        doc = self._hover(bridge, 'duration_range', text)
+        assert 'Unità del range: `absolute`' in doc
+

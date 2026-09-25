@@ -1107,9 +1107,13 @@ class HoverProvider:
             spelling = decl.value if decl is not None else units[0]
             unita = f'di `{base}`'
             if base == 'grain.duration' and span:
+                # Letta via YAML, la grafia puo' essere una lista o un dict:
+                # non e' un'unita' (la rifiuta la fase 11), e come chiave di
+                # dizionario solleverebbe TypeError portandosi via l'hover.
                 d_unit = find_key(lines, *span, 'grain.duration_unit')
-                parola = self._GRAIN_DURATION_UNIT_WORDS.get(
-                    d_unit.value if d_unit is not None else 'seconds')
+                grafia = d_unit.value if d_unit is not None else 'seconds'
+                parola = (self._GRAIN_DURATION_UNIT_WORDS.get(grafia)
+                          if isinstance(grafia, str) else None)
                 if parola:
                     unita = f'di `{base}`, in {parola}'
             note = (f'**Unità del range: `{spelling}`** — {fonte}\n\n'
