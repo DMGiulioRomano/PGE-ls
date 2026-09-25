@@ -260,6 +260,10 @@ def _literal_from_engine_source(relpath: str, name: str):
     dovrebbe girare. L'AST basta: la costante è un letterale, e leggerla così
     non esegue nulla del motore.
 
+    Legge `NOME = ...` e anche `NOME: T = ...`: l'annotazione è lo stile di
+    casa nel motore, e un lettore che la ignora fa skippare il patto invece
+    di farlo fallire.
+
     Ritorna None se il file o il nome non esistono — engine più vecchio.
     """
     import ast
@@ -268,9 +272,13 @@ def _literal_from_engine_source(relpath: str, name: str):
         return None
     tree = ast.parse(source.read_text(encoding='utf-8'))
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
             continue
-        for target in node.targets:
+        for target in targets:
             if isinstance(target, ast.Name) and target.id == name:
                 try:
                     return ast.literal_eval(node.value)
@@ -309,6 +317,25 @@ def _pointer_controller_literal(name: str):
         if value is not None:
             return value
     return None
+
+
+def test_il_lettore_ast_vede_l_assegnazione_annotata(tmp_path, monkeypatch):
+    """`NOME: T = ...` e' lo stesso letterale di `NOME = ...`.
+
+    L'annotazione e' lo stile di casa nel motore (`GRANULAR_PARAMETERS`,
+    `PITCH_UNIT_PRESETS`). Se il lettore conosce solo `ast.Assign`, il giorno
+    che `LOOP_UNITS` prende un tipo il patto non fallisce: skippa, dicendo
+    che il motore «precede PGE #222» proprio mentre lo segue.
+    """
+    modulo = tmp_path / 'm.py'
+    modulo.write_text(
+        "from typing import Tuple\n"
+        "ANNOTATA: Tuple[str, ...] = ('a', 'b')\n"
+        "SOLO_TIPO: int\n",
+        encoding='utf-8')
+    monkeypatch.setattr(sys.modules[__name__], 'PGE_SRC', str(tmp_path))
+    assert _literal_from_engine_source('m.py', 'ANNOTATA') == ('a', 'b')
+    assert _literal_from_engine_source('m.py', 'SOLO_TIPO') is None
 
 
 def test_loop_units_match(pge):
