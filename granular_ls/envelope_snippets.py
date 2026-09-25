@@ -8,7 +8,7 @@ Il punto di mezzo negli snippet a 3 punti e' sempre end_time / 2.
 """
 
 import re
-from typing import List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 from lsprotocol.types import (
     CompletionItem,
     CompletionItemKind,
@@ -17,7 +17,9 @@ from lsprotocol.types import (
     MarkupKind,
 )
 
-from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
+from granular_ls.schema_bridge import (
+    SchemaBridge, ParameterInfo, unit_scaled_paths,
+)
 
 
 def _fmt(v: float) -> str:
@@ -32,12 +34,16 @@ def _build_snippets(
     y_min: float,
     y_max: float,
     end_time: float,
+    range_doc: Optional[str] = None,
 ) -> List[dict]:
     """
     Costruisce la lista di definizioni snippet con valori dinamici.
 
     y_min, y_max : bounds del parametro corrente
     end_time     : durata dello stream (o 1.0 se normalized)
+    range_doc    : cosa dice «Range parametro» nella doc; default
+                   `[y_min, y_max]`. Per un parametro senza tetto `y_max` e'
+                   un tetto di disegno, e la doc lo deve dire (`_range_doc`).
 
     Il punto di mezzo negli snippet a 3 punti e' end_time / 2.
     """
@@ -45,6 +51,7 @@ def _build_snippets(
     mid = _fmt(end_time / 2)
     ymin = _fmt(y_min)
     ymax = _fmt(y_max)
+    rng = range_doc if range_doc is not None else f'[{ymin}, {ymax}]'
 
     return [
 
@@ -55,7 +62,7 @@ def _build_snippets(
             'doc': (
                 '**Envelope standard lineare - 2 punti**\n\n'
                 'Due breakpoints `[tempo, valore]`. Crea una rampa lineare.\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
@@ -70,7 +77,7 @@ def _build_snippets(
             'doc': (
                 '**Envelope standard lineare - 3 punti**\n\n'
                 f'Attacco, picco, rilascio. Punto di mezzo a t={mid}.\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
@@ -86,7 +93,7 @@ def _build_snippets(
             'doc': (
                 '**Envelope con interpolazione cubica**\n\n'
                 'Usa Fritsch-Carlson per tangenti monotone.\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' {{type: cubic, points: [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
@@ -102,7 +109,7 @@ def _build_snippets(
             'doc': (
                 '**Envelope a gradini**\n\n'
                 'Il valore salta istantaneamente senza interpolazione.\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' {{type: step, points: [[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
@@ -118,7 +125,7 @@ def _build_snippets(
             'doc': (
                 '**Envelope compact - loop base**\n\n'
                 'Pattern ripetuto in percentuale `[x%, valore]`.\n\n'
-                f'Range parametro: [{ymin}, {ymax}]\n\n'
+                f'Range parametro: {rng}\n\n'
                 f'- end_time: {et} (duration dello stream)\n'
                 '- n_reps: numero di ripetizioni'
             ),
@@ -134,7 +141,7 @@ def _build_snippets(
             'detail': '[pattern, end_time, n_reps, "cubic"]',
             'doc': (
                 '**Envelope compact - loop con interpolazione cubic**\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[[0, ${"{1:" + ymin + "}"}], [50, ${"{2:" + ymax + "}"}],'
@@ -149,7 +156,7 @@ def _build_snippets(
             'detail': '[pattern, end_time, n_reps, interp, "exponential"]',
             'doc': (
                 '**Envelope compact - cicli che accelerano**\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
@@ -163,7 +170,7 @@ def _build_snippets(
             'detail': '[pattern, end_time, n_reps, interp, "logarithmic"]',
             'doc': (
                 '**Envelope compact - cicli che rallentano**\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
@@ -177,7 +184,7 @@ def _build_snippets(
             'detail': '[pattern, end_time, n_reps, interp, {geometric,ratio}]',
             'doc': (
                 '**Envelope compact - distribuzione geometrica**\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
@@ -192,7 +199,7 @@ def _build_snippets(
             'detail': '[pattern, end_time, n_reps, interp, {power,exponent}]',
             'doc': (
                 '**Envelope compact - distribuzione power law**\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
@@ -207,7 +214,7 @@ def _build_snippets(
             'detail': '[[t,v],..., [compact]]',
             'doc': (
                 '**Envelope misto: breakpoints standard + sezione loop**\n\n'
-                f'Range parametro: [{ymin}, {ymax}]\n\n'
+                f'Range parametro: {rng}\n\n'
                 f'I breakpoints standard arrivano a t={mid},\n'
                 f'poi il loop fino a t={et}.'
             ),
@@ -226,7 +233,7 @@ def _build_snippets(
             'doc': (
                 '**Envelope loop poi breakpoints standard**\n\n'
                 f'Loop fino a t={mid}, poi rampa lineare fino a t={et}.\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[[[0, ${"{1:" + ymin + "}"}], [100, ${"{2:" + ymax + "}"}]],'
@@ -243,7 +250,7 @@ def _build_snippets(
             'doc': (
                 '**Envelope con due loop in sequenza**\n\n'
                 f'Primo loop fino a t={mid}, secondo fino a t={et}.\n\n'
-                f'Range parametro: [{ymin}, {ymax}]\n\n'
+                f'Range parametro: {rng}\n\n'
                 'Il secondo loop parte automaticamente dal punto finale del primo\n'
                 '(offset automatico calcolato dal motore).'
             ),
@@ -266,7 +273,7 @@ def _build_snippets(
                 '(n punti → n−1 segmenti); il segmento in uscita '
                 'dall\'ultimo punto resta al default globale. Tempi '
                 'assoluti (non percentuali).\n\n'
-                f'Range parametro: [{ymin}, {ymax}]\n\n'
+                f'Range parametro: {rng}\n\n'
                 'Interp validi: `linear`, `cubic`, `step`.'
             ),
             'insert_text': (
@@ -287,7 +294,7 @@ def _build_snippets(
                 'Ogni zona `[points, interp]` interpola per conto suo; '
                 'un loop block puo\' stare in mezzo. Collisione al bordo '
                 'zona → `DISCONTINUITY_OFFSET`.\n\n'
-                f'Range parametro: [{ymin}, {ymax}]'
+                f'Range parametro: {rng}'
             ),
             'insert_text': (
                 f' [[[[${"{1:0.0}"}, ${"{2:" + ymin + "}"}],'
@@ -429,6 +436,109 @@ _DEFAULT_Y_MAX = 1.0
 _DEFAULT_END_TIME = 10.0
 
 
+# =============================================================================
+# FINESTRA DI DISEGNO (PGE-ls #51)
+# =============================================================================
+
+# Sopra questa density il motore scrive una riga sul clip log
+# (`DENSITY_NOTICE_THRESHOLD` in `controllers/density_controller.py`, PGE
+# #272). E' il vecchio `density.max_val`: tolto il tetto, lo stesso numero
+# smette di tagliare e diventa il punto in cui il motore parla. Mirror
+# statico, pinnato da tests/test_pge_parity.py.
+DENSITY_NOTICE_THRESHOLD = 4000.0
+
+# Tetto di DISEGNO dei parametri senza tetto (`max_val=None`), per yaml_path:
+# (tetto, perche' quello). Non e' un bound — nessuna diagnostica lo legge — ma
+# un asse Y (snippet, GUI envelope, `pge.buildEnvelope`) un tetto deve pur
+# averlo, e sceglierlo e' una decisione per parametro, non un default che
+# capita: `_DEFAULT_Y_MAX` avrebbe disegnato density fino a 1 grano al
+# secondo. La parita' pretende una voce per ogni parametro senza tetto del
+# motore. Per i `loop_*` il `None` del registro non e' un'assenza ma un tetto
+# dinamico (la durata del sample): la finestra resta dichiarata qui, e la doc
+# degli snippet non la spaccia per un dominio (`DrawBounds.unit_scaled`).
+_LOOP_DRAW_REASON = ("l'intero file con `loop_unit: normalized`; in secondi "
+                     "il tetto vero e' la durata del sample")
+OPEN_CEILING_DRAW_MAX: Dict[str, Tuple[float, str]] = {
+    'density': (DENSITY_NOTICE_THRESHOLD,
+                'la soglia oltre cui il motore avvisa sul clip log'),
+    'pointer.loop_start': (1.0, _LOOP_DRAW_REASON),
+    'pointer.loop_end': (1.0, _LOOP_DRAW_REASON),
+    'pointer.loop_dur': (1.0, _LOOP_DRAW_REASON),
+}
+
+
+class DrawBounds(NamedTuple):
+    """La finestra Y in cui si disegna l'envelope di un parametro.
+
+    `ceiling_note` e' None quando `y_max` e' il tetto vero del parametro (o il
+    default di chi non ha bounds); altrimenti il parametro non ha tetto, e la
+    nota dice perche' si disegna fin li'.
+
+    `unit_scaled` e' True per le posizioni che `loop_unit` riscala
+    (`schema_bridge.unit_scaled_paths`): i bounds del registro valgono dopo la
+    riscalatura, quindi la finestra non descrive il numero nello YAML e la doc
+    non la puo' dichiarare come suo dominio — lo stesso motivo per cui
+    `get_value_domain` non ne da' uno all'hover.
+    """
+    y_min: float
+    y_max: float
+    ceiling_note: Optional[str] = None
+    unit_scaled: bool = False
+
+
+def draw_bounds(yaml_path: str, min_val: Optional[float],
+                max_val: Optional[float]) -> DrawBounds:
+    """Fin dove si disegna l'envelope di un parametro.
+
+    Una sola risposta per snippet e GUI (`server._resolve_envelope_context`):
+    prima ciascuno aveva la sua, e con `max_val=None` la GUI ricadeva su
+    `(0, 1)` — density disegnata da 0, sotto il pavimento — mentre gli
+    snippet tenevano il pavimento e prendevano `_DEFAULT_Y_MAX`.
+    """
+    bounds = _draw_window(yaml_path, min_val, max_val)
+    if yaml_path in unit_scaled_paths():
+        return bounds._replace(unit_scaled=True)
+    return bounds
+
+
+def _draw_window(yaml_path: str, min_val: Optional[float],
+                 max_val: Optional[float]) -> DrawBounds:
+    """La finestra Y, senza chiedersi se il registro descrive il numero."""
+    y_min = min_val if min_val is not None else _DEFAULT_Y_MIN
+    if max_val is not None:
+        return DrawBounds(y_min, max_val)
+    if min_val is None:
+        return DrawBounds(y_min, _DEFAULT_Y_MAX)
+    declared = OPEN_CEILING_DRAW_MAX.get(yaml_path)
+    if declared is not None:
+        return DrawBounds(y_min, *declared)
+    # Senza tetto e senza una voce: la parita' lo segnala. Intanto il tetto di
+    # comodo non scende sotto il pavimento e non fa uno snippet piatto.
+    ceiling = (_DEFAULT_Y_MAX if y_min < _DEFAULT_Y_MAX
+               else y_min + _DEFAULT_Y_MAX)
+    return DrawBounds(y_min, ceiling,
+                      'un tetto di comodo: nessuno ne ha dichiarato uno')
+
+
+def _range_doc(bounds: DrawBounds) -> Optional[str]:
+    """«Range parametro» per uno snippet: None se `y_max` e' un tetto vero.
+
+    Per le posizioni che `loop_unit` riscala non si dichiara un dominio: il
+    `≥ 0.005` di `loop_dur` e' in secondi, e un tetto c'e' (la durata del
+    sample) anche se il registro non lo porta. Si dice solo cosa si disegna.
+    """
+    if bounds.unit_scaled:
+        drawn = (f'dipende da `loop_unit` — lo snippet disegna '
+                 f'[{_fmt(bounds.y_min)}, {_fmt(bounds.y_max)}]')
+        if bounds.ceiling_note is None:
+            return drawn
+        return f'{drawn}, {bounds.ceiling_note}'
+    if bounds.ceiling_note is None:
+        return None
+    return (f'≥ {_fmt(bounds.y_min)} — nessun tetto; lo snippet arriva a '
+            f'{_fmt(bounds.y_max)}, {bounds.ceiling_note}')
+
+
 class EnvelopeSnippetProvider:
 
     def __init__(self, bridge: SchemaBridge):
@@ -443,10 +553,16 @@ class EnvelopeSnippetProvider:
         return self._items_cache
 
     def get_snippets_with_bounds_and_end_time(
-        self, y_min: float, y_max: float, end_time: float
+        self, y_min: float, y_max: float, end_time: float,
+        ceiling_note: Optional[str] = None,
     ) -> List[CompletionItem]:
-        """Snippet con bounds espliciti e end_time dinamico."""
-        specs = _build_snippets(y_min, y_max, end_time)
+        """Snippet con bounds espliciti e end_time dinamico.
+
+        `ceiling_note` (da `draw_bounds`) dice che `y_max` e' un tetto di
+        disegno e non del parametro.
+        """
+        rng = _range_doc(DrawBounds(y_min, y_max, ceiling_note))
+        specs = _build_snippets(y_min, y_max, end_time, rng)
         return [self._build_item(s) for s in specs]
 
     def get_snippets_with_end_time(self, end_time: float) -> List[CompletionItem]:
@@ -469,8 +585,9 @@ class EnvelopeSnippetProvider:
         param = self._find_param(yaml_path)
         if param is None:
             return []
-        y_min, y_max = self._get_bounds(param)
-        specs = _build_snippets(y_min, y_max, _DEFAULT_END_TIME)
+        bounds = self._get_bounds(param)
+        specs = _build_snippets(bounds.y_min, bounds.y_max, _DEFAULT_END_TIME,
+                                _range_doc(bounds))
         return [self._build_item(s) for s in specs]
 
     def get_snippets_for_parameter_with_context(
@@ -483,8 +600,9 @@ class EnvelopeSnippetProvider:
         param = self._find_param(yaml_path)
         if param is None:
             return []
-        y_min, y_max = self._get_bounds(param)
-        specs = _build_snippets(y_min, y_max, end_time)
+        bounds = self._get_bounds(param)
+        specs = _build_snippets(bounds.y_min, bounds.y_max, end_time,
+                                _range_doc(bounds))
         return [self._build_item(s) for s in specs]
 
     # -------------------------------------------------------------------------
@@ -501,10 +619,8 @@ class EnvelopeSnippetProvider:
                 return p
         return None
 
-    def _get_bounds(self, param: ParameterInfo) -> Tuple[float, float]:
-        y_min = param.min_val if param.min_val is not None else _DEFAULT_Y_MIN
-        y_max = param.max_val if param.max_val is not None else _DEFAULT_Y_MAX
-        return y_min, y_max
+    def _get_bounds(self, param: ParameterInfo) -> DrawBounds:
+        return draw_bounds(param.yaml_path, param.min_val, param.max_val)
 
     @staticmethod
     def _build_item(spec: dict) -> CompletionItem:

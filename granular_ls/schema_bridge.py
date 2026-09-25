@@ -19,6 +19,59 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 
+# =============================================================================
+# DOMINIO DI UN PARAMETRO
+# =============================================================================
+#
+# I due estremi si leggono uno per volta. `max_val=None` con un `min_val` vuol
+# dire «illimitato verso l'alto», non «bounds sconosciuti»: da PGE #272 e' il
+# caso di `density`, che ha perso il tetto e tenuto il pavimento (la guardia
+# contro la divisione in `1.0 / density`). Chiedere i due estremi con un solo
+# `and` spegneva con il tetto anche il pavimento. Ignoto e' solo il parametro
+# senza nessuno dei due.
+
+def domain_label(min_val: Optional[float],
+                 max_val: Optional[float]) -> Optional[str]:
+    """Il dominio come lo scrivono hover, completion e diagnostica.
+
+    `[min, max]`, `≥ min` senza tetto, `≤ max` senza pavimento; None se il
+    registro non ne sa niente.
+    """
+    if min_val is not None and max_val is not None:
+        return f'[{min_val}, {max_val}]'
+    if min_val is not None:
+        return f'≥ {min_val}'
+    if max_val is not None:
+        return f'≤ {max_val}'
+    return None
+
+
+def outside_domain(value: float, min_val: Optional[float],
+                   max_val: Optional[float]) -> bool:
+    """True se `value` cade fuori. Un estremo assente non limita da quel lato."""
+    return ((min_val is not None and value < min_val)
+            or (max_val is not None and value > max_val))
+
+
+def unit_scaled_paths() -> 'frozenset[str]':
+    """Le posizioni nel sample che `loop_unit` interpreta (PGE #222).
+
+    I loro bounds del registro valgono DOPO la riscalatura: sotto `loop_unit:
+    normalized` il motore moltiplica il valore scritto per `sample_dur_sec`
+    prima di applicarli (`PointerController._pre_normalize_loop_params`),
+    quindi il `≥ 0.005` di `loop_dur` e' in secondi e non descrive il numero
+    nello YAML. Il loro dominio lo dice chi conosce l'unita': la fase 9 della
+    diagnostica e la nota d'unita' dell'hover. Prima di #51 questo silenzio lo
+    dava per caso `max_val=None`. Lo legge anche `envelope_snippets.draw_bounds`,
+    perche' la doc degli snippet non dichiari quel dominio.
+    """
+    # Import locale: `loop_unit` tira dentro PyYAML, e il bridge deve restare
+    # importabile con la sola stdlib — `build.sh` genera lo snapshot con il
+    # python3 di sistema.
+    from granular_ls.loop_unit import LOOP_UNIT_SCOPE
+    return frozenset('pointer.' + key for key in LOOP_UNIT_SCOPE)
+
+
 def _import_pge_module(name: str):
     """
     Importa un modulo del sorgente PGE gestendo entrambi i layout:
@@ -462,6 +515,25 @@ class SchemaBridge:
         """
         return self._raw_bounds.get(param_name)
 
+    def get_value_domain(
+        self, param: ParameterInfo,
+    ) -> Optional[Tuple[Optional[float], Optional[float]]]:
+        """
+        Il dominio del numero scritto nello YAML: `(min_val, max_val)`, dove un
+        estremo None non limita da quel lato.
+
+        None quando il registro non descrive quel numero: parametro senza
+        bounds, o posizione nel sample che `loop_unit` riscala prima dei bounds
+        (vedi `unit_scaled_paths`). E' la domanda che fanno tutti i lettori
+        generici del dominio — hover, detail della completion, bound della
+        diagnostica — cosi' non possono rispondere in modi diversi.
+        """
+        if param.min_val is None and param.max_val is None:
+            return None
+        if param.yaml_path in unit_scaled_paths():
+            return None
+        return (param.min_val, param.max_val)
+
     def get_documentation(self, param: ParameterInfo) -> str:
         """
         Stringa di documentazione leggibile per il provider Hover.
@@ -471,8 +543,9 @@ class SchemaBridge:
         """
         lines = []
 
-        if param.min_val is not None and param.max_val is not None:
-            lines.append(f"Range: [{param.min_val}, {param.max_val}]")
+        domain = self.get_value_domain(param)
+        if domain is not None:
+            lines.append(f"Range: {domain_label(*domain)}")
 
         if param.variation_mode:
             lines.append(f"Variation mode: {param.variation_mode}")

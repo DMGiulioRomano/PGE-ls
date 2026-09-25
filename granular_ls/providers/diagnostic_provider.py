@@ -47,7 +47,9 @@ from granular_ls.envelope_shapes import (
     is_valid_point,
     normalize_engine_values,
 )
-from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
+from granular_ls.schema_bridge import (
+    SchemaBridge, ParameterInfo, domain_label, outside_domain,
+)
 from granular_ls.voice_strategies import (
     VOICE_STRATEGY_REGISTRY,
     VOICE_DIMENSIONS,
@@ -270,6 +272,18 @@ class DiagnosticProvider:
             if not p.is_internal
             and _is_generically_checkable(p.yaml_path)
         }
+
+        # yaml_path -> (min, max) del numero scritto, dove un estremo None non
+        # limita da quel lato: `density` ha il solo pavimento da PGE #272. Una
+        # mappa sola per i bound degli scalari e per quelli degli envelope,
+        # che sono lo stesso confronto su forme diverse. Chi non ha un dominio
+        # generico (nessun bound, o le posizioni che `loop_unit` riscala e che
+        # misura la fase 9) non c'e'.
+        self._value_domains: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+        for path, p in self._params_by_yaml_path.items():
+            domain = bridge.get_value_domain(p)
+            if domain is not None:
+                self._value_domains[path] = domain
 
         # Le chiavi `<param>_range_unit` (PGE #267), dal campo dello schema.
         # La chiave scritta e lasciata vuota la segnala `_check_missing_values`
@@ -845,16 +859,13 @@ class DiagnosticProvider:
         diagnostics = []
         lines = document_text.split('\n')
 
-        # Costruisce mappa yaml_path -> (min_val, max_val) dalla **stessa**
-        # mappa che usa il controllo sugli scalari: i due confronti sono lo
-        # stesso confronto su forme diverse, e leggendo il bridge per conto
+        # La **stessa** mappa del controllo sugli scalari: i due confronti sono
+        # lo stesso confronto su forme diverse, e leggendo il bridge per conto
         # proprio questo saltava gli override dinamici del motore (il minimo
         # di `grain.duration`, che è un campione e non lo `0.001` del
-        # registro). Il filtro pitch.* è già dentro la mappa.
-        params_bounds = {}
-        for p in self._params_by_yaml_path.values():
-            if p.min_val is not None and p.max_val is not None:
-                params_bounds[p.yaml_path] = (p.min_val, p.max_val)
+        # registro). Il filtro pitch.* e l'esclusione dei `loop_*` sono già
+        # dentro la mappa.
+        params_bounds = self._value_domains
 
         # Indice di risoluzione chiave -> yaml_path (chiave locale e path
         # completo, primo match in ordine di registrazione): usato dal ramo
@@ -925,7 +936,7 @@ class DiagnosticProvider:
 
                     for line_n, y_val in y_values_to_check:
                         if isinstance(y_val, (int, float)):
-                            if y_val < min_val or y_val > max_val:
+                            if outside_domain(y_val, min_val, max_val):
                                 diagnostics.append(Diagnostic(
                                     range=Range(
                                         start=Position(line=line_n, character=0),
@@ -935,7 +946,7 @@ class DiagnosticProvider:
                                     message=(
                                         f"Valore envelope {y_val} fuori dai bounds "
                                         f"del parametro '{current_param_path}': "
-                                        f"[{min_val}, {max_val}]."
+                                        f"{domain_label(min_val, max_val)}."
                                     ),
                                     severity=DiagnosticSeverity.Error,
                                     source='pge-ls',
@@ -956,7 +967,7 @@ class DiagnosticProvider:
                     continue
                 min_val, max_val = params_bounds[inline_path]
                 for y_val in self._extract_envelope_y_values(m_inline.group(2)):
-                    if y_val < min_val or y_val > max_val:
+                    if outside_domain(y_val, min_val, max_val):
                         diagnostics.append(Diagnostic(
                             range=Range(
                                 start=Position(line=n, character=0),
@@ -965,7 +976,7 @@ class DiagnosticProvider:
                             message=(
                                 f"Valore envelope {y_val} fuori dai bounds "
                                 f"del parametro '{inline_path}': "
-                                f"[{min_val}, {max_val}]."
+                                f"{domain_label(min_val, max_val)}."
                             ),
                             severity=DiagnosticSeverity.Error,
                             source='pge-ls',
@@ -1173,12 +1184,11 @@ class DiagnosticProvider:
         diagnostics = []
 
         for yaml_path, value_str, n_riga, *_ in parsed:
-            param = self._params_by_yaml_path.get(yaml_path)
-            if param is None:
-                continue
-
-            # Nessun bounds definito: non possiamo fare controlli.
-            if param.min_val is None or param.max_val is None:
+            # Nessun dominio generico: nessun bound, o una posizione che
+            # `loop_unit` riscala (la misura la fase 9). Un estremo solo
+            # basta: `density` ha il pavimento e nessun tetto (PGE #272).
+            domain = self._value_domains.get(yaml_path)
+            if domain is None:
                 continue
 
             # Proviamo a interpretare il valore come numero.
@@ -1188,10 +1198,10 @@ class DiagnosticProvider:
                 continue
 
             # Controllo range.
-            if numeric_value < param.min_val or numeric_value > param.max_val:
+            if outside_domain(numeric_value, *domain):
                 message = (
                     f"'{yaml_path}': valore {numeric_value} fuori range "
-                    f"[{param.min_val}, {param.max_val}]."
+                    f"{domain_label(*domain)}."
                 )
                 diagnostics.append(Diagnostic(
                     range=self._line_range(n_riga),
@@ -1921,14 +1931,16 @@ class DiagnosticProvider:
                     val = float(val_str)
                 except ValueError:
                     continue
-                min_v = raw_bounds['min_val']
-                max_v = raw_bounds['max_val']
-                if val < min_v or val > max_v:
+                # Un estremo None non limita: `val > None` era un TypeError
+                # che spegneva l'intera diagnostica del documento.
+                min_v = raw_bounds.get('min_val')
+                max_v = raw_bounds.get('max_val')
+                if outside_domain(val, min_v, max_v):
                     diagnostics.append(Diagnostic(
                         range=self._line_range(param_line),
                         message=(
                             f"`voices.{param_name}` = {val} fuori range "
-                            f"[{min_v}, {max_v}]."
+                            f"{domain_label(min_v, max_v)}."
                         ),
                         severity=DiagnosticSeverity.Error,
                         source=SOURCE,

@@ -223,26 +223,26 @@ class TestBPGroupEnvelopeBounds:
     DOC_HEADER = TestBPGroupDiagnostics.DOC_HEADER
 
     def test_forma_diretta_y_fuori_bounds(self, bridge):
-        # density max 4000
+        # density min 0.01, e nessun tetto (PGE #272): fuori e' solo sotto
         doc = self.DOC_HEADER + \
-            "    density: [[[0.0, 10], [1.0, 9999]], 'cubic']\n"
+            "    density: [[[0.0, 10], [1.0, -5]], 'cubic']\n"
         msgs = self._bounds_msgs(bridge, doc)
         assert len(msgs) == 1
-        assert '9999' in msgs[0].message
+        assert '-5' in msgs[0].message
 
     def test_misto_inline_y_fuori_bounds_dentro_gruppo(self, bridge):
         doc = self.DOC_HEADER + (
-            "    density: [[[[0.0, 1], [0.2, 9999]], 'cubic'],"
+            "    density: [[[[0.0, 1], [0.2, -5]], 'cubic'],"
             " [[[0, 8], [100, 8]], 0.7, 4, 'linear']]\n"
         )
         msgs = self._bounds_msgs(bridge, doc)
         assert len(msgs) == 1
-        assert '9999' in msgs[0].message
+        assert '-5' in msgs[0].message
 
     def test_misto_inline_y_fuori_bounds_dentro_loop_block(self, bridge):
         doc = self.DOC_HEADER + (
             "    density: [[[[0.0, 1], [0.2, 12]], 'cubic'],"
-            " [[[0, 8], [100, 9999]], 0.7, 4, 'linear']]\n"
+            " [[[0, 8], [100, -5]], 0.7, 4, 'linear']]\n"
         )
         msgs = self._bounds_msgs(bridge, doc)
         assert len(msgs) == 1

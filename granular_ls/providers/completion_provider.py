@@ -62,8 +62,8 @@ TRIGGER_SUGGEST = Command(
     command='editor.action.triggerSuggest',
 )
 
-from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
-from granular_ls.envelope_snippets import EnvelopeSnippetProvider
+from granular_ls.schema_bridge import SchemaBridge, ParameterInfo, domain_label
+from granular_ls.envelope_snippets import EnvelopeSnippetProvider, draw_bounds
 from granular_ls.loop_unit import LOOP_UNITS, LOOP_UNIT_VALUE_DOCS
 from granular_ls.range_unit import (
     key_path,
@@ -361,10 +361,13 @@ class CompletionProvider:
             raw = self._bridge.get_raw_bounds(context.current_key)
             if raw:
                 end_time = self._get_end_time_from_context(context, document_text)
+                bounds = draw_bounds('voices.' + context.current_key,
+                                     raw.get('min_val'), raw.get('max_val'))
                 return self._envelope_provider.get_snippets_with_bounds_and_end_time(
-                    y_min=raw['min_val'],
-                    y_max=raw['max_val'],
+                    y_min=bounds.y_min,
+                    y_max=bounds.y_max,
                     end_time=end_time,
+                    ceiling_note=bounds.ceiling_note,
                 ) + [_build_n_points_item(context), _build_gui_editor_item(context)]
 
         # Contesto 'value' su 'strategy' dentro un blocco dimension di voices
@@ -1680,9 +1683,9 @@ class CompletionProvider:
         item, VSCode apre automaticamente il menu per il valore (envelope snippets).
         """
         local_key = param.yaml_path.split('.')[-1]
-        detail = ''
-        if param.min_val is not None and param.max_val is not None:
-            detail = f'[{param.min_val}, {param.max_val}]'
+        # Lo stesso dominio dell'hover: `≥ 0.01` per density senza tetto.
+        domain = self._bridge.get_value_domain(param)
+        detail = domain_label(*domain) if domain is not None else ''
         doc = self._bridge.get_documentation(param)
         return CompletionItem(
             label=local_key,
@@ -1733,8 +1736,9 @@ class CompletionProvider:
                 continue
             doc = get_top_level_doc(key) or f'**{key}**'
             raw = self._bridge.get_raw_bounds(key)
-            detail = (f'[{raw["min_val"]}, {raw["max_val"]}]'
-                      if raw else 'envelope-capable')
+            domain = (domain_label(raw.get('min_val'), raw.get('max_val'))
+                      if raw else None)
+            detail = domain or 'envelope-capable'
             items.append(CompletionItem(
                 label=key,
                 insert_text=key + ': ',

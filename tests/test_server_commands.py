@@ -481,3 +481,47 @@ class TestHandleGetEnvelopeAtCursorBlockYaml:
         result = srv.handle_get_envelope_at_cursor(ls, ['file:///fake.yml', line, 20])
         assert result is not None
         assert 'end_line' not in result['replace_range']
+
+
+# =============================================================================
+# _resolve_envelope_context — bounds di un parametro senza tetto (PGE-ls #51)
+# =============================================================================
+
+class TestResolveEnvelopeContextSenzaTetto:
+    """GUI e `pge.buildEnvelope` disegnano con la stessa finestra degli snippet.
+
+    Con `max_val=None` il vecchio `and` dei due estremi ricadeva su `(0, 1)`:
+    density disegnata da 0, cioe' SOTTO il pavimento, e i breakpoint generati
+    diventavano un errore della diagnostica sul YAML appena inserito.
+    """
+
+    _YAML = (
+        'streams:\n'
+        '  - stream_id: s1\n'
+        '    duration: 42.0\n'
+        '    density: '
+    )
+
+    def test_density_parte_dal_pavimento(self):
+        from granular_ls.envelope_snippets import DENSITY_NOTICE_THRESHOLD
+        line = self._YAML.count('\n')
+        result = srv._resolve_envelope_context(self._YAML, line, 14)
+        assert result['y_min'] == 0.01
+        assert result['y_max'] == DENSITY_NOTICE_THRESHOLD
+
+    def test_stessa_finestra_degli_snippet(self):
+        from granular_ls.envelope_snippets import draw_bounds
+        bridge = srv._completion_provider._bridge
+        p = bridge.get_parameter('density')
+        atteso = draw_bounds(p.yaml_path, p.min_val, p.max_val)
+        line = self._YAML.count('\n')
+        result = srv._resolve_envelope_context(self._YAML, line, 14)
+        assert (result['y_min'], result['y_max']) == (atteso.y_min, atteso.y_max)
+
+    def test_build_envelope_non_scende_sotto_il_pavimento(self):
+        ls = _make_ls(self._YAML)
+        line = self._YAML.count('\n')
+        out = srv.handle_build_envelope(ls, ['file:///fake.yml', line, 14, 3])
+        import ast as _ast
+        punti = _ast.literal_eval(out.strip())
+        assert min(v for _t, v in punti) >= 0.01

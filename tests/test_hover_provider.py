@@ -95,7 +95,8 @@ def bridge():
                           default=0.0, is_smart=False),
         ],
         'bounds': {
-            'density':        make_raw_bounds(0.01, 4000.0),
+            # Nessun tetto da PGE #272.
+            'density':        make_raw_bounds(0.01, None),
             'fill_factor':    make_raw_bounds(0.001, 50.0),
             'volume':         make_raw_bounds(-60.0, 0.0),
             'grain_duration': make_raw_bounds(0.001, 10.0),
@@ -236,11 +237,20 @@ class TestGetHoverContenuto:
         result = provider.get_hover(ctx)
         assert '0.01' in result.contents.value
 
-    def test_documentazione_contiene_max_val(self, bridge):
+    def test_documentazione_dichiara_il_pavimento_senza_tetto(self, bridge):
+        """Da PGE #272 density non ha tetto: l'hover dice «≥ 0.01» invece di
+        tacere sul dominio (con il vecchio `and` dei due estremi)."""
         provider = HoverProvider(bridge)
         ctx = make_context(context_type='key', current_text='density')
         result = provider.get_hover(ctx)
-        assert '4000' in result.contents.value
+        assert 'Range: ≥ 0.01' in result.contents.value
+        assert 'None' not in result.contents.value
+
+    def test_documentazione_contiene_max_val(self, bridge):
+        provider = HoverProvider(bridge)
+        ctx = make_context(context_type='key', current_text='fill_factor')
+        result = provider.get_hover(ctx)
+        assert 'Range: [0.001, 50.0]' in result.contents.value
 
     def test_documentazione_contiene_variation_mode(self, bridge):
         provider = HoverProvider(bridge)
@@ -881,3 +891,20 @@ class TestDeviationProbabilityHover:
         doc = self._doc(bridge)
         assert '`false`' in doc
         assert '{}' in doc
+
+
+# =============================================================================
+# Kwarg di voice strategy con il solo minimo
+# =============================================================================
+
+class TestVoiceStrategyKwargSenzaTetto:
+    """`pitch_range` di `range` ha `min_val=0.0` e nessun tetto: l'elenco dei
+    kwargs lo stampava `[0.0, None]`."""
+
+    def test_range_dichiara_il_pavimento(self, bridge):
+        provider = HoverProvider(bridge)
+        hover = provider._build_voice_strategy_value_hover('pitch', 'range')
+        riga = next(l for l in hover.contents.value.split('\n')
+                    if l.startswith('- **`pitch_range`**'))
+        assert '`≥ 0.0`' in riga
+        assert 'None' not in hover.contents.value

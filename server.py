@@ -81,7 +81,7 @@ from granular_ls.providers.completion_provider import (
 )
 from granular_ls.providers.hover_provider import HoverProvider
 from granular_ls.providers.diagnostic_provider import DiagnosticProvider
-from granular_ls.envelope_snippets import build_envelope_n_points
+from granular_ls.envelope_snippets import build_envelope_n_points, draw_bounds
 from granular_ls.envelope_shapes import VALID_INTERP_TYPES, is_bp_group
 from granular_ls.loop_unit import LOOP_UNIT_SCOPE
 
@@ -977,14 +977,21 @@ def _resolve_envelope_context(
         # Lookup O(1) per chiave locale o yaml_path completo.
         # Il fallback sui raw bounds scatta solo se NESSUN parametro
         # corrisponde: un parametro trovato ma senza bounds tiene i default.
+        # La finestra e' quella degli snippet (`draw_bounds`): con
+        # `max_val=None` qui si ricadeva su (0, 1), density disegnata sotto
+        # il suo pavimento (PGE-ls #51).
         p = bridge.get_parameter_by_key(context.current_key)
         if p is not None:
-            if p.min_val is not None and p.max_val is not None:
-                y_min, y_max = p.min_val, p.max_val
+            window = draw_bounds(p.yaml_path, p.min_val, p.max_val)
+            y_min, y_max = window.y_min, window.y_max
         else:
             raw = bridge.get_raw_bounds(context.current_key)
-            if raw and raw.get('min_val') is not None and raw.get('max_val') is not None:
-                y_min, y_max = raw['min_val'], raw['max_val']
+            if raw:
+                # Il path YAML, come lo passa la completion: `voices.scatter`.
+                path = '.'.join([*context.parent_path, context.current_key])
+                window = draw_bounds(
+                    path, raw.get('min_val'), raw.get('max_val'))
+                y_min, y_max = window.y_min, window.y_max
 
     stream_ctx = YamlAnalyzer.get_stream_context_at_line(text, line)
     if param_time_unit == 'normalized':

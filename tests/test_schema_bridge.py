@@ -1137,3 +1137,156 @@ class TestGetDeviationProbabilityKeys:
         bridge = SchemaBridge(raw)
         for k in bridge.get_deviation_probability_keys():
             assert isinstance(k, str)
+
+
+# =============================================================================
+# 12. Un parametro senza tetto (PGE #272, issue PGE-ls #51)
+# =============================================================================
+#
+# `max_val=None` con un `min_val` vuol dire «illimitato verso l'alto», non
+# «bounds sconosciuti». Da PGE #272 e' il caso di `density`, il parametro piu'
+# comune: il tetto (4000) e' caduto e il pavimento (0.01) e' rimasto, perche'
+# e' la guardia contro la divisione in `1.0 / density`.
+
+def _open_ceiling_raw_data():
+    return {
+        'specs': [
+            make_raw_spec('density', 'density', default=None),
+            make_raw_spec('loop_dur', 'pointer.loop_dur', default=None),
+            make_raw_spec('loop_start', 'pointer.loop_start', default=None),
+            make_raw_spec('fill_factor', 'fill_factor', default=2),
+            make_raw_spec('orphan', 'orphan'),
+        ],
+        'bounds': {
+            'density': make_raw_bounds(0.01, None),
+            'loop_dur': make_raw_bounds(0.005, None),
+            'loop_start': make_raw_bounds(0, None),
+            'fill_factor': make_raw_bounds(0.001, 50.0),
+        },
+    }
+
+
+class TestDomainLabel:
+    """Una sola grafia del dominio per hover, completion e diagnostica."""
+
+    def test_chiuso(self):
+        from granular_ls.schema_bridge import domain_label
+        assert domain_label(0.001, 50.0) == '[0.001, 50.0]'
+
+    def test_senza_tetto_dichiara_il_pavimento(self):
+        from granular_ls.schema_bridge import domain_label
+        assert domain_label(0.01, None) == '≥ 0.01'
+
+    def test_senza_pavimento_dichiara_il_tetto(self):
+        from granular_ls.schema_bridge import domain_label
+        assert domain_label(None, 5) == '≤ 5'
+
+    def test_ignoto_non_dice_niente(self):
+        from granular_ls.schema_bridge import domain_label
+        assert domain_label(None, None) is None
+
+
+class TestOutsideDomain:
+    """Un estremo assente non limita da quel lato; l'altro resta."""
+
+    def test_sotto_il_pavimento_senza_tetto(self):
+        from granular_ls.schema_bridge import outside_domain
+        assert outside_domain(0, 0.01, None)
+        assert outside_domain(-5, 0.01, None)
+
+    def test_nessun_valore_sfora_un_tetto_che_non_c_e(self):
+        from granular_ls.schema_bridge import outside_domain
+        assert not outside_domain(1e9, 0.01, None)
+        assert not outside_domain(0.01, 0.01, None)
+
+    def test_chiuso_da_entrambi_i_lati(self):
+        from granular_ls.schema_bridge import outside_domain
+        assert outside_domain(51, 0.001, 50.0)
+        assert outside_domain(0, 0.001, 50.0)
+        assert not outside_domain(50.0, 0.001, 50.0)
+
+    def test_ignoto_non_rifiuta_niente(self):
+        from granular_ls.schema_bridge import outside_domain
+        assert not outside_domain(-1e9, None, None)
+
+
+class TestGetValueDomain:
+    """Il dominio del numero scritto nello YAML, o None se il registro non
+    lo descrive."""
+
+    def test_senza_tetto_e_un_dominio_non_un_ignoto(self):
+        bridge = SchemaBridge(_open_ceiling_raw_data())
+        assert bridge.get_value_domain(
+            bridge.get_parameter('density')) == (0.01, None)
+
+    def test_chiuso(self):
+        bridge = SchemaBridge(_open_ceiling_raw_data())
+        assert bridge.get_value_domain(
+            bridge.get_parameter('fill_factor')) == (0.001, 50.0)
+
+    def test_senza_bounds_e_ignoto(self):
+        bridge = SchemaBridge(_open_ceiling_raw_data())
+        assert bridge.get_value_domain(bridge.get_parameter('orphan')) is None
+
+    def test_le_posizioni_di_loop_unit_non_hanno_un_dominio_generico(self):
+        """I bounds del registro per `loop_*` valgono DOPO la riscalatura.
+
+        Il motore moltiplica per `sample_dur_sec` i valori sotto `loop_unit:
+        normalized` prima di applicarli (`_pre_normalize_loop_params`): il
+        `≥ 0.005` di `loop_dur` e' in secondi, e `loop_dur: 0.003` normalized
+        su un file di 10 s e' 0.03 s, valido. Il loro dominio lo dice chi
+        conosce l'unita' (fase 9, nota d'unita' dell'hover), non il registro.
+        Prima questo silenzio lo dava per caso `max_val=None`.
+        """
+        bridge = SchemaBridge(_open_ceiling_raw_data())
+        assert bridge.get_value_domain(bridge.get_parameter('loop_dur')) is None
+        assert bridge.get_value_domain(
+            bridge.get_parameter('loop_start')) is None
+
+
+class TestGetDocumentationSenzaTetto:
+
+    def test_dichiara_il_pavimento(self):
+        bridge = SchemaBridge(_open_ceiling_raw_data())
+        doc = bridge.get_documentation(bridge.get_parameter('density'))
+        assert 'Range: ≥ 0.01' in doc
+        assert 'None' not in doc
+
+    def test_chiuso_invariato(self):
+        bridge = SchemaBridge(_open_ceiling_raw_data())
+        doc = bridge.get_documentation(bridge.get_parameter('fill_factor'))
+        assert 'Range: [0.001, 50.0]' in doc
+
+    def test_loop_resta_senza_range(self):
+        bridge = SchemaBridge(_open_ceiling_raw_data())
+        doc = bridge.get_documentation(bridge.get_parameter('loop_dur'))
+        assert 'Range' not in doc
+
+    def test_lo_snapshot_conserva_il_tetto_assente(self, tmp_path):
+        """La modalita' di distribuzione deve leggere lo stesso dominio."""
+        path = tmp_path / 'snap.json'
+        path.write_text(SchemaBridge(_open_ceiling_raw_data()).generate_snapshot())
+        bridge = SchemaBridge.from_snapshot(str(path))
+        density = bridge.get_parameter('density')
+        assert bridge.get_value_domain(density) == (0.01, None)
+        assert 'Range: ≥ 0.01' in bridge.get_documentation(density)
+
+
+def test_il_bridge_si_importa_con_la_sola_stdlib():
+    """`build.sh` genera lo snapshot con il python3 di sistema.
+
+    Il bridge ha sempre importato solo la stdlib; un import di modulo che
+    tiri dentro PyYAML (come `loop_unit`) fa fallire il build, sotto
+    `set -e`, su una macchina dove PyYAML sta solo nel venv del server.
+    """
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    codice = (
+        "import sys\n"
+        "sys.modules['yaml'] = None\n"   # `import yaml` -> ImportError
+        "from granular_ls.schema_bridge import SchemaBridge\n"
+        "SchemaBridge({'specs': [], 'bounds': {}}).generate_snapshot()\n"
+    )
+    esito = subprocess.run([sys.executable, '-c', codice], cwd=root,
+                           capture_output=True, text=True)
+    assert esito.returncode == 0, esito.stderr
