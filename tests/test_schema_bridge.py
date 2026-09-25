@@ -1270,3 +1270,23 @@ class TestGetDocumentationSenzaTetto:
         density = bridge.get_parameter('density')
         assert bridge.get_value_domain(density) == (0.01, None)
         assert 'Range: ≥ 0.01' in bridge.get_documentation(density)
+
+
+def test_il_bridge_si_importa_con_la_sola_stdlib():
+    """`build.sh` genera lo snapshot con il python3 di sistema.
+
+    Il bridge ha sempre importato solo la stdlib; un import di modulo che
+    tiri dentro PyYAML (come `loop_unit`) fa fallire il build, sotto
+    `set -e`, su una macchina dove PyYAML sta solo nel venv del server.
+    """
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    codice = (
+        "import sys\n"
+        "sys.modules['yaml'] = None\n"   # `import yaml` -> ImportError
+        "from granular_ls.schema_bridge import SchemaBridge\n"
+        "SchemaBridge({'specs': [], 'bounds': {}}).generate_snapshot()\n"
+    )
+    esito = subprocess.run([sys.executable, '-c', codice], cwd=root,
+                           capture_output=True, text=True)
+    assert esito.returncode == 0, esito.stderr

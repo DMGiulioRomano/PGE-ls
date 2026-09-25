@@ -18,8 +18,6 @@ import sys
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from granular_ls.loop_unit import LOOP_UNIT_SCOPE
-
 
 # =============================================================================
 # DOMINIO DI UN PARAMETRO
@@ -55,14 +53,22 @@ def outside_domain(value: float, min_val: Optional[float],
             or (max_val is not None and value > max_val))
 
 
-# Le posizioni nel sample che `loop_unit` interpreta (PGE #222). I loro bounds
-# del registro valgono DOPO la riscalatura: sotto `loop_unit: normalized` il
-# motore moltiplica il valore scritto per `sample_dur_sec` prima di applicarli
-# (`PointerController._pre_normalize_loop_params`), quindi il `≥ 0.005` di
-# `loop_dur` e' in secondi e non descrive il numero nello YAML. Il loro dominio
-# lo dice chi conosce l'unita': la fase 9 della diagnostica e la nota d'unita'
-# dell'hover. Prima di #51 questo silenzio lo dava per caso `max_val=None`.
-_UNIT_SCALED_PATHS = frozenset('pointer.' + key for key in LOOP_UNIT_SCOPE)
+def _unit_scaled_paths() -> 'frozenset[str]':
+    """Le posizioni nel sample che `loop_unit` interpreta (PGE #222).
+
+    I loro bounds del registro valgono DOPO la riscalatura: sotto `loop_unit:
+    normalized` il motore moltiplica il valore scritto per `sample_dur_sec`
+    prima di applicarli (`PointerController._pre_normalize_loop_params`),
+    quindi il `≥ 0.005` di `loop_dur` e' in secondi e non descrive il numero
+    nello YAML. Il loro dominio lo dice chi conosce l'unita': la fase 9 della
+    diagnostica e la nota d'unita' dell'hover. Prima di #51 questo silenzio lo
+    dava per caso `max_val=None`.
+    """
+    # Import locale: `loop_unit` tira dentro PyYAML, e il bridge deve restare
+    # importabile con la sola stdlib — `build.sh` genera lo snapshot con il
+    # python3 di sistema.
+    from granular_ls.loop_unit import LOOP_UNIT_SCOPE
+    return frozenset('pointer.' + key for key in LOOP_UNIT_SCOPE)
 
 
 def _import_pge_module(name: str):
@@ -517,13 +523,13 @@ class SchemaBridge:
 
         None quando il registro non descrive quel numero: parametro senza
         bounds, o posizione nel sample che `loop_unit` riscala prima dei bounds
-        (vedi `_UNIT_SCALED_PATHS`). E' la domanda che fanno tutti i lettori
+        (vedi `_unit_scaled_paths`). E' la domanda che fanno tutti i lettori
         generici del dominio — hover, detail della completion, bound della
         diagnostica — cosi' non possono rispondere in modi diversi.
         """
         if param.min_val is None and param.max_val is None:
             return None
-        if param.yaml_path in _UNIT_SCALED_PATHS:
+        if param.yaml_path in _unit_scaled_paths():
             return None
         return (param.min_val, param.max_val)
 

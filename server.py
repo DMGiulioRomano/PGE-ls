@@ -986,8 +986,10 @@ def _resolve_envelope_context(
         else:
             raw = bridge.get_raw_bounds(context.current_key)
             if raw:
+                # Il path YAML, come lo passa la completion: `voices.scatter`.
+                path = '.'.join([*context.parent_path, context.current_key])
                 y_min, y_max, _ = draw_bounds(
-                    context.current_key, raw.get('min_val'), raw.get('max_val'))
+                    path, raw.get('min_val'), raw.get('max_val'))
 
     stream_ctx = YamlAnalyzer.get_stream_context_at_line(text, line)
     if param_time_unit == 'normalized':
