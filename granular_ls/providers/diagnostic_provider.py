@@ -3694,12 +3694,16 @@ class DiagnosticProvider:
             (il default 0.05 è in secondi e non viene convertito) → Error;
           - con un'unità non-secondi, valida i valori di duration e
             duration_range — scalari ed envelope — contro i bound del
-            parametro convertiti in quell'unità.
+            parametro convertiti in quell'unità. Il range solo se assoluto:
+            con `duration_range_unit: relative` (PGE #267) è una frazione
+            della base, il motore non lo converte, e lo misura la fase 19
+            (`range_unmeasured` sono le sue righe).
 
         La regola della durata esplicita vale per ogni unità non-secondi, non
         per `samples` soltanto: senza `grain.duration` la base resterebbe in
-        secondi mentre `duration_range` sarebbe nell'unità dichiarata — due
-        domini nello stesso blocco.
+        secondi mentre chi ha scritto l'unità la legge in campioni o
+        millisecondi. Vale anche con un range relativo, che dall'unità non
+        dipende: è il default in secondi a non dire quel che si intende.
 
         I bound arrivano dal parametro (secondi) e si convertono dividendo per
         il fattore dell'unità. Il minimo non è quello del registro ma **un
