@@ -41,9 +41,9 @@ from granular_ls.range_unit import (
     find_key,
     fmt_bound,
     is_relative,
+    key_path,
     range_unit_key_doc,
     relative_anchor_doc,
-    split_path,
     stream_span,
 )
 from granular_ls.pitch_units import (
@@ -579,9 +579,9 @@ class HoverProvider:
 
         # Chiave `<param>_range_unit` (PGE #267): la doc la costruisce il
         # legame che il bridge legge dallo schema, al path e solo li'.
-        block = context.parent_path[0] if context.parent_path else None
+        path = key_path(context.parent_path or [], context.current_text)
         for binding in self._bridge.get_range_unit_bindings():
-            if split_path(binding.unit_path) == (block, context.current_text):
+            if binding.unit_path == path:
                 return Hover(contents=MarkupContent(
                     kind=MarkupKind.Markdown,
                     value=range_unit_key_doc(

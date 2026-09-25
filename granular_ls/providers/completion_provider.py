@@ -65,6 +65,7 @@ TRIGGER_SUGGEST = Command(
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.envelope_snippets import EnvelopeSnippetProvider
 from granular_ls.range_unit import (
+    key_path,
     range_unit_key_doc,
     range_unit_value_doc,
     relative_anchor_doc,
@@ -573,7 +574,7 @@ class CompletionProvider:
         # motore ne cabla una sola, in grain, ma il meccanismo e' dichiarativo.
         items.extend(
             item for item in self._get_range_unit_key_completions(
-                None, already_present, prefix)
+                [], already_present, prefix)
             if item.label not in inserted_labels
         )
 
@@ -793,7 +794,7 @@ class CompletionProvider:
         items.extend(self._get_block_static_extras(context, already_present, text_prefix))
         # Le chiavi `<param>_range_unit` del blocco, dal campo dello schema.
         items.extend(self._get_range_unit_key_completions(
-            context.parent_path[0], already_present, text_prefix))
+            context.parent_path, already_present, text_prefix))
         return items
 
     # -------------------------------------------------------------------------
@@ -1514,18 +1515,22 @@ class CompletionProvider:
         """Il legame `<param>_range_unit` della chiave sotto il cursore, o None.
 
         La chiave vale al suo path e solo li': `duration_range_unit` fuori dal
-        blocco grain non e' la chiave che il motore legge.
+        blocco grain, o annidata in un suo sottoblocco, non e' la chiave che il
+        motore legge.
         """
-        block = context.parent_path[0] if context.parent_path else None
+        path = key_path(context.parent_path or [], context.current_key)
         for binding in self._bridge.get_range_unit_bindings():
-            if split_path(binding.unit_path) == (block, context.current_key):
+            if binding.unit_path == path:
                 return binding
         return None
 
     def _get_range_unit_key_completions(
-        self, block: Optional[str], already_present: set, text_prefix: str,
+        self, parent_path: List[str], already_present: set, text_prefix: str,
     ) -> List[CompletionItem]:
-        """Le chiavi `<param>_range_unit` che stanno in `block` (None: stream).
+        """Le chiavi `<param>_range_unit` che stanno sotto `parent_path`.
+
+        `[]` e' il livello dello stream; il confronto e' sul path intero, come
+        per i valori (`_range_unit_binding_at`).
 
         Derivate da `get_range_unit_bindings`, cioe' dal campo
         `ParameterSpec.range_unit_path`: nessun nome di chiave scritto qui.
@@ -1533,8 +1538,8 @@ class CompletionProvider:
         """
         items = []
         for binding in self._bridge.get_range_unit_bindings():
-            unit_block, key = split_path(binding.unit_path)
-            if unit_block != block:
+            _, key = split_path(binding.unit_path)
+            if key_path(parent_path, key) != binding.unit_path:
                 continue
             if text_prefix and not key.lower().startswith(text_prefix):
                 continue

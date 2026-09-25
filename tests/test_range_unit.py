@@ -643,6 +643,21 @@ class TestRangeUnitCompletion:
             ctx, document_text="pointer:\n  duration_range_unit: ")]
         assert 'relative' not in labels
 
+    @pytest.mark.parametrize('parent', [['grain', 'envelope'],
+                                        ['grain', 'duration_range']])
+    def test_il_valore_non_si_completa_in_un_sottoblocco(self, bridge, parent):
+        """Il path e' `grain.duration_range_unit`, non «un blocco che comincia
+        per grain». Sotto `grain.envelope:` in forma dict, o sotto un
+        `duration_range:` scritto come dict envelope, la chiave non la legge
+        nessuno — e la diagnostica infatti tace: proporre i valori sarebbe
+        confermare una riga inerte."""
+        from granular_ls.providers.completion_provider import CompletionProvider
+        ctx = _context(context_type='value', current_key='duration_range_unit',
+                       parent_path=parent, indent_level=4)
+        labels = [i.label for i in CompletionProvider(bridge).get_completions(
+            ctx, document_text="grain:\n  x:\n    duration_range_unit: ")]
+        assert 'relative' not in labels
+
 
 # =============================================================================
 # 4. Hover
@@ -667,6 +682,14 @@ class TestRangeUnitHover:
     def test_la_chiave_fuori_dal_blocco_non_e_lei(self, bridge):
         doc = self._hover(bridge, 'duration_range_unit', parent=('pointer',))
         assert doc is None or 'grain.duration_range' not in doc
+
+    @pytest.mark.parametrize('parent', [('grain', 'envelope'),
+                                        ('grain', 'duration_range')])
+    def test_la_chiave_in_un_sottoblocco_non_e_lei(self, bridge, parent):
+        """Stesso path della diagnostica: annidata sotto `grain` non e' la
+        chiave che il motore legge, e l'hover non la documenta come tale."""
+        doc = self._hover(bridge, 'duration_range_unit', parent=parent)
+        assert doc is None or 'Meta-parametro' not in doc
 
     def test_nota_sul_range_relativo(self, bridge):
         text = _stream("      duration: 0.05\n"

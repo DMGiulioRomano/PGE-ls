@@ -206,6 +206,17 @@ def split_path(path: str) -> Tuple[Optional[str], str]:
     return None, path
 
 
+def key_path(parent_path: List[str], key: str) -> str:
+    """Il path di `key` sotto `parent_path`, nella notazione di `ParameterSpec`.
+
+    `(['grain'], 'duration_range_unit')` -> `grain.duration_range_unit`;
+    `([], 'volume_range_unit')` -> `volume_range_unit`. Si confronta il path
+    intero, non il primo blocco: sotto `grain.envelope:` la stessa chiave e'
+    `grain.envelope.duration_range_unit`, che il motore non legge.
+    """
+    return '.'.join([*parent_path, key])
+
+
 class KeyDecl(NamedTuple):
     """Una chiave come e' scritta nello stream."""
     line: int           # riga della chiave
