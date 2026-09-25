@@ -16,7 +16,7 @@ Responsabilita':
 import json
 import sys
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 
 def _import_pge_module(name: str):
@@ -51,6 +51,12 @@ class ParameterInfo:
     is_internal viene calcolato automaticamente da SchemaBridge:
     True se yaml_path inizia con '_' (convenzione del progetto granulare
     per i parametri non esposti nel YAML).
+
+    range_unit_path e' il campo omonimo di `ParameterSpec` (PGE #267): il
+    path YAML della chiave che dichiara l'unita' del `_range` di questo
+    parametro (`absolute` o `relative`). Sta sul parametro base, come nel
+    motore; None per chi non ha la banda relativa e per i motori che la
+    precedono. Ha un default perche' e' l'ultimo arrivato.
     """
     name: str
     yaml_path: str
@@ -64,6 +70,19 @@ class ParameterInfo:
     max_range: Optional[float]
     variation_mode: str
     is_internal: bool
+    range_unit_path: Optional[str] = None
+
+
+class RangeUnitBinding(NamedTuple):
+    """Una chiave `<param>_range_unit` con i due parametri che governa.
+
+    `unit_path` e' la chiave (`grain.duration_range_unit`), `base` il
+    parametro che la dichiara (`grain.duration`), `range` il suo `_range`
+    (`grain.duration_range`): quello i cui valori cambiano lettura.
+    """
+    unit_path: str
+    base: ParameterInfo
+    range: ParameterInfo
 
 
 # =============================================================================
@@ -120,6 +139,22 @@ class SchemaBridge:
         _STATIC_RANGE_ANCHORS = ['center', 'min']
         self._range_anchors: List[str] = (
             raw_data.get('range_anchors') or _STATIC_RANGE_ANCHORS
+        )
+
+        # Unita' del `_range` dichiarato (chiavi `<param>_range_unit`, PGE
+        # #267), lette da RANGE_UNITS in from_python_path; fallback statico.
+        # La prima grafia e' il default del motore (RANGE_UNIT_DEFAULT).
+        _STATIC_RANGE_UNITS = ['absolute', 'relative']
+        self._range_units: List[str] = (
+            raw_data.get('range_units') or _STATIC_RANGE_UNITS
+        )
+
+        # Dominio del `_range` quando e' una frazione della base: e' della
+        # modalita', non del parametro. RELATIVE_RANGE_BOUNDS nel motore.
+        _STATIC_RELATIVE_RANGE_BOUNDS = (0.0, 1.0)
+        self._relative_range_bounds: Tuple[float, float] = tuple(
+            raw_data.get('relative_range_bounds')
+            or _STATIC_RELATIVE_RANGE_BOUNDS
         )
 
         # Nomi delle finestrature del grano (grain.envelope).
@@ -202,6 +237,7 @@ class SchemaBridge:
                 max_range=b.get('max_range') if b else None,
                 variation_mode=b.get('variation_mode', 'additive') if b else 'additive',
                 is_internal=is_internal,
+                range_unit_path=spec.get('range_unit_path'),
             )
 
         # Conserviamo il dizionario bounds completo (include parametri come
@@ -378,6 +414,37 @@ class SchemaBridge:
         """Lista delle ancore del range disponibili (es. center, min)."""
         return list(self._range_anchors)
 
+    def get_range_units(self) -> List[str]:
+        """Grafie ammesse per una chiave `<param>_range_unit` (absolute, relative).
+
+        La prima e' il default: la chiave assente vale quella.
+        """
+        return list(self._range_units)
+
+    def get_relative_range_bounds(self) -> Tuple[float, float]:
+        """Dominio di un `_range` letto come frazione della base: `[0, 1]`."""
+        return self._relative_range_bounds
+
+    def get_range_unit_bindings(self) -> List[RangeUnitBinding]:
+        """Le chiavi `<param>_range_unit`, ciascuna col base e il `_range`.
+
+        Derivate dal campo `range_unit_path` dei parametri, non dal nome di una
+        chiave: un secondo parametro cablato nel motore entra da solo. Il
+        `_range` e' quello che l'espansione dei `range_path` chiama
+        `<nome>_range`; senza di lui l'unita' non governa niente (nel motore
+        `range_unit_path` ha senso solo insieme a `range_path`) e il legame
+        non c'e'.
+        """
+        legami = []
+        for base in self._params.values():
+            if not base.range_unit_path:
+                continue
+            rng = self._params.get(base.name + '_range')
+            if rng is None:
+                continue
+            legami.append(RangeUnitBinding(base.range_unit_path, base, rng))
+        return legami
+
     def get_grain_envelope_names(self) -> List[str]:
         """Lista dei nomi delle finestrature del grano (grain.envelope)."""
         return list(self._grain_envelope_names)
@@ -447,6 +514,8 @@ class SchemaBridge:
             'parameters': [asdict(p) for p in self._params.values()],
             'distribution_modes': self._distribution_modes,
             'range_anchors': self._range_anchors,
+            'range_units': self._range_units,
+            'relative_range_bounds': list(self._relative_range_bounds),
             'grain_envelope_names': self._grain_envelope_names,
             'stream_context_keys': self._stream_context_keys,
             'deviation_probability_keys': self.get_deviation_probability_keys(),
@@ -512,6 +581,11 @@ class SchemaBridge:
                             and not yaml_path.startswith('_')
                             and '.' not in yaml_path):
                         yaml_path = block_prefix + '.' + yaml_path
+                    # PGE #267. Un motore che la precede non ha il campo.
+                    range_unit_path = getattr(spec, 'range_unit_path', None)
+                    if (range_unit_path and block_prefix
+                            and '.' not in range_unit_path):
+                        range_unit_path = block_prefix + '.' + range_unit_path
                     specs.append({
                         'name': spec.name,
                         'yaml_path': yaml_path,
@@ -520,6 +594,7 @@ class SchemaBridge:
                         'exclusive_group': spec.exclusive_group,
                         'group_priority': spec.group_priority,
                         'range_path': spec.range_path,
+                        'range_unit_path': range_unit_path,
                         'deviation_probability_key': spec.deviation_probability_key,
                     })
 
@@ -632,6 +707,18 @@ class SchemaBridge:
             except Exception:
                 pass  # Usa il fallback statico nel costruttore
 
+            # Unita' del `_range` (PGE #267): il registry esiste perche' il
+            # language server lo legga dal vivo invece di tenerne una copia.
+            # Un motore che lo precede non ha nessuna `<param>_range_unit`,
+            # quindi il fallback statico non viene mai consultato da lui.
+            try:
+                raw_data['range_units'] = list(
+                    parameter_definitions.RANGE_UNITS)
+                raw_data['relative_range_bounds'] = list(
+                    parameter_definitions.RELATIVE_RANGE_BOUNDS)
+            except AttributeError:
+                pass  # Usa il fallback statico nel costruttore
+
             # Carica i nomi delle finestrature del grano da WindowRegistry
             try:
                 WindowRegistry = _import_pge_module(
@@ -681,6 +768,9 @@ class SchemaBridge:
                 'exclusive_group': p['exclusive_group'],
                 'group_priority': p['group_priority'],
                 'range_path': None,
+                # Il `_range` e' gia' espanso nello snapshot: il legame con la
+                # sua unita' passa dal nome (`<base>_range`), non da range_path.
+                'range_unit_path': p.get('range_unit_path'),
                 'deviation_probability_key': None,
             })
             if p['min_val'] is not None:
@@ -704,6 +794,10 @@ class SchemaBridge:
             raw['distribution_modes'] = data['distribution_modes']
         if 'range_anchors' in data:
             raw['range_anchors'] = data['range_anchors']
+        if 'range_units' in data:
+            raw['range_units'] = data['range_units']
+        if 'relative_range_bounds' in data:
+            raw['relative_range_bounds'] = data['relative_range_bounds']
         if 'grain_envelope_names' in data:
             raw['grain_envelope_names'] = data['grain_envelope_names']
         if 'stream_context_keys' in data:

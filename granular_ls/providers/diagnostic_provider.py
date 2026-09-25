@@ -63,6 +63,12 @@ from granular_ls.deviation_probability import (
     DEVIATION_PROBABILITY_PATH,
     check_global_value,
 )
+from granular_ls.range_unit import (
+    find_key,
+    fmt_bound,
+    is_relative,
+    value_label,
+)
 from granular_ls.pitch_units import (
     PITCH_UNIT_KEYS,
     PITCH_UNIT_PRESETS,
@@ -226,6 +232,16 @@ class DiagnosticProvider:
             and _is_generically_checkable(p.yaml_path)
         }
 
+        # Le chiavi `<param>_range_unit` (PGE #267), dal campo dello schema.
+        # La chiave scritta e lasciata vuota la segnala `_check_missing_values`
+        # come ogni altra chiave stringa: il motore non la legge come assente.
+        # Per path e non per nome: il motore la legge al path dichiarato e
+        # solo li', e un'omonima vuota in un altro blocco non la rifiuta
+        # nessuno.
+        self._range_unit_bindings = bridge.get_range_unit_bindings()
+        self._range_unit_paths = frozenset(
+            b.unit_path for b in self._range_unit_bindings)
+
     def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
         """
         Analizza il documento e ritorna tutti i diagnostici trovati.
@@ -276,6 +292,16 @@ class DiagnosticProvider:
         # loro valori sono campioni o millisecondi → esclusi dai bound generici.
         scaled_lines = self._scaled_unit_suppressed_lines(grain_blocks)
 
+        # Le chiavi `<param>_range_unit` (PGE #267): scansione unica riusata
+        # dalla fase 19, dai bound generici e dal tetto della banda. Un
+        # `_range` relativo e' una frazione della base, non una quantita'
+        # nell'unita' del parametro, quindi i bound generici (e la conversione
+        # di `duration_unit`) non lo riguardano: lo misura la fase 19. Sotto
+        # un'unita' che il motore rifiuta non lo misura nessuno.
+        range_units = self._range_unit_states(lines, streams)
+        range_unmeasured = self._range_lines_not_absolute(range_units)
+        scaled_lines = scaled_lines | range_unmeasured
+
         # Fase 4: controllo bounds numerici (valori scalari).
         diagnostics.extend(
             d for d in self._check_bounds(parsed)
@@ -320,8 +346,8 @@ class DiagnosticProvider:
         diagnostics.extend(self._check_loop_end_le_loop_start(lines, streams))
 
         # Fase 11: grain.duration_unit (PGE #158).
-        diagnostics.extend(
-            self._check_grain_duration_unit(lines, grain_blocks))
+        diagnostics.extend(self._check_grain_duration_unit(
+            lines, grain_blocks, range_unmeasured))
 
         # Fase 12: rng_group non-scalare (PGE #169).
         diagnostics.extend(self._check_rng_group_type(lines))
@@ -340,9 +366,12 @@ class DiagnosticProvider:
         )
 
         # Fase 16: tetto della banda sotto range_anchor: min.
-        diagnostics.extend(
-            self._check_band_ceiling(lines, streams, grain_blocks)
-        )
+        diagnostics.extend(self._check_band_ceiling(
+            lines, streams, grain_blocks, self._range_modes(range_units)))
+
+        # Fase 19: le chiavi `<param>_range_unit` (PGE #267) — vocabolario,
+        # `relative` senza range, dominio della frazione.
+        diagnostics.extend(self._check_range_units(range_units))
 
         return diagnostics
 
@@ -661,22 +690,7 @@ class DiagnosticProvider:
                 else:
                     # Parametro numerico: accetta envelope lista (- [...]) o
                     # dict (type:/points:) — qualsiasi contenuto più indentato.
-                    has_value = False
-                    j = i + 1
-                    while j < len(lines):
-                        nxt = lines[j]
-                        nxt_s = nxt.strip()
-                        nxt_l = len(nxt) - len(nxt.lstrip())
-                        if not nxt_s or nxt_s.startswith('#'):
-                            j += 1
-                            continue
-                        if nxt_l <= leading:
-                            break
-                        # Qualsiasi riga non-vuota più indentata = valore presente
-                        has_value = True
-                        break
-
-                    if not has_value:
+                    if not self._has_block_value(lines, i, leading):
                         diagnostics.append(Diagnostic(
                             range=self._line_range(i),
                             message=(
@@ -695,6 +709,18 @@ class DiagnosticProvider:
                     severity=DiagnosticSeverity.Error,
                     source=SOURCE,
                 ))
+
+            elif yaml_path in self._range_unit_paths:
+                # Chiave `<param>_range_unit` (PGE #267): vuota e' un errore.
+                # Un valore a blocchi c'e', ed e' fuori vocabolario: lo dice
+                # `_check_range_units`, qui sarebbe un «non ne ha uno» falso.
+                if not self._has_block_value(lines, i, leading):
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(i),
+                        message=f"'{key}' richiede un valore stringa ma non ne ha uno.",
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
 
             elif key in self._STRING_REQUIRED_KEYS:
                 # Chiave stringa obbligatoria
@@ -721,6 +747,20 @@ class DiagnosticProvider:
             i += 1
 
         return diagnostics
+
+    @staticmethod
+    def _has_block_value(lines: List[str], key_line: int, leading: int) -> bool:
+        """True se sotto `key:` c'e' un valore a blocchi (lista o dict).
+
+        Qualsiasi riga non vuota e non commento piu' indentata della chiave;
+        la prima riga meno indentata chiude la ricerca.
+        """
+        for nxt in lines[key_line + 1:]:
+            nxt_s = nxt.strip()
+            if not nxt_s or nxt_s.startswith('#'):
+                continue
+            return len(nxt) - len(nxt.lstrip()) > leading
+        return False
 
 
     def _check_envelope_bounds(
@@ -3100,10 +3140,22 @@ class DiagnosticProvider:
         self, lines: List[str],
         streams: List[Tuple[int, int, dict]],
         grain_blocks: List[dict],
+        range_modes: Optional[Dict[Tuple[int, str], Optional[str]]] = None,
     ) -> List[Diagnostic]:
         """
         Con `range_anchor: min`, verifica che `base + range` stia sotto il
         tetto del parametro.
+
+        Il tetto dipende dall'unita' del range (PGE #267, `range_modes`, da
+        `_range_modes`): `base + range` quando il range e' assoluto,
+        `base + range * |base|` quando e' una frazione. Sommare una frazione a
+        una durata sommerebbe due grandezze diverse, e il controllo
+        lascerebbe passare proprio le bande larghe: con base 8 e frazione 0.5
+        la somma da' 8.5, la banda arriva a 12. Sulla base relativa si valuta
+        ogni breakpoint e non il solo picco, come fa il motore: la banda e'
+        monotona nella base solo finche' la frazione sta sotto 1. Sotto
+        un'unita' che il motore rifiuta il parser non arriva mai qui, e il
+        controllo tace.
 
         Sotto l'ancora `center` la banda arriva a `base + range/2` e resta
         gestita dal safety clamp: è il comportamento storico. Sotto `min` no —
@@ -3168,6 +3220,13 @@ class DiagnosticProvider:
                     # Senza range non c'è banda: nemmeno il motore controlla.
                     continue
 
+                range_path = f'{block}.{range_key}' if block else range_key
+                mode = (range_modes or {}).get(
+                    (stream_start, range_path), 'absolute')
+                if mode is None:
+                    continue
+                relative = mode == 'relative'
+
                 base_line = self._find_key_line_at_indent(
                     lines, scope_start, scope_end, base_key, indent)
                 if base_line is None:
@@ -3181,9 +3240,13 @@ class DiagnosticProvider:
                     # — il motore non lo converte — quindi qui va portato
                     # nell'unità, non moltiplicato per il fattore come il resto.
                     base_peak, base_is_env = float(param.default) / factor, False
+                    base_values = [base_peak]
                 else:
                     base_peak, base_is_env = self._peak_of(
                         lines, base_line, scope_end)
+                    base_values = (self._y_values_of(
+                        lines, base_line, scope_end)[0] if relative
+                        else [base_peak])
                 range_peak, range_is_env = self._peak_of(
                     lines, range_line, scope_end)
                 if base_peak is None or range_peak is None:
@@ -3191,7 +3254,14 @@ class DiagnosticProvider:
                 if base_is_env and range_is_env:
                     continue
 
-                ceiling = base_peak + range_peak
+                # La larghezza della banda: il range, o la sua frazione di
+                # ogni base (`relative_band_width` nel motore). Il range non
+                # passa da `factor`: una frazione non ha unita'.
+                def _banda(base: float, quota: float = 1.0) -> float:
+                    larghezza = range_peak * abs(base) if relative else range_peak
+                    return base + larghezza * quota
+
+                ceiling = max(_banda(b) for b in base_values)
                 if ceiling * factor <= param.max_val:
                     continue
 
@@ -3201,7 +3271,7 @@ class DiagnosticProvider:
                 # chi ha una coppia che sfora anche da centrata: lì l'ancora
                 # non decide se la banda sta dentro, decide solo se il motore
                 # la rifiuta o la lascia schiacciare al clamp.
-                centrata = base_peak + range_peak / 2
+                centrata = max(_banda(b, 0.5) for b in base_values)
                 if centrata * factor <= param.max_val:
                     coda = (
                         "Da centrata la stessa coppia starebbe dentro, ma "
@@ -3217,12 +3287,13 @@ class DiagnosticProvider:
                         f"va stretto il range."
                     )
 
+                formula = 'base + range · |base|' if relative else 'base + range'
                 diagnostics.append(Diagnostic(
                     range=self._line_range(range_line),
                     message=(
                         f"`range_anchor: min`: la banda di `{yaml_path}` "
                         f"arriva a {self._fmt_unit_value(ceiling)}{label} "
-                        f"(base + range) e sfora il tetto "
+                        f"({formula}) e sfora il tetto "
                         f"{self._fmt_unit_value(param.max_val / factor)}"
                         f"{label}. {coda}"
                     ),
@@ -3286,18 +3357,28 @@ class DiagnosticProvider:
             interpretabile — documento a metà scrittura, un'espressione, o
             una forma da cui non si ricava un numero.
         """
+        ys, is_envelope = self._y_values_of(lines, key_line, block_end)
+        return (max(ys) if ys else None), is_envelope
+
+    def _y_values_of(self, lines: List[str], key_line: int,
+                     block_end: int) -> Tuple[List[float], bool]:
+        """Tutte le Y del valore di una chiave, e se quel valore è un envelope.
+
+        La lettura di `_peak_of`, per chi ha bisogno di ogni valore e non del
+        solo massimo: il tetto di una banda relativa si valuta su ogni base,
+        come fa il motore. Lista vuota dove `_peak_of` direbbe None.
+        """
         found, raw = self._read_key_value(lines, key_line, block_end)
         if not found or raw is None:
-            return None, False
+            return [], False
         if contains_math_expression(raw):
-            return None, False
+            return [], False
         raw = normalize_engine_values(raw)
         if isinstance(raw, bool):
-            return None, False
+            return [], False
         if isinstance(raw, (int, float)):
-            return float(raw), False
-        ys = self._envelope_peak(raw)
-        return ys, True
+            return [float(raw)], False
+        return self._envelope_y_values(raw), True
 
     @staticmethod
     def _envelope_y_values(raw) -> List[float]:
@@ -3338,6 +3419,11 @@ class DiagnosticProvider:
 
         ys: List[float] = []
         for item in raw:
+            # Il breakpoint dict `{t, v, type?}` e' la stessa Y di `[t, v]`:
+            # `EnvelopeBuilder.parse` lo normalizza prima di guardarlo, quindi
+            # qui si fa lo stesso invece di scartarlo come forma sconosciuta.
+            if isinstance(item, dict) and 't' in item and 'v' in item:
+                item = [item['t'], item['v']]
             # Le macro-forme si riconoscono per prime: un ciclo compatto ha
             # `item[1]` numerico e cadrebbe fra i breakpoint piatti.
             if is_loop_block(item) or is_bp_group(item):
@@ -3346,12 +3432,6 @@ class DiagnosticProvider:
                     and _is_num(item[0]) and _is_num(item[1])):
                 ys.append(float(item[1]))
         return ys
-
-    @classmethod
-    def _envelope_peak(cls, raw) -> Optional[float]:
-        """Il breakpoint più alto di un envelope, o None se non ce n'è."""
-        ys = cls._envelope_y_values(raw)
-        return max(ys) if ys else None
 
     @staticmethod
     def _block_end(lines: List[str], key_line: int, limit: int,
@@ -3620,8 +3700,10 @@ class DiagnosticProvider:
             source=SOURCE,
         )]
 
-    def _check_grain_duration_unit(self, lines: List[str],
-                                   grain_blocks: List[dict]) -> List[Diagnostic]:
+    def _check_grain_duration_unit(
+        self, lines: List[str], grain_blocks: List[dict],
+        range_unmeasured: 'frozenset[int]' = frozenset(),
+    ) -> List[Diagnostic]:
         """
         Valida grain.duration_unit (PGE #158, terza unità in v5.2.0):
           - unità non in {seconds, samples, milliseconds} → Error;
@@ -3629,12 +3711,16 @@ class DiagnosticProvider:
             (il default 0.05 è in secondi e non viene convertito) → Error;
           - con un'unità non-secondi, valida i valori di duration e
             duration_range — scalari ed envelope — contro i bound del
-            parametro convertiti in quell'unità.
+            parametro convertiti in quell'unità. Il range solo se assoluto:
+            con `duration_range_unit: relative` (PGE #267) è una frazione
+            della base, il motore non lo converte, e lo misura la fase 19
+            (`range_unmeasured` sono le sue righe).
 
         La regola della durata esplicita vale per ogni unità non-secondi, non
         per `samples` soltanto: senza `grain.duration` la base resterebbe in
-        secondi mentre `duration_range` sarebbe nell'unità dichiarata — due
-        domini nello stesso blocco.
+        secondi mentre chi ha scritto l'unità la legge in campioni o
+        millisecondi. Vale anche con un range relativo, che dall'unità non
+        dipende: è il default in secondi a non dire quel che si intende.
 
         I bound arrivano dal parametro (secondi) e si convertono dividendo per
         il fattore dell'unità. Il minimo non è quello del registro ma **un
@@ -3707,12 +3793,16 @@ class DiagnosticProvider:
                 min_in_unit, max_in_unit, label, max_seconds,
                 salta_scalare=scalar is not None,
             ))
-            diagnostics.extend(self._unit_scaled_bound_diagnostics(
-                lines, b, b['range_line'], 'grain.duration_range',
-                range_min, range_max, label,
-                grain_rng.max_val if grain_rng is not None else None,
-                salta_scalare=False,
-            ))
+            # Un range relativo non si converte (PGE #267): e' una frazione
+            # della base, e lo misura la fase 19 nel suo dominio. Sotto
+            # un'unita' del range che il motore rifiuta non lo misura nessuno.
+            if b['range_line'] not in range_unmeasured:
+                diagnostics.extend(self._unit_scaled_bound_diagnostics(
+                    lines, b, b['range_line'], 'grain.duration_range',
+                    range_min, range_max, label,
+                    grain_rng.max_val if grain_rng is not None else None,
+                    salta_scalare=False,
+                ))
 
             if scalar is None:
                 continue
@@ -3742,4 +3832,156 @@ class DiagnosticProvider:
                     source=SOURCE,
                 ))
 
+        return diagnostics
+
+    # -------------------------------------------------------------------------
+    # FASE 19: le chiavi `<param>_range_unit` (PGE #267)
+    # -------------------------------------------------------------------------
+
+    def _range_unit_states(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[dict]:
+        """Ogni chiave `<param>_range_unit` scritta, come la legge il motore.
+
+        Una voce per stream e per legame del bridge, solo dove la chiave c'e':
+        assente vale il default assoluto, e li' non cambia niente.
+
+          - binding:      il legame (unit_path, base, range)
+          - stream_start: la riga del trattino dello stream
+          - unit, range:  le due chiavi (`KeyDecl`), il range None se assente
+          - mode:         'absolute' | 'relative', o None se il motore rifiuta
+                          la grafia (o non si legge ancora): li' non c'e' una
+                          lettura del range in cui misurarlo.
+        """
+        units = self._bridge.get_range_units()
+        states = []
+        for stream_start, stream_end_incl, _keys in streams:
+            stream_end = stream_end_incl + 1
+            for binding in self._range_unit_bindings:
+                unit = find_key(lines, stream_start, stream_end,
+                                binding.unit_path)
+                if unit is None:
+                    continue
+                mode = None
+                if unit.readable and unit.value in units:
+                    mode = 'relative' if is_relative(unit.value) else 'absolute'
+                states.append({
+                    'binding': binding,
+                    'stream_start': stream_start,
+                    'unit': unit,
+                    'range': find_key(lines, stream_start, stream_end,
+                                      binding.range.yaml_path),
+                    'mode': mode,
+                })
+        return states
+
+    @staticmethod
+    def _range_lines_not_absolute(states: List[dict]) -> 'frozenset[int]':
+        """Le righe dei `_range` che non si leggono come quantita' assolute.
+
+        Relativi, o sotto un'unita' rifiutata: i bound del parametro e la
+        conversione di `duration_unit` non li riguardano.
+        """
+        righe: set = set()
+        for s in states:
+            if s['mode'] != 'absolute' and s['range'] is not None:
+                righe.update(range(s['range'].line, s['range'].end))
+        return frozenset(righe)
+
+    @staticmethod
+    def _range_modes(states: List[dict]) -> Dict[Tuple[int, str], Optional[str]]:
+        """(stream, path del `_range`) -> lettura, per il tetto della banda."""
+        return {(s['stream_start'], s['binding'].range.yaml_path): s['mode']
+                for s in states}
+
+    def _check_range_units(self, states: List[dict]) -> List[Diagnostic]:
+        """
+        Valida le chiavi `<param>_range_unit` (PGE #267), nell'ordine del
+        motore (`ParameterOrchestrator._range_unit_from_spec`, poi il parser):
+
+        1. **La grafia.** Fuori da `RANGE_UNITS` e' `InvalidFieldValueError`,
+           `null` compreso: la chiave scritta non e' la chiave assente. Quella
+           lasciata vuota la dice gia' `_check_missing_values`, e il frammento
+           a meta' scrittura non si segnala.
+        2. **`relative` senza range** → `MissingFieldError`. Non e' una chiave
+           inerte: senza range dichiarato scatta il jitter implicito, che e'
+           assoluto. Il range scritto e lasciato vuoto lo dice gia'
+           `_check_missing_values` sulla sua riga.
+        3. **Il dominio della frazione.** Un range relativo vive in
+           `RELATIVE_RANGE_BOUNDS`, qualunque sia l'unita' della base: il
+           motore non lo scala (e' una frazione, non una durata) e lo valida
+           contro quel dominio. Scalari ed envelope, come il parser; si tace
+           su un'espressione, che valuta il `Generator` e non noi.
+
+        Il tetto della banda relativa sotto `range_anchor: min` e' della fase
+        16, che conosce le coppie base/range.
+        """
+        diagnostics: List[Diagnostic] = []
+        units = self._bridge.get_range_units()
+        lo, hi = self._bridge.get_relative_range_bounds()
+
+        for s in states:
+            unit, rng = s['unit'], s['range']
+            unit_path = s['binding'].unit_path
+            range_path = s['binding'].range.yaml_path
+            if not unit.readable:
+                continue
+
+            if s['mode'] is None:
+                if unit.value is None and unit.inline_empty:
+                    continue
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(unit.line),
+                    message=(
+                        f"`{unit_path}`: valore `{value_label(unit.value)}` "
+                        f"non valido. Valori ammessi: {', '.join(units)}."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                continue
+
+            if s['mode'] != 'relative':
+                continue
+
+            if rng is None or (rng.readable and rng.value is None):
+                if rng is not None and rng.inline_empty:
+                    continue
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(unit.line),
+                    message=(
+                        f"`{unit_path}: relative` richiede `{range_path}`, "
+                        "la banda come frazione del valore base: senza, "
+                        "varrebbe il jitter implicito, che e' assoluto."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                continue
+
+            if not rng.readable or contains_math_expression(rng.value):
+                continue
+            valore = normalize_engine_values(rng.value)
+            if isinstance(valore, bool):
+                continue
+            if isinstance(valore, (int, float)):
+                valori, forma = [float(valore)], ''
+            else:
+                valori, forma = self._envelope_y_values(valore), 'valore envelope '
+            fuori = [v for v in valori if v < lo or v > hi]
+            if not fuori:
+                continue
+            diagnostics.append(Diagnostic(
+                range=self._line_range(rng.line),
+                message=(
+                    f"`{range_path}`: {forma}{self._fmt_unit_value(fuori[0])} "
+                    f"fuori dal dominio [{fmt_bound(lo)}, {fmt_bound(hi)}]. "
+                    f"Con `{unit_path}: relative` e' una frazione della base, "
+                    "non una quantita' nella sua unita': l'unita' della base "
+                    "non la scala."
+                ),
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
         return diagnostics

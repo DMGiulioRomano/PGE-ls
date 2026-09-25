@@ -218,6 +218,7 @@ class TestParameterInfoConstruction:
             'exclusive_group', 'group_priority',
             'min_val', 'max_val', 'min_range', 'max_range',
             'variation_mode', 'is_internal',
+            'range_unit_path',  # PGE #267, vedi test_range_unit.py
         }
         actual = {f.name for f in fields(ParameterInfo)}
         assert expected == actual
