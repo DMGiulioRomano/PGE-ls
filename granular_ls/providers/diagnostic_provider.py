@@ -62,6 +62,7 @@ from granular_ls.time_distributions import (
 from granular_ls.read_direction import (
     EXCLUSIVE_HINT,
     READ_DIRECTION_PATH,
+    REVERSE_PATH,
     check_read_direction,
 )
 from granular_ls.deviation_probability import (
@@ -283,11 +284,13 @@ class DiagnosticProvider:
         # I parametri che il motore passa a `parse_parameter`, e che quindi
         # diventano un envelope quando lo sono: gli smart, meno le chiavi di
         # contesto dello stream (solo, mute, ...), che il bridge espone come
-        # parametri ma che il motore legge altrove.
+        # parametri ma che il motore legge altrove, e meno `grain.reverse`,
+        # che e' smart nello schema ma che il motore vuole vuota e rifiuta con
+        # qualunque valore (`Stream._init_grain_reverse`) prima di costruire.
         contesto = frozenset(bridge.get_stream_context_keys())
         self._envelope_param_paths = frozenset(
             path for path, p in self._params_by_yaml_path.items()
-            if p.is_smart and path not in contesto
+            if p.is_smart and path not in contesto and path != REVERSE_PATH
         )
 
     def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
@@ -3734,9 +3737,12 @@ class DiagnosticProvider:
             if letto is None:
                 continue
             stream_node, costruisci = letto
+            scartati = self._exclusive_losers(stream_node)
 
             for path, value_node in self._envelope_value_nodes(stream_node,
                                                                costruisci):
+                if path in scartati:
+                    continue  # mai costruito: basta il Warning del gruppo
                 for ciclo, node in self._compact_block_nodes(value_node,
                                                              costruisci):
                     if len(ciclo) < 5:
@@ -3806,6 +3812,30 @@ class DiagnosticProvider:
                 return None
 
         return radice.value[0], costruisci
+
+    def _exclusive_losers(self, stream_node) -> frozenset:
+        """
+        I membri di un gruppo esclusivo che il motore scarta in questo stream.
+
+        Mirror di `ExclusiveGroupSelector.select_parameters`: fra i membri
+        scritti vince quello con `group_priority` piu' bassa, e gli altri non
+        vengono costruiti — `density` accanto a `fill_factor`, `loop_dur`
+        accanto a `loop_end`. Scritto vuol dire presente, anche vuoto
+        (`_is_specified`). Un ciclo sotto un perdente non si espande mai, e
+        il render parte: basta il Warning di `_check_exclusive_groups`.
+        """
+        presenti = set()
+        for key, value_node in self._mapping_items(stream_node):
+            presenti.add(key)
+            for sub, _ in self._mapping_items(value_node):
+                presenti.add(f'{key}.{sub}')
+
+        perdenti = set()
+        for members in self._bridge.get_exclusive_groups().values():
+            scritti = sorted((m for m in members if m.yaml_path in presenti),
+                             key=lambda m: m.group_priority)
+            perdenti.update(m.yaml_path for m in scritti[1:])
+        return frozenset(perdenti)
 
     @staticmethod
     def _mapping_items(node):

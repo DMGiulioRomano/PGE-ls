@@ -4313,6 +4313,71 @@ class TestDistribuzioneTemporaleDelCiclo:
             "        curve: " + _ciclo(pattern="[[0, 0], [100, 1]]") + "\n")
         assert self._overflow(provider, yaml) == []
 
+    # --- le chiavi che il motore non costruisce, pur essendo dello schema ---
+
+    def test_reverse_non_e_mai_un_envelope(self, rd_bridge):
+        """`grain.reverse` il motore la vuole vuota (`Stream._init_grain_reverse`)
+        e rifiuta qualunque valore prima di costruire alcunche': un ciclo li'
+        non si espande mai, e «riduci n_reps» manderebbe a correggere la cosa
+        sbagliata."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = _stream_yaml(
+            "    grain:\n"
+            "      reverse: "
+            + _ciclo(pattern="[[0, 0], [100, 1]]") + "\n")
+        assert self._dist_errors(provider, yaml) == []
+
+    def test_il_perdente_del_gruppo_esclusivo_tace(self, bridge):
+        """Con `fill_factor` e `density` insieme il motore costruisce solo
+        `fill_factor` (`ExclusiveGroupSelector`): `density` resta nello YAML e
+        non diventa mai un envelope. Il motore rende, e il gruppo lo dice gia'
+        un Warning; un Error qui sarebbe piu' severo del motore."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    fill_factor: 2\n"
+            f"    density: {_CICLO_ISSUE}\n")
+        assert self._dist_errors(provider, yaml) == []
+
+    def test_il_vincitore_del_gruppo_esclusivo_parla(self, bridge):
+        """Il vincitore e' quello che il motore costruisce: la sua coppia
+        trabocca come se fosse solo."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    fill_factor: "
+            + _ciclo(pattern="[[0, 1], [100, 2]]") + "\n"
+            "    density: 50\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert "'fill_factor'" in errs[0].message
+
+    def test_il_perdente_si_decide_per_presenza_non_per_valore(self, bridge):
+        """Per il motore una chiave scritta e vuota e' specificata
+        (`_is_specified`): `fill_factor:` da solo basta a scartare `density`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    fill_factor:\n"
+            f"    density: {_CICLO_ISSUE}\n")
+        assert self._dist_errors(provider, yaml) == []
+
+    def test_il_gruppo_e_per_stream(self, bridge):
+        """`fill_factor` in un altro stream non scarta niente qui."""
+        provider = DiagnosticProvider(bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    fill_factor: 2\n"
+            "  - stream_id: s2\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            f"    density: {_CICLO_ISSUE}\n"
+        )
+        assert [d.range.start.line for d in self._overflow(provider, yaml)] \
+            == [10]
+
     # --- le chiavi con un controllo dedicato ---------------------------------
 
     def test_deviation_probability_per_parametro(self, bridge):
