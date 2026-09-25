@@ -67,6 +67,8 @@ from granular_ls.envelope_snippets import EnvelopeSnippetProvider
 from granular_ls.range_unit import (
     range_unit_key_doc,
     range_unit_value_doc,
+    relative_anchor_doc,
+    relative_anchor_value_doc,
     split_path,
 )
 from granular_ls.yaml_analyzer import YamlContext
@@ -519,16 +521,7 @@ class CompletionProvider:
                 continue
             if key in already_present:
                 continue
-            if key == 'distribution_mode':
-                modes = self._bridge.get_distribution_modes()
-                doc = (
-                    "Variazione stocastica dei parametri: controlla la distribuzione "
-                    "applicata quando un parametro ha `mod_range`.\n\n"
-                    "Modalita' disponibili: " + ', '.join(f'`{m}`' for m in modes) +
-                    "\n\nDefault: `uniform`"
-                )
-            else:
-                doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
+            doc = self._stream_context_doc(key)
             if key in _FLAG_KEYS:
                 # Flag senza valore: inserisce solo il nome, va a capo e apre il menu
                 items.append(CompletionItem(
@@ -734,16 +727,7 @@ class CompletionProvider:
             # compositivi, non chiavi sparite.
             if key in ('stream_id', 'sample'):
                 continue
-            if key == 'distribution_mode':
-                modes = self._bridge.get_distribution_modes()
-                doc = (
-                    "Variazione stocastica dei parametri: controlla la distribuzione "
-                    "applicata quando un parametro ha `mod_range`.\n\n"
-                    "Modalita' disponibili: " + ', '.join(f'`{m}`' for m in modes) +
-                    "\n\nDefault: `uniform`"
-                )
-            else:
-                doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
+            doc = self._stream_context_doc(key)
             if key in _FLAG_KEYS:
                 items.append(CompletionItem(
                     label=key,
@@ -1289,10 +1273,17 @@ class CompletionProvider:
                 'larghezza della banda (σ = larghezza/6).'
             ),
         }
+        # Le formule sopra valgono per il range assoluto: con una chiave
+        # `<param>_range_unit: relative` (PGE #267) la banda e' un'altra.
+        unit_paths = self._range_unit_paths()
         items = []
         for anchor in anchors:
             if prefix and not anchor.lower().startswith(prefix):
                 continue
+            doc = _ANCHOR_DOCS.get(anchor, f'Ancora del range: `{anchor}`.')
+            nota = relative_anchor_value_doc(anchor, unit_paths)
+            if nota:
+                doc = f'{doc}\n\n{nota}'
             items.append(CompletionItem(
                 label=anchor,
                 insert_text=f'"{anchor}"',
@@ -1300,7 +1291,7 @@ class CompletionProvider:
                 detail='range anchor',
                 documentation=MarkupContent(
                     kind=MarkupKind.Markdown,
-                    value=_ANCHOR_DOCS.get(anchor, f'Ancora del range: `{anchor}`.'),
+                    value=doc,
                 ),
             ))
         return items
@@ -1470,6 +1461,33 @@ class CompletionProvider:
     # -------------------------------------------------------------------------
     # HELPERS
     # -------------------------------------------------------------------------
+
+    def _stream_context_doc(self, key: str) -> str:
+        """La doc di una stream context key, dove serve letta dal bridge.
+
+        `distribution_mode` elenca le modalita' registrate; `range_anchor`
+        aggiunge la banda relativa se il motore cabla una chiave
+        `<param>_range_unit` (PGE #267), perche' la banda e il tetto scritti
+        in `_STREAM_CONTEXT_DOCS` valgono per il range assoluto.
+        """
+        if key == 'distribution_mode':
+            modes = self._bridge.get_distribution_modes()
+            return (
+                "Variazione stocastica dei parametri: controlla la distribuzione "
+                "applicata quando un parametro ha `mod_range`.\n\n"
+                "Modalita' disponibili: " + ', '.join(f'`{m}`' for m in modes) +
+                "\n\nDefault: `uniform`"
+            )
+        doc = _STREAM_CONTEXT_DOCS.get(key, f'Chiave stream: {key}')
+        if key == 'range_anchor':
+            nota = relative_anchor_doc(self._range_unit_paths())
+            if nota:
+                doc = f'{doc}\n\n{nota}'
+        return doc
+
+    def _range_unit_paths(self) -> List[str]:
+        """Le chiavi `<param>_range_unit` che il motore cabla (PGE #267)."""
+        return [b.unit_path for b in self._bridge.get_range_unit_bindings()]
 
     def _build_item_raw(self, param: ParameterInfo) -> CompletionItem:
         """

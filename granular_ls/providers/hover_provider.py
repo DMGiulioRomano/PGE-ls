@@ -36,11 +36,13 @@ from granular_ls.read_direction import (
     READ_DIRECTION_DOC,
 )
 from granular_ls.range_unit import (
+    RELATIVE_ANCHOR_BANDS,
     center_half_width,
     find_key,
     fmt_bound,
     is_relative,
     range_unit_key_doc,
+    relative_anchor_doc,
     split_path,
     stream_span,
 )
@@ -677,6 +679,14 @@ class HoverProvider:
         if doc is None:
             return None
 
+        # La banda e il tetto scritti sopra valgono per il range assoluto: con
+        # una chiave `<param>_range_unit: relative` (PGE #267) cambiano formula.
+        if key_name == 'range_anchor':
+            nota = relative_anchor_doc([
+                b.unit_path for b in self._bridge.get_range_unit_bindings()])
+            if nota:
+                doc = f'{doc}\n\n{nota}'
+
         full_text = f'**{key_name}**\n\n{doc}'
         return Hover(
             contents=MarkupContent(
@@ -1099,9 +1109,9 @@ class HoverProvider:
                 f'\\[{lo}, {hi}\\], letta istante per istante: l\'unità della '
                 'base non la scala.\n\n'
                 'Con frazione `r`: `range_anchor: center` → '
-                '`[base·(1 − r/2), base·(1 + r/2)]` '
+                f'`{RELATIVE_ANCHOR_BANDS["center"]}` '
                 f'({center_half_width(bounds)} al massimo), '
-                '`min` → `[base, base·(1 + r)]`.'
+                f'`min` → `{RELATIVE_ANCHOR_BANDS["min"]}`.'
             )
         else:
             fonte = (f'da `{binding.unit_path}`' if decl is not None

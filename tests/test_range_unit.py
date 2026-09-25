@@ -806,3 +806,83 @@ class TestDefaultDalRegistry:
         docs = self._value_docs(invertito)
         assert 'default' in docs['relative']
         assert 'default' not in docs['absolute']
+
+
+# =============================================================================
+# 8. `range_anchor` sa della banda relativa
+# =============================================================================
+
+class TestRangeAnchorDocBandaRelativa:
+    """La doc di `range_anchor` scriveva la banda come `[base, base + range]`
+    e il tetto sotto `min` come `base + range`, senza condizioni. Con
+    `<param>_range_unit: relative` lo stesso numero e' una frazione della
+    base: la banda e il tetto cambiano formula, e la doc che ne parla lo deve
+    dire — nominando le chiavi dai legami del bridge, non da una copia."""
+
+    def _hover(self, bridge):
+        from granular_ls.providers.hover_provider import HoverProvider
+        ctx = _context(current_text='range_anchor', parent_path=[])
+        return HoverProvider(bridge).get_hover(ctx, '').contents.value
+
+    def _key_doc(self, bridge):
+        from granular_ls.providers.completion_provider import CompletionProvider
+        items = CompletionProvider(bridge).get_completions(
+            _context(parent_path=[], indent_level=2),
+            document_text="streams:\n  - stream_id: s\n    ")
+        return {i.label: i for i in items}['range_anchor'].documentation.value
+
+    def _value_docs(self, bridge):
+        from granular_ls.providers.completion_provider import CompletionProvider
+        ctx = _context(context_type='value', current_key='range_anchor',
+                       parent_path=[], indent_level=2)
+        items = CompletionProvider(bridge).get_completions(
+            ctx, document_text="streams:\n  - range_anchor: ")
+        return {i.label: i.documentation.value for i in items}
+
+    def test_hover_nomina_la_chiave_e_il_tetto_relativo(self, bridge):
+        doc = self._hover(bridge)
+        assert '`grain.duration_range_unit: relative`' in doc
+        assert 'base + range · |base|' in doc
+        assert '[base, base·(1 + r)]' in doc
+
+    def test_completion_della_chiave(self, bridge):
+        doc = self._key_doc(bridge)
+        assert '`grain.duration_range_unit: relative`' in doc
+        assert 'base + range · |base|' in doc
+
+    def test_completion_dei_valori(self, bridge):
+        docs = self._value_docs(bridge)
+        assert '[base·(1 − r/2), base·(1 + r/2)]' in docs['center']
+        assert '[base, base·(1 + r)]' in docs['min']
+        assert '`grain.duration_range_unit: relative`' in docs['min']
+
+    def test_le_chiavi_vengono_dai_legami(self):
+        raw = _raw()
+        raw['specs'][0]['range_unit_path'] = 'volume_range_unit'
+        bridge = SchemaBridge(raw)
+        for doc in (self._hover(bridge), self._key_doc(bridge),
+                    self._value_docs(bridge)['min']):
+            assert '`volume_range_unit: relative`' in doc
+            assert '`grain.duration_range_unit: relative`' in doc
+
+    def test_un_motore_che_precede_267_non_ne_parla(self):
+        bridge = SchemaBridge(_raw(range_unit_path=None))
+        for doc in (self._hover(bridge), self._key_doc(bridge),
+                    *self._value_docs(bridge).values()):
+            assert 'relative' not in doc
+            assert '|base|' not in doc
+
+    def test_la_nota_del_range_usa_le_stesse_formule(self, bridge):
+        """La nota sull'hover di `duration_range` e la doc di `range_anchor`
+        descrivono la stessa banda: una sola grafia delle due formule."""
+        from granular_ls.providers.hover_provider import HoverProvider
+        text = _stream("      duration: 0.05\n"
+                       "      duration_range: 0.5\n"
+                       "      duration_range_unit: relative\n")
+        ctx = _context(current_text='duration_range',
+                       cursor_line=_line_of(text, 'duration_range:'))
+        nota = HoverProvider(bridge).get_hover(ctx, text).contents.value
+        docs = self._value_docs(bridge)
+        for anchor, formula in (('center', '[base·(1 − r/2), base·(1 + r/2)]'),
+                                ('min', '[base, base·(1 + r)]')):
+            assert formula in nota and formula in docs[anchor]

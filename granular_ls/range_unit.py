@@ -17,7 +17,8 @@ Quale chiave governa quale `_range` lo dice il motore, non questo modulo:
 Anche il vocabolario viene dal motore (`RANGE_UNITS`, via
 `get_range_units`). Qui resta solo quel che non e' un elenco: quale grafia
 significa «frazione della base» (`range_unit_is_relative`), la documentazione
-dei valori e la lettura della dichiarazione dal testo.
+dei valori — compresa la banda relativa sotto ciascuna `range_anchor` — e la
+lettura della dichiarazione dal testo.
 
 Due cose il motore le rifiuta al parse, e il language server le dice mentre si
 scrive (`DiagnosticProvider._check_range_units`):
@@ -107,6 +108,47 @@ def range_unit_value_doc(unit: str,
         lo, hi = (fmt_bound(v) for v in relative_bounds)
         doc += f'\n\nDominio: `[{lo}, {hi}]`.'
     return doc
+
+
+# La banda sotto ciascuna ancora quando il `_range` e' una frazione `r` della
+# base. Una grafia sola per i tre posti che la scrivono: la nota sull'hover del
+# `_range`, la doc della chiave `range_anchor` e quella dei suoi valori.
+RELATIVE_ANCHOR_BANDS = {
+    'center': '[base·(1 − r/2), base·(1 + r/2)]',
+    'min': '[base, base·(1 + r)]',
+}
+
+
+def _relative_keys(unit_paths: List[str]) -> str:
+    return ', '.join(f'`{p}: relative`' for p in unit_paths)
+
+
+def relative_anchor_doc(unit_paths: List[str]) -> str:
+    """Il paragrafo della doc di `range_anchor` sulla banda relativa.
+
+    Quella doc scrive la banda come `[base, base + range]` e il tetto sotto
+    `min` come `base + range`: vero per il range assoluto, non per quello
+    relativo. Le chiavi vengono dai legami del bridge (`unit_paths`); senza
+    legami — un motore che precede PGE #267 — non c'e' niente da dire.
+    """
+    if not unit_paths:
+        return ''
+    bande = ', '.join(f'`{a}` → `{b}`'
+                      for a, b in RELATIVE_ANCHOR_BANDS.items())
+    return (
+        f'Con {_relative_keys(unit_paths)} il `range` e\' una frazione `r` '
+        f'della base: {bande}, e il tetto controllato sotto `min` e\' '
+        '`base + range · |base|`.'
+    )
+
+
+def relative_anchor_value_doc(anchor: str, unit_paths: List[str]) -> str:
+    """La riga sulla banda relativa per il valore `anchor` di `range_anchor`."""
+    banda = RELATIVE_ANCHOR_BANDS.get(anchor)
+    if not unit_paths or banda is None:
+        return ''
+    return (f'Con {_relative_keys(unit_paths)} (range come frazione `r` '
+            f'della base) la banda e\' `{banda}`.')
 
 
 def range_unit_key_doc(unit_path: str, range_path: str, base_path: str,
