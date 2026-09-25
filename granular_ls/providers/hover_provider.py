@@ -36,6 +36,7 @@ from granular_ls.read_direction import (
     READ_DIRECTION_DOC,
 )
 from granular_ls.range_unit import (
+    center_half_width,
     find_key,
     fmt_bound,
     is_relative,
@@ -1089,8 +1090,8 @@ class HoverProvider:
                     f'\n\n> Il motore rifiuta il render '
                     f'(`InvalidFieldValueError`).')
         elif decl is not None and is_relative(decl.value):
-            lo, hi = (fmt_bound(v) for v in
-                      self._bridge.get_relative_range_bounds())
+            bounds = self._bridge.get_relative_range_bounds()
+            lo, hi = (fmt_bound(v) for v in bounds)
             note = (
                 f'**Unità del range: `{decl.value}`** — da '
                 f'`{binding.unit_path}`\n\n'
@@ -1098,7 +1099,8 @@ class HoverProvider:
                 f'\\[{lo}, {hi}\\], letta istante per istante: l\'unità della '
                 'base non la scala.\n\n'
                 'Con frazione `r`: `range_anchor: center` → '
-                '`[base·(1 − r/2), base·(1 + r/2)]` (±50% al massimo), '
+                '`[base·(1 − r/2), base·(1 + r/2)]` '
+                f'({center_half_width(bounds)} al massimo), '
                 '`min` → `[base, base·(1 + r)]`.'
             )
         else:

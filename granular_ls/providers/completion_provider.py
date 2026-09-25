@@ -65,8 +65,8 @@ TRIGGER_SUGGEST = Command(
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
 from granular_ls.envelope_snippets import EnvelopeSnippetProvider
 from granular_ls.range_unit import (
-    RANGE_UNIT_VALUE_DOCS,
     range_unit_key_doc,
+    range_unit_value_doc,
     split_path,
 )
 from granular_ls.yaml_analyzer import YamlContext
@@ -1547,6 +1547,7 @@ class CompletionProvider:
         Nell'ordine del registry: la prima grafia e' il default.
         """
         prefix = current_text.strip().strip('"\'').lower()
+        bounds = self._bridge.get_relative_range_bounds()
         return [
             CompletionItem(
                 label=unit,
@@ -1556,8 +1557,7 @@ class CompletionProvider:
                 detail='range unit',
                 documentation=MarkupContent(
                     kind=MarkupKind.Markdown,
-                    value=f'`{unit}`\n\n' + RANGE_UNIT_VALUE_DOCS.get(
-                        unit, f'Unita\' del range: `{unit}`.'),
+                    value=f'`{unit}`\n\n' + range_unit_value_doc(unit, bounds),
                 ),
                 sort_text=f'{i:02d}',
                 command=TRIGGER_SUGGEST,

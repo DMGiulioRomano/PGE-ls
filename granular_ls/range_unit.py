@@ -54,7 +54,8 @@ def is_relative(value: Any) -> bool:
 
 # Documentazione dei valori: completion e hover la leggono da qui. Una grafia
 # che il motore aggiunge e questo dizionario no resta completabile, con la
-# sola etichetta: il vocabolario non si trascrive, la prosa si'.
+# sola etichetta: il vocabolario non si trascrive, la prosa si'. Il dominio
+# della frazione no: e' un numero del motore, e lo aggiunge `range_unit_value_doc`.
 RANGE_UNIT_VALUE_DOCS = {
     'absolute': (
         'Il `_range` e\' una **quantita\' assoluta**, nell\'unita\' della '
@@ -65,7 +66,7 @@ RANGE_UNIT_VALUE_DOCS = {
     ),
     'relative': (
         'Il `_range` e\' una **frazione del valore base**, letta istante per '
-        'istante, in `[0, 1]`.\n\n'
+        'istante.\n\n'
         'Serve dove la base spazia su piu\' ordini di grandezza: la banda '
         'resta proporzionale lungo tutto l\'envelope. `duration_unit` non la '
         'scala — una frazione non ha unita\'. Richiede il `_range` '
@@ -79,28 +80,53 @@ def fmt_bound(value: float) -> str:
     return f'{value:g}'
 
 
+def center_half_width(relative_bounds: Tuple[float, float]) -> str:
+    """Quanto `center` si allontana dalla base, al massimo: `±50%` con `hi = 1`.
+
+    Derivato dall'estremo del dominio, non scritto: con `RELATIVE_RANGE_BOUNDS`
+    allargato una percentuale fissa contraddirebbe il dominio della riga
+    accanto.
+    """
+    return f'±{fmt_bound(relative_bounds[1] * 50)}%'
+
+
+def range_unit_value_doc(unit: str,
+                         relative_bounds: Tuple[float, float]) -> str:
+    """La doc di una grafia, col dominio del motore dove ne ha uno."""
+    doc = RANGE_UNIT_VALUE_DOCS.get(unit, f'Unita\' del range: `{unit}`.')
+    if is_relative(unit):
+        lo, hi = (fmt_bound(v) for v in relative_bounds)
+        doc += f'\n\nDominio: `[{lo}, {hi}]`.'
+    return doc
+
+
 def range_unit_key_doc(unit_path: str, range_path: str, base_path: str,
                        units: List[str],
                        relative_bounds: Tuple[float, float]) -> str:
     """La documentazione della chiave, costruita dal suo legame.
 
     I path vengono dal bridge: la stessa prosa vale per il prossimo parametro
-    che il motore cabla.
+    che il motore cabla. Anche i numeri del dominio: l'estremo, il ±% di
+    `center` e il tetto di `min` si derivano da `relative_bounds`.
     """
     lo, hi = (fmt_bound(v) for v in relative_bounds)
-    valori = '\n'.join(
-        f'- `{u}`' + (' (default)' if i == 0 else '') + ': '
-        + RANGE_UNIT_VALUE_DOCS.get(u, '').split('\n\n')[0]
-        for i, u in enumerate(units)
-    )
+    tetto = fmt_bound(1 + relative_bounds[1])
+
+    def voce(i: int, u: str) -> str:
+        riga = f'- `{u}`' + (' (default)' if i == 0 else '')
+        doc = RANGE_UNIT_VALUE_DOCS.get(u, '').split('\n\n')[0]
+        return riga + (': ' + doc if doc else '')
+
+    valori = '\n'.join(voce(i, u) for i, u in enumerate(units))
     return (
         f'**Meta-parametro: unita\' di `{range_path}`.**\n\n'
         f'Dice se il `_range` di `{base_path}` e\' una banda assoluta o una '
         f'frazione del valore base.\n\n'
         f'Valori accettati:\n{valori}\n\n'
         f'Con `relative` il dominio e\' `[{lo}, {hi}]`: `1` e\' una banda larga '
-        'quanto la base. `range_anchor: center` la centra (±50% al massimo), '
-        '`min` la apre sopra la base (`[base, 2·base]`).\n\n'
+        'quanto la base. `range_anchor: center` la centra '
+        f'({center_half_width(relative_bounds)} al massimo), '
+        f'`min` la apre sopra la base (`[base, {tetto}·base]`).\n\n'
         f'`relative` senza `{range_path}` e\' un errore del motore '
         '(`MissingFieldError`): varrebbe il jitter implicito, che e\' '
         'assoluto. Una grafia fuori vocabolario, o la chiave lasciata vuota, '

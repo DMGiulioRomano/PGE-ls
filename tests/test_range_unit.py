@@ -694,3 +694,71 @@ class TestRangeUnitHover:
         doc = self._hover(bridge, 'duration_range', text)
         assert 'Unità del range: `absolute`' in doc
 
+
+# =============================================================================
+# 5. La prosa sul dominio relativo viene dal bridge
+# =============================================================================
+
+class TestDocDalDominio:
+    """Il dominio relativo arriva da `RELATIVE_RANGE_BOUNDS`, e con lui cio'
+    che la doc ne deriva: l'estremo scritto, il ±% di `center`, il tetto di
+    `min`. Scritti a mano, con un dominio allargato la doc si contraddirebbe
+    da sola (`[0, 2]` in una riga, `[0, 1]` e `±50%` in quella sopra)."""
+
+    @pytest.fixture
+    def largo(self):
+        return SchemaBridge(_raw(relative_range_bounds=[0.0, 2.0]))
+
+    def _key_doc(self, bridge):
+        from granular_ls.providers.hover_provider import HoverProvider
+        ctx = _context(current_text='duration_range_unit')
+        return HoverProvider(bridge).get_hover(ctx, '').contents.value
+
+    def _value_doc(self, bridge, unit):
+        from granular_ls.providers.completion_provider import CompletionProvider
+        ctx = _context(context_type='value', current_key='duration_range_unit')
+        items = CompletionProvider(bridge).get_completions(
+            ctx, document_text="grain:\n  duration_range_unit: ")
+        return next(i for i in items if i.label == unit).documentation.value
+
+    def _range_note(self, bridge):
+        from granular_ls.providers.hover_provider import HoverProvider
+        text = _stream("      duration: 0.05\n"
+                       "      duration_range: 0.5\n"
+                       "      duration_range_unit: relative\n")
+        ctx = _context(current_text='duration_range',
+                       cursor_line=_line_of(text, 'duration_range:'))
+        doc = HoverProvider(bridge).get_hover(ctx, text).contents.value
+        return doc.split('---')[-1]
+
+    def test_default_invariato(self, bridge):
+        doc = self._key_doc(bridge)
+        assert '[0, 1]' in doc and '±50%' in doc and '[base, 2·base]' in doc
+        assert '[0, 1]' in self._value_doc(bridge, 'relative')
+        assert '±50%' in self._range_note(bridge)
+
+    def test_doc_della_chiave(self, largo):
+        doc = self._key_doc(largo)
+        assert '[0, 2]' in doc
+        assert '[0, 1]' not in doc
+        assert '±100%' in doc and '±50%' not in doc
+        assert '[base, 3·base]' in doc and '2·base' not in doc
+
+    def test_doc_del_valore(self, largo):
+        doc = self._value_doc(largo, 'relative')
+        assert '[0, 2]' in doc
+        assert '[0, 1]' not in doc
+
+    def test_nota_sul_range(self, largo):
+        nota = self._range_note(largo)
+        # Nella nota le parentesi sono escapate: fuori dai backtick sono
+        # Markdown.
+        assert '\\[0, 2\\]' in nota
+        assert '±100%' in nota and '±50%' not in nota
+
+    def test_grafia_senza_doc_non_lascia_i_due_punti(self):
+        """Una grafia che il motore aggiunge resta elencata, col solo nome."""
+        bridge = SchemaBridge(_raw(range_units=['absolute', 'relative', 'x']))
+        righe = [r for r in self._key_doc(bridge).split('\n')
+                 if r.startswith('- `x`')]
+        assert righe == ['- `x`']
