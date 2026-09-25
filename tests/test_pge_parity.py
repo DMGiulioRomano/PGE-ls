@@ -433,33 +433,47 @@ def test_non_seconds_units_all_have_a_factor(pge):
 # Stream context keys (StreamContext + StreamConfig + flag Generator)
 # =============================================================================
 
-def test_le_chiavi_scalate_dall_unita_sono_due(pge):
-    """`duration_unit` governa `duration` **e** `duration_range`.
+def test_le_chiavi_scalate_dall_unita(pge):
+    """`duration_unit` scala `duration` e `duration_range`, il range se assoluto.
 
-    `_pre_normalize_grain_params` le scala insieme e poi il parser le valida
-    separatamente, ciascuna coi suoi bound. Il language server converte i
-    bound di entrambe: se il motore smettesse di scalarne una, o ne
-    aggiungesse una terza, qui i due lati si direbbero cose diverse sui
-    valori che l'utente scrive.
+    `_pre_normalize_grain_params` porta in secondi le chiavi nell'unita'
+    dichiarata, e il parser le valida poi ciascuna coi suoi bound. Il language
+    server converte i bound delle stesse chiavi (`_check_grain_duration_unit`),
+    e da PGE #267 lascia fuori il range relativo, che e' una frazione della
+    base: se il motore smettesse di scalarne una, ne aggiungesse una terza o
+    cambiasse la regola del range, qui i due lati si direbbero cose diverse.
 
-    Si legge dal sorgente perché `core/stream.py` importa numpy e soundfile,
-    che la CI del language server non installa.
+    Prima era una regex sul sorgente, e #267 l'ha rotta proprio come doveva:
+    la tupla fissa e' diventata una scelta. Ora il metodo vero si esegue e si
+    guarda che cosa sposta; la sola cosa letta dal sorgente e' l'insieme delle
+    chiavi che il metodo nomina, perche' una terza chiave scalata non si
+    vedrebbe da un dizionario di prova che non la contiene.
     """
-    import re
-    from pathlib import Path
+    import ast
 
-    sorgente = None
-    for candidato in ('pge/core/stream.py', 'core/stream.py'):
-        percorso = Path(PGE_SRC) / candidato
-        if percorso.exists():
-            sorgente = percorso.read_text(encoding='utf-8')
-            break
-    if sorgente is None:
-        pytest.skip("core/stream.py non trovato in questo checkout")
+    pre_normalize = _load_pre_normalize_grain_params()
 
-    assert re.search(
-        r"for key in \(\s*'duration'\s*,\s*'duration_range'\s*\)", sorgente
-    ), ("le chiavi scalate da grain.duration_unit non sono più le due che "
+    def scalate(grain):
+        dopo = pre_normalize({'grain': dict(grain)})['grain']
+        return {k for k in grain if dopo[k] != grain[k]}
+
+    grain = {'duration_unit': 'milliseconds', 'duration': 50,
+             'duration_range': 5}
+    assert scalate(grain) == {'duration', 'duration_range'}
+    assert scalate({**grain, 'duration_range_unit': 'absolute'}) == {
+        'duration', 'duration_range'}
+    assert scalate({**grain, 'duration_range_unit': 'relative'}) == {
+        'duration'}
+
+    fn, _ = _pre_normalize_grain_params_ast()
+    nominate = {
+        elt.value
+        for node in ast.walk(fn) if isinstance(node, ast.Tuple)
+        for elt in node.elts
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+    }
+    assert nominate == {'duration', 'duration_range'}, (
+        "le chiavi scalate da grain.duration_unit non sono piu' quelle che "
         "_check_grain_duration_unit converte")
 
 
@@ -1079,6 +1093,23 @@ GRAIN_RANGE_UNIT_CORPUS = [
 ]
 
 
+def _pre_normalize_grain_params_ast():
+    """Il nodo AST di `Stream._pre_normalize_grain_params` e il suo file."""
+    import ast
+
+    relpath = next((r for r in ('pge/core/stream.py', 'core/stream.py')
+                    if (Path(PGE_SRC) / r).exists()), None)
+    if relpath is None:
+        pytest.skip("core/stream.py non trovato in questo checkout")
+    tree = ast.parse((Path(PGE_SRC) / relpath).read_text(encoding='utf-8'))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)
+               and n.name == '_pre_normalize_grain_params'), None)
+    if fn is None:
+        pytest.skip("engine senza _pre_normalize_grain_params")
+    return fn, relpath
+
+
 def _load_pre_normalize_grain_params():
     """`Stream._pre_normalize_grain_params`, il metodo vero, senza stream.py.
 
@@ -1090,18 +1121,8 @@ def _load_pre_normalize_grain_params():
     import ast
     from granular_ls.schema_bridge import _import_pge_module
 
-    relpath = next((r for r in ('pge/core/stream.py', 'core/stream.py')
-                    if (Path(PGE_SRC) / r).exists()), None)
-    if relpath is None:
-        pytest.skip("core/stream.py non trovato in questo checkout")
+    fn, relpath = _pre_normalize_grain_params_ast()
     sorgente = Path(PGE_SRC) / relpath
-    tree = ast.parse(sorgente.read_text(encoding='utf-8'))
-    fn = next((n for n in ast.walk(tree)
-               if isinstance(n, ast.FunctionDef)
-               and n.name == '_pre_normalize_grain_params'), None)
-    if fn is None:
-        pytest.skip("engine senza _pre_normalize_grain_params")
-
     defs = _range_unit_definitions()
     exc = _import_pge_module('shared.exceptions')
     namespace = {
