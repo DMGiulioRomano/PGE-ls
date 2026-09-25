@@ -67,7 +67,6 @@ from granular_ls.range_unit import (
     find_key,
     fmt_bound,
     is_relative,
-    split_path,
     value_label,
 )
 from granular_ls.pitch_units import (
@@ -236,10 +235,12 @@ class DiagnosticProvider:
         # Le chiavi `<param>_range_unit` (PGE #267), dal campo dello schema.
         # La chiave scritta e lasciata vuota la segnala `_check_missing_values`
         # come ogni altra chiave stringa: il motore non la legge come assente.
+        # Per path e non per nome: il motore la legge al path dichiarato e
+        # solo li', e un'omonima vuota in un altro blocco non la rifiuta
+        # nessuno.
         self._range_unit_bindings = bridge.get_range_unit_bindings()
-        self._string_required_keys = self._STRING_REQUIRED_KEYS | {
-            split_path(b.unit_path)[1] for b in self._range_unit_bindings
-        }
+        self._range_unit_paths = frozenset(
+            b.unit_path for b in self._range_unit_bindings)
 
     def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
         """
@@ -689,22 +690,7 @@ class DiagnosticProvider:
                 else:
                     # Parametro numerico: accetta envelope lista (- [...]) o
                     # dict (type:/points:) — qualsiasi contenuto più indentato.
-                    has_value = False
-                    j = i + 1
-                    while j < len(lines):
-                        nxt = lines[j]
-                        nxt_s = nxt.strip()
-                        nxt_l = len(nxt) - len(nxt.lstrip())
-                        if not nxt_s or nxt_s.startswith('#'):
-                            j += 1
-                            continue
-                        if nxt_l <= leading:
-                            break
-                        # Qualsiasi riga non-vuota più indentata = valore presente
-                        has_value = True
-                        break
-
-                    if not has_value:
+                    if not self._has_block_value(lines, i, leading):
                         diagnostics.append(Diagnostic(
                             range=self._line_range(i),
                             message=(
@@ -724,7 +710,19 @@ class DiagnosticProvider:
                     source=SOURCE,
                 ))
 
-            elif key in self._string_required_keys:
+            elif yaml_path in self._range_unit_paths:
+                # Chiave `<param>_range_unit` (PGE #267): vuota e' un errore.
+                # Un valore a blocchi c'e', ed e' fuori vocabolario: lo dice
+                # `_check_range_units`, qui sarebbe un «non ne ha uno» falso.
+                if not self._has_block_value(lines, i, leading):
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(i),
+                        message=f"'{key}' richiede un valore stringa ma non ne ha uno.",
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+
+            elif key in self._STRING_REQUIRED_KEYS:
                 # Chiave stringa obbligatoria
                 diagnostics.append(Diagnostic(
                     range=self._line_range(i),
@@ -749,6 +747,20 @@ class DiagnosticProvider:
             i += 1
 
         return diagnostics
+
+    @staticmethod
+    def _has_block_value(lines: List[str], key_line: int, leading: int) -> bool:
+        """True se sotto `key:` c'e' un valore a blocchi (lista o dict).
+
+        Qualsiasi riga non vuota e non commento piu' indentata della chiave;
+        la prima riga meno indentata chiude la ricerca.
+        """
+        for nxt in lines[key_line + 1:]:
+            nxt_s = nxt.strip()
+            if not nxt_s or nxt_s.startswith('#'):
+                continue
+            return len(nxt) - len(nxt.lstrip()) > leading
+        return False
 
 
     def _check_envelope_bounds(

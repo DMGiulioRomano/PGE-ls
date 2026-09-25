@@ -276,6 +276,32 @@ class TestVocabolario:
         assert len(errs) == 1
         assert errs[0].range.start.line == _line_of(text, 'duration_range_unit')
 
+    def test_valore_a_blocchi_e_un_solo_errore(self, bridge):
+        """Una lista sotto la chiave non e' una chiave vuota: il valore c'e',
+        ed e' fuori vocabolario. Lo dice la fase del vocabolario, una volta
+        sola; «non ne ha uno» sarebbe falso."""
+        text = _stream("      duration: 0.05\n"
+                       "      duration_range: 0.5\n"
+                       "      duration_range_unit:\n"
+                       "        - relative\n")
+        errs = _errors(bridge, text)
+        assert len(errs) == 1
+        assert errs[0].range.start.line == _line_of(text, 'duration_range_unit')
+        assert 'non valido' in errs[0].message
+
+    @pytest.mark.parametrize('dove, riga', [
+        ('pointer', "    pointer:\n      duration_range_unit:\n"),
+        ('stream', "    duration_range_unit:\n"),
+    ])
+    def test_chiave_vuota_fuori_dal_blocco_non_e_lei(self, bridge, dove, riga):
+        """Il motore legge la chiave al path dichiarato, e solo li': vuota in
+        un altro blocco non la rifiuta nessuno, e il language server non puo'
+        dire che «richiede un valore»."""
+        text = _stream("      duration: 0.05\n").replace(
+            "    grain:\n", riga + "    grain:\n")
+        assert [e for e in _errors(bridge, text)
+                if 'duration_range_unit' in e.message] == []
+
     def test_il_vocabolario_viene_dal_bridge(self):
         bridge = SchemaBridge(_raw(range_units=['absolute', 'relative', 'x']))
         text = _stream("      duration: 0.05\n"
