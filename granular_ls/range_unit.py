@@ -142,6 +142,26 @@ def _indent(raw: str) -> int:
     return len(raw) - len(raw.lstrip())
 
 
+def _is_stream_marker(raw: str) -> bool:
+    stripped = raw.strip()
+    return (stripped.startswith('- ') or stripped == '-') and _indent(raw) == 2
+
+
+def stream_span(lines: List[str], line: int) -> Optional[Tuple[int, int]]:
+    """Inizio e fine (esclusa) dello stream che contiene `line`, o None.
+
+    Per chi parte da una riga (l'hover) e non dalla lista degli stream che la
+    diagnostica calcola una volta sola.
+    """
+    start = next((i for i in range(min(line, len(lines) - 1), -1, -1)
+                  if _is_stream_marker(lines[i])), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines))
+                if _is_stream_marker(lines[i])), len(lines))
+    return start, end
+
+
 def _key_indent(raw: str, n: int, stream_start: int) -> int:
     """Dove comincia la chiave: dopo il trattino sulla riga dello stream."""
     if n == stream_start:

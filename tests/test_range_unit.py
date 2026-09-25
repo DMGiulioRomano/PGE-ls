@@ -525,3 +525,159 @@ class TestTettoBandaRelativa:
                        "      duration_range: 0.5\n"
                        "      duration_range_unit: relative\n", anchor='min')
         assert 'sforerebbe anche lei' in self._band(bridge, text)[0].message
+
+
+# =============================================================================
+# 3. Completion
+# =============================================================================
+
+def _context(context_type='key', current_text='', parent_path=None,
+             current_key='', indent_level=3, cursor_line=0):
+    from granular_ls.yaml_analyzer import YamlContext
+    return YamlContext(
+        context_type=context_type, current_text=current_text,
+        parent_path=parent_path if parent_path is not None else ['grain'],
+        indent_level=indent_level, in_stream_element=True,
+        current_key=current_key, leading_spaces=indent_level * 2,
+        cursor_line=cursor_line,
+    )
+
+
+class TestRangeUnitCompletion:
+
+    def _keys(self, bridge, document_text="grain:\n  ", **kw):
+        from granular_ls.providers.completion_provider import CompletionProvider
+        items = CompletionProvider(bridge).get_completions(
+            _context(**kw), document_text=document_text)
+        return {i.label: i for i in items}
+
+    def _values(self, bridge, prefix=''):
+        from granular_ls.providers.completion_provider import CompletionProvider
+        ctx = _context(context_type='value', current_text=prefix,
+                       current_key='duration_range_unit')
+        return CompletionProvider(bridge).get_completions(
+            ctx, document_text=f"grain:\n  duration_range_unit: {prefix}")
+
+    def test_la_chiave_nel_blocco_grain(self, bridge):
+        from granular_ls.providers.completion_provider import TRIGGER_SUGGEST
+        item = self._keys(bridge)['duration_range_unit']
+        assert item.insert_text == 'duration_range_unit: '
+        # Ha un vocabolario chiuso: appena inserita apre il menu dei valori.
+        assert item.command == TRIGGER_SUGGEST
+        doc = item.documentation.value
+        assert '`grain.duration_range`' in doc
+        assert '`relative`' in doc and '`absolute`' in doc
+
+    def test_non_se_gia_presente(self, bridge):
+        doc = ("streams:\n  - stream_id: s\n    grain:\n"
+               "      duration_range_unit: relative\n      ")
+        assert 'duration_range_unit' not in self._keys(bridge, doc)
+
+    def test_non_su_un_motore_che_precede_267(self):
+        bridge = SchemaBridge(_raw(range_unit_path=None))
+        assert 'duration_range_unit' not in self._keys(bridge)
+
+    def test_non_in_un_altro_blocco(self, bridge):
+        assert 'duration_range_unit' not in self._keys(
+            bridge, parent_path=['pointer'])
+
+    def test_una_chiave_di_stream_si_completa_a_livello_stream(self):
+        """Il meccanismo e' dichiarativo anche nella completion: un
+        `range_unit_path` senza blocco e' una chiave dello stream."""
+        raw = _raw()
+        raw['specs'][0]['range_unit_path'] = 'volume_range_unit'
+        keys = self._keys(SchemaBridge(raw), "streams:\n  - stream_id: s\n    ",
+                          parent_path=[], indent_level=2)
+        assert 'volume_range_unit' in keys
+
+    def test_valori_nell_ordine_del_motore(self, bridge):
+        assert [i.label for i in self._values(bridge)] == ['absolute', 'relative']
+
+    def test_valori_dal_bridge(self):
+        bridge = SchemaBridge(_raw(range_units=['absolute', 'relative', 'x']))
+        assert [i.label for i in self._values(bridge)] == [
+            'absolute', 'relative', 'x']
+
+    @pytest.mark.parametrize('prefix, labels', [
+        ('r', ['relative']), ('"ab', ['absolute']), ('x', []),
+    ])
+    def test_filtro_per_prefisso(self, bridge, prefix, labels):
+        assert [i.label for i in self._values(bridge, prefix)] == labels
+
+    def test_doc_dei_valori(self, bridge):
+        docs = {i.label: i.documentation.value for i in self._values(bridge)}
+        assert 'default' in docs['absolute']
+        assert 'frazione' in docs['relative']
+
+    def test_il_valore_non_si_completa_fuori_dal_blocco(self, bridge):
+        from granular_ls.providers.completion_provider import CompletionProvider
+        ctx = _context(context_type='value', current_key='duration_range_unit',
+                       parent_path=['pointer'])
+        labels = [i.label for i in CompletionProvider(bridge).get_completions(
+            ctx, document_text="pointer:\n  duration_range_unit: ")]
+        assert 'relative' not in labels
+
+
+# =============================================================================
+# 4. Hover
+# =============================================================================
+
+class TestRangeUnitHover:
+
+    def _hover(self, bridge, key, text='', parent=('grain',)):
+        from granular_ls.providers.hover_provider import HoverProvider
+        line = _line_of(text, key + ':') if text else 0
+        ctx = _context(current_text=key, parent_path=list(parent),
+                       cursor_line=line)
+        hover = HoverProvider(bridge).get_hover(ctx, text)
+        return hover.contents.value if hover else None
+
+    def test_doc_della_chiave(self, bridge):
+        doc = self._hover(bridge, 'duration_range_unit')
+        for atteso in ('`absolute`', '`relative`', '`grain.duration_range`',
+                       'jitter implicito', '[0, 1]', 'InvalidFieldValueError'):
+            assert atteso in doc, atteso
+
+    def test_la_chiave_fuori_dal_blocco_non_e_lei(self, bridge):
+        doc = self._hover(bridge, 'duration_range_unit', parent=('pointer',))
+        assert doc is None or 'grain.duration_range' not in doc
+
+    def test_nota_sul_range_relativo(self, bridge):
+        text = _stream("      duration: 0.05\n"
+                       "      duration_range: 0.5\n"
+                       "      duration_range_unit: relative\n")
+        doc = self._hover(bridge, 'duration_range', text)
+        assert 'Unità del range: `relative`' in doc
+        assert 'frazione' in doc
+        # Le due ancore la consumano in modi diversi.
+        assert 'center' in doc and 'min' in doc
+
+    def test_nota_sul_range_assoluto_di_default(self, bridge):
+        text = _stream("      duration: 0.05\n"
+                       "      duration_range: 0.5\n")
+        doc = self._hover(bridge, 'duration_range', text)
+        assert 'Unità del range: `absolute`' in doc
+        assert 'default' in doc
+
+    def test_nota_nell_unita_della_base(self, bridge):
+        """Assoluto, il range e' nell'unita' della base: millisecondi."""
+        text = _stream("      duration_unit: milliseconds\n"
+                       "      duration: 50\n"
+                       "      duration_range: 5\n")
+        doc = self._hover(bridge, 'duration_range', text)
+        assert 'millisecondi' in doc
+
+    def test_nota_su_una_grafia_rifiutata(self, bridge):
+        text = _stream("      duration: 0.05\n"
+                       "      duration_range: 0.5\n"
+                       "      duration_range_unit: relativo\n")
+        doc = self._hover(bridge, 'duration_range', text)
+        assert 'fuori vocabolario' in doc
+        assert 'frazione' not in doc.split('---')[-1]
+
+    def test_la_base_non_ha_la_nota(self, bridge):
+        text = _stream("      duration: 0.05\n"
+                       "      duration_range: 0.5\n"
+                       "      duration_range_unit: relative\n")
+        doc = self._hover(bridge, 'duration', text)
+        assert 'Unità del range' not in doc

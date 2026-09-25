@@ -35,6 +35,14 @@ from granular_ls.read_direction import (
     DEVIATION_PROBABILITY_DOCS,
     READ_DIRECTION_DOC,
 )
+from granular_ls.range_unit import (
+    find_key,
+    fmt_bound,
+    is_relative,
+    range_unit_key_doc,
+    split_path,
+    stream_span,
+)
 from granular_ls.pitch_units import (
     PITCH_BLOCK_KEYS,
     PITCH_UNIT_KEYS,
@@ -152,7 +160,9 @@ _STREAM_CONTEXT_DOCS = {
     ),
     'duration_unit': (
         "**Meta-parametro: unita di misura della durata del grano.**\n\n"
-        "Controlla come vengono interpretati `grain.duration` e `grain.duration_range`.\n\n"
+        "Controlla come vengono interpretati `grain.duration` e `grain.duration_range`.\n"
+        "Il range solo se assoluto: con `duration_range_unit: relative` e' una\n"
+        "frazione della base e non ha unita' da convertire.\n\n"
         "Valori accettati:\n"
         "- `seconds` (default): i valori sono in **secondi**.\n"
         "- `samples`: i valori sono in **campioni** alla frequenza di output del\n"
@@ -207,6 +217,8 @@ _BLOCK_KEY_DOCS = {
         "- `duration` — Durata del grano (default: `0.05` s; min 1 campione)\n"
         "- `duration_unit` — Unità di `duration`/`duration_range`: `seconds` \\|\n"
         "  `samples` \\| `milliseconds`\n"
+        "- `duration_range_unit` — `duration_range` come quantità (`absolute`,\n"
+        "  default) o come frazione della base (`relative`)\n"
         "- `envelope` — Forma dell'inviluppo del grano (default: `hanning`)\n"
         "- `reverse` — Verso all'indietro, chiave vuota (nessun valore)\n"
         "- `read_direction` — Verso dichiarato: `-1` indietro, `+1` avanti,\n"
@@ -562,6 +574,20 @@ class HoverProvider:
                 context.current_text, document_text, context.cursor_line
             )
 
+        # Chiave `<param>_range_unit` (PGE #267): la doc la costruisce il
+        # legame che il bridge legge dallo schema, al path e solo li'.
+        block = context.parent_path[0] if context.parent_path else None
+        for binding in self._bridge.get_range_unit_bindings():
+            if split_path(binding.unit_path) == (block, context.current_text):
+                return Hover(contents=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=range_unit_key_doc(
+                        binding.unit_path, binding.range.yaml_path,
+                        binding.base.yaml_path,
+                        self._bridge.get_range_units(),
+                        self._bridge.get_relative_range_bounds()),
+                ))
+
         # Usa la parola COMPLETA alla posizione cursore, non solo il prefisso.
         # Necessario perche' YamlAnalyzer taglia a line_up_to_cursor,
         # quindi se il cursore e' a meta' di 'density' current_text='den'.
@@ -583,6 +609,8 @@ class HoverProvider:
             if is_pointer_param:
                 hover = self._append_unit_note(hover, document_text,
                                                context.cursor_line)
+            hover = self._append_range_unit_note(hover, param, document_text,
+                                                 context.cursor_line)
             return hover
 
         # Prova come stream context key
@@ -1023,6 +1051,75 @@ class HoverProvider:
                 value=old_value + note,
             )
         )
+
+    # Come si chiamano i valori di `grain.duration`, per unita': un range
+    # assoluto e' nella stessa unita' della sua base.
+    _GRAIN_DURATION_UNIT_WORDS = {
+        'seconds': 'secondi', 'milliseconds': 'millisecondi',
+        'samples': 'campioni',
+    }
+
+    def _append_range_unit_note(self, hover: Hover, param: ParameterInfo,
+                                document_text: str, cursor_line: int) -> Hover:
+        """La lettura del `_range` in vigore, se `param` ne ha una (PGE #267).
+
+        Lo stesso numero dice due cose diverse a seconda della chiave sorella:
+        una quantita' nell'unita' della base, o una frazione della base. La
+        nota dice quale, leggendo la chiave `<param>_range_unit` dello stream
+        sotto il cursore come la legge il motore — assente e' il default, una
+        grafia fuori vocabolario non e' un sinonimo di niente.
+        """
+        binding = next((b for b in self._bridge.get_range_unit_bindings()
+                        if b.range.yaml_path == param.yaml_path), None)
+        if binding is None:
+            return hover
+
+        units = self._bridge.get_range_units()
+        lines = document_text.split('\n') if document_text else []
+        span = stream_span(lines, cursor_line) if lines else None
+        decl = find_key(lines, *span, binding.unit_path) if span else None
+        base = binding.base.yaml_path
+
+        if decl is not None and not decl.readable:
+            note = (f'**Unità del range: non determinabile** — il valore di '
+                    f'`{binding.unit_path}` non si legge da solo come YAML.')
+        elif decl is not None and decl.value not in units:
+            note = (f'**Unità del range: nessuna** — `{binding.unit_path}` '
+                    f'fuori vocabolario ({" | ".join(f"`{u}`" for u in units)})'
+                    f'\n\n> Il motore rifiuta il render '
+                    f'(`InvalidFieldValueError`).')
+        elif decl is not None and is_relative(decl.value):
+            lo, hi = (fmt_bound(v) for v in
+                      self._bridge.get_relative_range_bounds())
+            note = (
+                f'**Unità del range: `{decl.value}`** — da '
+                f'`{binding.unit_path}`\n\n'
+                f'> Il valore è una **frazione di `{base}`** in '
+                f'\\[{lo}, {hi}\\], letta istante per istante: l\'unità della '
+                'base non la scala.\n\n'
+                'Con frazione `r`: `range_anchor: center` → '
+                '`[base·(1 − r/2), base·(1 + r/2)]` (±50% al massimo), '
+                '`min` → `[base, base·(1 + r)]`.'
+            )
+        else:
+            fonte = (f'da `{binding.unit_path}`' if decl is not None
+                     else f'default: `{binding.unit_path}` assente')
+            spelling = decl.value if decl is not None else units[0]
+            unita = f'di `{base}`'
+            if base == 'grain.duration' and span:
+                d_unit = find_key(lines, *span, 'grain.duration_unit')
+                parola = self._GRAIN_DURATION_UNIT_WORDS.get(
+                    d_unit.value if d_unit is not None else 'seconds')
+                if parola:
+                    unita = f'di `{base}`, in {parola}'
+            note = (f'**Unità del range: `{spelling}`** — {fonte}\n\n'
+                    f'> Il valore è una quantità nell\'unità {unita}.')
+
+        old_value = hover.contents.value if hover.contents else ''
+        return Hover(contents=MarkupContent(
+            kind=MarkupKind.Markdown,
+            value=old_value + '\n\n---\n' + note,
+        ))
 
     def _build_hover(self, param: ParameterInfo) -> Hover:
         """
