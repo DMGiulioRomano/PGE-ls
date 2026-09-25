@@ -123,6 +123,16 @@ class TestBordiExponential:
     def test_alias_exp(self):
         assert _trabocca({'type': 'exp', 'rate': 0.5}, 1025)
 
+    def test_rate_intero_che_da_solo_non_sta_in_un_float(self):
+        """Con esponente negativo `int ** -i` passa dai float, e un intero di
+        piu' di 308 cifre non ci entra: il motore alza dentro il suo `try` e
+        lo riveste con l'errore della coppia. A `n_reps: 1` l'unico peso e'
+        `rate ** 0`, che resta intero, e rende."""
+        assert check_time_distribution(_exp(10 ** 400), 1) is None
+        issue = check_time_distribution(_exp(10 ** 400), 2)
+        assert issue is not None and issue.kind == 'overflow'
+        assert (issue.param, issue.formula) == ('rate', 'rate ** -i')
+
 
 class TestBordiPower:
 

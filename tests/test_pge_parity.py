@@ -867,6 +867,8 @@ OVERFLOW_PROBES = [
     ({'type': 'exp', 'rate': 0.9}, 7000),
     ({'type': 'power', 'exponent': 150.0}, 200),
     ({'type': 'power', 'exponent': 100.5}, 1200),
+    # un `rate` intero fuori dai float: il motore trabocca da `n_reps: 2`
+    ({'type': 'exponential', 'rate': 10 ** 400}, 2),
 ]
 
 
@@ -941,6 +943,7 @@ def test_overflow_cio_che_non_trabocca_mai(pge, spec):
     ('geometric', 2000),
     ({'type': 'exponential', 'rate': 0.5}, 1100),
     ({'type': 'power', 'exponent': 150.0}, 200),
+    ({'type': 'exponential', 'rate': 10 ** 400}, 2),
 ], ids=lambda v: repr(v)[:40])
 def test_overflow_la_coppia_e_quella_che_nomina_il_motore(pge, spec, n_reps):
     """Parametro, valore e formula del messaggio sono quelli dell'errore del

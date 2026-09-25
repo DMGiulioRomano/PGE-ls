@@ -55,8 +55,10 @@ Cosa la regola **non** chiama errore, perché il motore non lo fa:
   collasso muto, non un rifiuto. Chiamarlo errore sarebbe essere più severi
   del motore;
 - `end_time` e l'offset: la soglia non dipende dalla durata del ciclo;
-- un parametro intero che da solo non sta in un float (più di 308 cifre):
-  lì il motore non arriva alla coppia, e quel che alza non è questa regola.
+- un `ratio` intero che da solo non sta in un float (più di 308 cifre): lì
+  il motore non arriva alla coppia, e quel che alza — un `OverflowError`
+  nudo, fuori dal suo `try` — non è questa regola. Un `rate` della stessa
+  taglia invece ci arriva: trabocca dentro il `try`, sul secondo peso.
 
 E cosa invece chiama errore anche se il motore non lo dice con un
 `ParameterBoundError`: con `ratio` float fra 1 e 2 c'è un tratto dove
@@ -273,13 +275,12 @@ def _geometric_overflow(ratio: Any, n_reps: int) -> Optional[str]:
 def _exponential_overflow(rate: Any, n_reps: int) -> Optional[str]:
     """`weights = [rate ** (-i) for i in range(n_reps)]`, dentro il `try`.
 
-    I pesi crescono solo con `rate < 1`, e allora il più grande è l'ultimo:
-    guardare lui equivale a guardarli tutti. Con `rate >= 1` nessun peso
-    supera 1 — e un `rate` intero, che fra 0 e 1 non può stare, sotto
-    esponente negativo diventa comunque float.
+    Basta l'ultimo peso. Con `rate < 1` i pesi crescono, e il più grande è
+    lui; con `rate >= 1` nessuno supera 1, e l'ultimo non trabocca più degli
+    altri. Resta un caso, e anche lì decide l'ultimo: sotto esponente negativo
+    un `rate` intero passa dai float, e con più di 308 cifre non ci entra —
+    dal secondo peso in poi, perché `rate ** 0` resta intero.
     """
-    if not rate < 1:
-        return None
     try:
         rate ** -(n_reps - 1)
     except OverflowError:
