@@ -2317,7 +2317,12 @@ class TestChordProgression:
 # =============================================================================
 
 class TestGrainDurationUnit:
-    """Diagnostica per grain.duration_unit (mirror di loop_unit del pointer)."""
+    """Diagnostica per grain.duration_unit.
+
+    Gemella di `pointer.loop_unit` (PGE #222): stesso default indipendente,
+    stesso vocabolario chiuso, stesso errore su un'unita' ignota. La forma
+    di questi test e' quella di `TestLoopUnitValue` in test_loop_unit.py.
+    """
 
     @staticmethod
     def _grain(body: str) -> str:

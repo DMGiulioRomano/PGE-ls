@@ -318,6 +318,10 @@ def _literal_from_engine_source(relpath: str, name: str):
     dovrebbe girare. L'AST basta: la costante è un letterale, e leggerla così
     non esegue nulla del motore.
 
+    Legge `NOME = ...` e anche `NOME: T = ...`: l'annotazione è lo stile di
+    casa nel motore, e un lettore che la ignora fa skippare il patto invece
+    di farlo fallire.
+
     Ritorna None se il file o il nome non esistono — engine più vecchio.
     """
     import ast
@@ -326,9 +330,13 @@ def _literal_from_engine_source(relpath: str, name: str):
         return None
     tree = ast.parse(source.read_text(encoding='utf-8'))
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
             continue
-        for target in node.targets:
+        for target in targets:
             if isinstance(target, ast.Name) and target.id == name:
                 try:
                     return ast.literal_eval(node.value)
@@ -353,6 +361,106 @@ def test_grain_duration_units_match(pge):
     if engine_units is None:
         pytest.skip("engine precede GRAIN_DURATION_UNITS")
     assert set(_GRAIN_DURATION_UNITS) == set(engine_units)
+
+
+def _pointer_controller_literal(name: str):
+    """Un letterale di `controllers/pointer_controller.py`, via AST.
+
+    Il modulo importa `pge.envelopes.envelope`, cioe' numpy: stessa ragione
+    di `core/stream.py` per non importarlo nella CI del language server.
+    """
+    for relpath in ('pge/controllers/pointer_controller.py',
+                    'controllers/pointer_controller.py'):
+        value = _literal_from_engine_source(relpath, name)
+        if value is not None:
+            return value
+    return None
+
+
+def test_il_lettore_ast_vede_l_assegnazione_annotata(tmp_path, monkeypatch):
+    """`NOME: T = ...` e' lo stesso letterale di `NOME = ...`.
+
+    L'annotazione e' lo stile di casa nel motore (`GRANULAR_PARAMETERS`,
+    `PITCH_UNIT_PRESETS`). Se il lettore conosce solo `ast.Assign`, il giorno
+    che `LOOP_UNITS` prende un tipo il patto non fallisce: skippa, dicendo
+    che il motore «precede PGE #222» proprio mentre lo segue.
+    """
+    modulo = tmp_path / 'm.py'
+    modulo.write_text(
+        "from typing import Tuple\n"
+        "ANNOTATA: Tuple[str, ...] = ('a', 'b')\n"
+        "SOLO_TIPO: int\n",
+        encoding='utf-8')
+    monkeypatch.setattr(sys.modules[__name__], 'PGE_SRC', str(tmp_path))
+    assert _literal_from_engine_source('m.py', 'ANNOTATA') == ('a', 'b')
+    assert _literal_from_engine_source('m.py', 'SOLO_TIPO') is None
+
+
+def test_loop_units_match(pge):
+    """Il vocabolario di `pointer.loop_unit` (PGE #222) e' ricopiato a mano.
+
+    Prima di #222 non c'era niente da confrontare: «tutto cio' che non e'
+    normalized» valeva assoluto. Ora un'unita' fuori da `LOOP_UNITS` ferma il
+    render, e il LS la segnala, la completa e ne decide i bounds: un valore
+    che il motore aggiunge e il LS no diventerebbe un errore rosso su YAML
+    valido — il drift di #36 su `duration_unit`, spostato di un blocco.
+
+    L'ordine conta: la prima grafia e' la canonica, ed e' il default che la
+    completion propone per primo.
+    """
+    from granular_ls.loop_unit import LOOP_UNITS, LOOP_UNIT_DEFAULT
+    engine_units = _pointer_controller_literal('LOOP_UNITS')
+    if engine_units is None:
+        pytest.skip("engine precede LOOP_UNITS (PGE #222)")
+    assert tuple(LOOP_UNITS) == tuple(engine_units)
+    assert LOOP_UNIT_DEFAULT == engine_units[0]
+
+
+def test_loop_unit_scope_match(pge):
+    """Le chiavi che `loop_unit` interpreta sono le posizioni dei bounds.
+
+    `_check_pointer_param_bounds`, l'hover e i semantic token applicano la
+    stessa unita' a queste quattro chiavi, e l'avviso di migrazione le nomina
+    nell'ordine del motore. Se il motore ne aggiungesse una (o togliesse
+    `start`), il LS la misurerebbe nella scala sbagliata.
+    """
+    from granular_ls.loop_unit import LOOP_UNIT_SCOPE
+    engine_scope = _pointer_controller_literal('_LOOP_UNIT_SCOPE')
+    if engine_scope is None:
+        pytest.skip("engine precede _LOOP_UNIT_SCOPE (PGE #222)")
+    assert tuple(LOOP_UNIT_SCOPE) == tuple(engine_scope)
+
+
+def test_loop_unit_non_eredita_piu_da_time_mode(pge):
+    """La premessa di tutto il lato LS di #222, letta nel metodo che la fa.
+
+    `_get_effective_unit_mode` era un mirror verbatim di
+    `params.get('loop_unit') or config.time_mode`: se quella riga tornasse
+    nel motore, il LS misurerebbe di nuovo in secondi posizioni che il motore
+    scala. Si guarda il corpo di `_pre_normalize_loop_params` senza i
+    docstring — dove `time_mode` resta nominato per spiegare perche' no.
+    """
+    import ast
+
+    tree = None
+    for relpath in ('pge/controllers/pointer_controller.py',
+                    'controllers/pointer_controller.py'):
+        path = Path(PGE_SRC) / relpath
+        if path.exists():
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            break
+    if tree is None:
+        pytest.skip("pointer_controller.py non trovato in questo checkout")
+    metodo = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == '_pre_normalize_loop_params'), None)
+    if metodo is None:
+        pytest.skip("engine senza _pre_normalize_loop_params")
+    nomi = {n.attr for n in ast.walk(metodo) if isinstance(n, ast.Attribute)}
+    nomi |= {n.id for n in ast.walk(metodo) if isinstance(n, ast.Name)}
+    assert 'time_mode' not in nomi, (
+        "_pre_normalize_loop_params legge di nuovo time_mode: l'unita' delle "
+        "posizioni nel sample non e' piu' indipendente")
 
 
 def test_milliseconds_factor_matches(pge):

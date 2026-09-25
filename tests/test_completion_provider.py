@@ -1686,7 +1686,12 @@ class TestVoicePitchUnitCompletions:
 # =============================================================================
 
 class TestGrainDurationUnitCompletion:
-    """duration_unit dentro grain: (mirror di loop_unit per pointer)."""
+    """duration_unit dentro grain:, gemella di loop_unit nel pointer.
+
+    Dopo PGE #222 le due chiavi hanno la stessa forma — default con un
+    nome, vocabolario chiuso — e la stessa completion dei valori
+    (`TestLoopUnitCompletion` in test_loop_unit.py).
+    """
 
     def test_duration_unit_suggested_in_grain_block(self, bridge):
         provider = CompletionProvider(bridge)

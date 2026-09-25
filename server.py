@@ -83,6 +83,7 @@ from granular_ls.providers.hover_provider import HoverProvider
 from granular_ls.providers.diagnostic_provider import DiagnosticProvider
 from granular_ls.envelope_snippets import build_envelope_n_points
 from granular_ls.envelope_shapes import VALID_INTERP_TYPES, is_bp_group
+from granular_ls.loop_unit import LOOP_UNIT_SCOPE
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('pge-ls')
@@ -113,7 +114,7 @@ def _init_providers(bridge: SchemaBridge) -> None:
         if candidate.is_dir():
             refs_dir = candidate
     _completion_provider = CompletionProvider(bridge, refs_dir=refs_dir)
-    _hover_provider = HoverProvider(bridge)
+    _hover_provider = HoverProvider(bridge, refs_dir=str(refs_dir) if refs_dir else '')
     _diagnostic_provider = DiagnosticProvider(bridge, refs_dir=str(refs_dir) if refs_dir else '')
     logger.info(
         f"Provider inizializzati con "
@@ -151,8 +152,9 @@ _SEMANTIC_LEGEND = SemanticTokensLegend(
 _TOKEN_NORMALIZED = 0
 _TOKEN_BLOCK_KEY  = 1
 
-# Parametri pointer soggetti a colorazione normalized
-_POINTER_UNIT_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
+# Parametri pointer soggetti a colorazione normalized: le posizioni nel
+# sample che `loop_unit` interpreta (registry condiviso con hover e diagnostica).
+_POINTER_UNIT_PARAMS = frozenset(LOOP_UNIT_SCOPE)
 
 # Chiavi blocco strutturali sempre colorate
 _BLOCK_KEYS = {'pointer', 'pitch', 'grain', 'deviation_probability', 'voices'}
