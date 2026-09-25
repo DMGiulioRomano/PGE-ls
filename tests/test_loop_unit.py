@@ -199,6 +199,21 @@ class TestRegistry:
         from granular_ls.loop_unit import loop_unit_mode
         assert loop_unit_mode(value) == mode
 
+    @pytest.mark.parametrize('value, label', [
+        ('normalised', 'normalised'),
+        ('Normalized', 'Normalized'),
+        (None, 'null'),
+        (True, 'true'),
+        (1, '1'),
+        # Quel che a occhio non si distingue va fra virgolette.
+        ('', '""'),
+        (' normalized', '" normalized"'),
+        ('seconds\t', '"seconds\\t"'),
+    ])
+    def test_etichetta_del_valore(self, value, label):
+        from granular_ls.loop_unit import loop_unit_label
+        assert loop_unit_label(value) == label
+
 
 class TestRescalingWouldChange:
     """Mirror di `_rescaling_would_change` (PointerController, PGE #222).
@@ -491,6 +506,22 @@ class TestLoopUnitValue:
         diags = self._loop_unit_diags(bridge, text)
         assert len(diags) == 1
         assert diags[0].severity == DiagnosticSeverity.Error
+
+    @pytest.mark.parametrize('unit, label', [
+        ('""', '""'),
+        ("''", '""'),
+        ('" normalized"', '" normalized"'),
+        ('"seconds "', '"seconds "'),
+    ])
+    def test_il_valore_nominato_si_vede(self, bridge, unit, label):
+        """Il messaggio nomina il valore fra backtick. La stringa vuota
+        usciva come ``valore `` non valido`` e uno spazio ai bordi restava
+        invisibile: un Error su un valore che, a leggerlo, sembra
+        `normalized`. Fra virgolette si vede che cosa il motore rifiuta."""
+        text = _pointer(f"      loop_unit: {unit}\n")
+        diags = self._loop_unit_diags(bridge, text)
+        assert len(diags) == 1
+        assert f'valore `{label}` non valido' in diags[0].message
 
     def test_chiave_vuota_e_un_solo_errore(self, bridge):
         """`loop_unit:` vuoto lo segnala gia' `_check_missing_values`: la fase

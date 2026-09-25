@@ -33,6 +33,7 @@ dichiarazione: hover, diagnostica e semantic token passano tutti di qui, cosi'
 non possono leggere la stessa riga in due modi.
 """
 
+import json
 import re
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -293,9 +294,16 @@ def stream_sample(lines: List[str], line: int) -> Optional[str]:
 
 
 def loop_unit_label(value: Any) -> str:
-    """Il valore come si scrive in un messaggio: quello che YAML ci legge."""
+    """Il valore come si scrive in un messaggio: quello che YAML ci legge.
+
+    Una stringa vuota, o con spazi ai bordi, va fra virgolette: il messaggio
+    la mette fra backtick, e senza virgolette `""` usciva come due backtick
+    vuoti e `" normalized"` come un `normalized` che a leggerlo e' valido.
+    """
     if value is None:
         return 'null'
     if isinstance(value, bool):
         return 'true' if value else 'false'
+    if isinstance(value, str) and (not value or value != value.strip()):
+        return json.dumps(value, ensure_ascii=False)
     return str(value)
