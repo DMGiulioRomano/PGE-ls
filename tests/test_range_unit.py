@@ -762,3 +762,47 @@ class TestDocDalDominio:
         righe = [r for r in self._key_doc(bridge).split('\n')
                  if r.startswith('- `x`')]
         assert righe == ['- `x`']
+
+
+# =============================================================================
+# 6. Il default viene dall'ordine del registry, non dalla prosa
+# =============================================================================
+
+class TestDefaultDalRegistry:
+    """Quale grafia sia il default lo dice `RANGE_UNITS[0]` (il motore la
+    chiama canonica, e `RANGE_UNIT_DEFAULT` e' lei): la doc lo deriva da li'.
+    Scritto dentro la prosa di `absolute`, il marcatore compariva due volte
+    nella doc della chiave e restava attaccato ad `absolute` anche con un
+    registry che mette per prima un'altra grafia."""
+
+    @pytest.fixture
+    def invertito(self):
+        return SchemaBridge(_raw(range_units=['relative', 'absolute']))
+
+    def _key_doc(self, bridge):
+        from granular_ls.providers.hover_provider import HoverProvider
+        ctx = _context(current_text='duration_range_unit')
+        return HoverProvider(bridge).get_hover(ctx, '').contents.value
+
+    def _value_docs(self, bridge):
+        from granular_ls.providers.completion_provider import CompletionProvider
+        ctx = _context(context_type='value', current_key='duration_range_unit')
+        items = CompletionProvider(bridge).get_completions(
+            ctx, document_text="grain:\n  duration_range_unit: ")
+        return {i.label: i.documentation.value for i in items}
+
+    def test_una_volta_sola_nella_doc_della_chiave(self, bridge):
+        riga = next(r for r in self._key_doc(bridge).split('\n')
+                    if r.startswith('- `absolute`'))
+        assert riga.count('default') == 1, riga
+
+    def test_nella_doc_della_chiave_segue_il_registry(self, invertito):
+        righe = {r.split('`')[1]: r for r in self._key_doc(invertito).split('\n')
+                 if r.startswith('- `')}
+        assert 'default' in righe['relative']
+        assert 'default' not in righe['absolute']
+
+    def test_nella_doc_dei_valori_segue_il_registry(self, invertito):
+        docs = self._value_docs(invertito)
+        assert 'default' in docs['relative']
+        assert 'default' not in docs['absolute']

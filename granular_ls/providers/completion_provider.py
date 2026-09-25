@@ -1557,7 +1557,8 @@ class CompletionProvider:
                 detail='range unit',
                 documentation=MarkupContent(
                     kind=MarkupKind.Markdown,
-                    value=f'`{unit}`\n\n' + range_unit_value_doc(unit, bounds),
+                    value=f'`{unit}`\n\n' + range_unit_value_doc(
+                        unit, bounds, is_default=i == 0),
                 ),
                 sort_text=f'{i:02d}',
                 command=TRIGGER_SUGGEST,

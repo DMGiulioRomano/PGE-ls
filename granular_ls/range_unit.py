@@ -56,10 +56,12 @@ def is_relative(value: Any) -> bool:
 # che il motore aggiunge e questo dizionario no resta completabile, con la
 # sola etichetta: il vocabolario non si trascrive, la prosa si'. Il dominio
 # della frazione no: e' un numero del motore, e lo aggiunge `range_unit_value_doc`.
+# Nemmeno quale grafia sia il default: e' la prima di `RANGE_UNITS`, e il
+# marcatore lo aggiunge chi conosce l'ordine del registry.
 RANGE_UNIT_VALUE_DOCS = {
     'absolute': (
         'Il `_range` e\' una **quantita\' assoluta**, nell\'unita\' della '
-        'base (default).\n\n'
+        'base.\n\n'
         'E\' la lettura storica: `duration_range: 0.01` sono 0.01 secondi, o '
         'millisecondi o campioni sotto `grain.duration_unit`, che lo scala '
         'insieme alla base.'
@@ -91,9 +93,16 @@ def center_half_width(relative_bounds: Tuple[float, float]) -> str:
 
 
 def range_unit_value_doc(unit: str,
-                         relative_bounds: Tuple[float, float]) -> str:
-    """La doc di una grafia, col dominio del motore dove ne ha uno."""
+                         relative_bounds: Tuple[float, float],
+                         is_default: bool = False) -> str:
+    """La doc di una grafia, col dominio del motore dove ne ha uno.
+
+    `is_default` lo decide il chiamante dall'ordine di `RANGE_UNITS` (la
+    prima grafia): scritto nella prosa, restava attaccato a una grafia sola.
+    """
     doc = RANGE_UNIT_VALUE_DOCS.get(unit, f'Unita\' del range: `{unit}`.')
+    if is_default:
+        doc += '\n\nE\' il default: la chiave assente vale questa.'
     if is_relative(unit):
         lo, hi = (fmt_bound(v) for v in relative_bounds)
         doc += f'\n\nDominio: `[{lo}, {hi}]`.'
