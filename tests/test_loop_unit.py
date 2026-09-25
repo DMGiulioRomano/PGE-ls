@@ -531,6 +531,31 @@ class TestLoopUnitValue:
         assert len(diags) == 1
         assert diags[0].severity == DiagnosticSeverity.Error
 
+    @pytest.mark.parametrize('valore, nome', [
+        ("        normalised\n", 'normalised'),
+        ("        - normalized\n", "['normalized']"),
+    ])
+    def test_valore_a_blocchi_fuori_vocabolario(self, bridge, valore, nome):
+        """Sotto la chiave c'e' un valore, e il motore lo rifiuta: lo dice la
+        fase del vocabolario, nominandolo, una volta sola. Prima tacevano
+        tutte e due le parti giuste e restava «non ne ha uno», falso — la
+        stessa correzione di `duration_range_unit` (PGE #267)."""
+        text = _pointer("      loop_unit:\n" + valore)
+        diags = self._loop_unit_diags(bridge, text)
+        assert len(diags) == 1
+        assert diags[0].range.start.line == _line_of(text, 'loop_unit')
+        assert f'valore `{nome}` non valido' in diags[0].message
+
+    def test_valore_a_blocchi_valido(self, bridge):
+        """`loop_unit:` con `normalized` sulla riga sotto e' YAML che il motore
+        legge come `normalized`: nessun errore, e i bounds in [0, 1]."""
+        text = _pointer("      loop_unit:\n"
+                        "        normalized\n"
+                        "      loop_end: 0.5\n")
+        assert self._loop_unit_diags(bridge, text) == []
+        assert _get_effective_unit_mode(text, _line_of(text, 'loop_end')) == (
+            'normalized', 'loop_unit')
+
     def test_fuori_dal_pointer_non_e_affar_suo(self, bridge):
         """Il motore legge `loop_unit` solo dal blocco pointer."""
         text = _stream("    grain:\n"

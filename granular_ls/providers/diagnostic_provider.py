@@ -730,10 +730,12 @@ class DiagnosticProvider:
                     source=SOURCE,
                 ))
 
-            elif yaml_path in self._range_unit_paths:
-                # Chiave `<param>_range_unit` (PGE #267): vuota e' un errore.
-                # Un valore a blocchi c'e', ed e' fuori vocabolario: lo dice
-                # `_check_range_units`, qui sarebbe un «non ne ha uno» falso.
+            elif (yaml_path in self._range_unit_paths
+                  or yaml_path == LOOP_UNIT_PATH):
+                # Chiave `<param>_range_unit` (PGE #267) o `pointer.loop_unit`
+                # (PGE #222): vuota e' un errore. Un valore a blocchi c'e', e
+                # lo giudica la fase del vocabolario (`_check_range_units`,
+                # `_check_loop_unit`): qui sarebbe un «non ne ha uno» falso.
                 if not self._has_block_value(lines, i, leading):
                     diagnostics.append(Diagnostic(
                         range=self._line_range(i),
@@ -2914,16 +2916,20 @@ class DiagnosticProvider:
         `grain.duration_unit`, la sua gemella.
 
         La chiave scritta e lasciata vuota la segnala gia'
-        `_check_missing_values` (`_STRING_REQUIRED_KEYS`): qui si tace, per
-        non dirla due volte. Un `null` scritto invece passa di qui, perche' li'
-        un valore c'e' ed e' fuori vocabolario come gli altri. Il frammento a
-        meta' scrittura, che YAML non legge, non si segnala.
+        `_check_missing_values`: qui si tace, per non dirla due volte. Un
+        `null` scritto invece passa di qui, perche' li' un valore c'e' ed e'
+        fuori vocabolario come gli altri; e cosi' un valore a blocchi sotto la
+        chiave (`loop_unit:` con `normalised` o `- normalized` sulla riga
+        sotto), che `_check_missing_values` lascia a questa fase. Il frammento
+        a meta' scrittura, che YAML non legge, non si segnala.
         """
         diagnostics = []
         hint = LOOP_UNIT_INVALID_HINT[0].upper() + LOOP_UNIT_INVALID_HINT[1:]
         for stream_start, _end, _keys in streams:
             decl = find_loop_unit(lines, stream_start)
-            if decl is None or not decl.readable or decl.inline_empty:
+            if decl is None or not decl.readable:
+                continue
+            if decl.value is None and decl.inline_empty:
                 continue
             if loop_unit_mode(decl.value) != MODE_INVALID:
                 continue
