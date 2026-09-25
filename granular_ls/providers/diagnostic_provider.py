@@ -2723,9 +2723,11 @@ class DiagnosticProvider:
           - secondi (`seconds`, `absolute` o chiave assente):
               [0.0, durata_sample] se il file WAV e' leggibile,
               altrimenti solo [0.0, +inf] (controlla solo limite inferiore)
-          - `loop_unit` fuori vocabolario: nessun controllo. Il motore rifiuta
-            l'unita' prima di guardare i valori, quindi non c'e' una scala in
-            cui misurarli; l'errore vero lo dice la fase 17 sulla sua riga.
+          - `loop_unit` fuori vocabolario (o non ancora leggibile): nessun
+            bound. Il motore rifiuta l'unita' prima di guardare i valori,
+            quindi non c'e' una scala in cui misurarli; l'errore vero lo dice
+            la fase 17 sulla sua riga. Resta il controllo di `start` come
+            envelope, che di una scala non ha bisogno.
 
         I valori envelope vengono ignorati per loop_start, loop_end e
         loop_dur, che gli envelope li accettano davvero. Per `start` no:
@@ -2766,10 +2768,11 @@ class DiagnosticProvider:
                     pointer_end = n
                     break
 
-            # Determina modalita' (normalized, absolute o invalid)
+            # Determina modalita' (normalized, absolute o invalid). Sotto
+            # un'unita' che non si puo' usare tace la misura, non la fase:
+            # `start` come envelope e' un errore sotto qualunque scala.
             mode, _ = _get_effective_unit_mode(document_text, pointer_start + 1)
-            if mode == MODE_INVALID:
-                continue
+            measurable = mode != MODE_INVALID
 
             # Calcola i bounds
             if mode == 'normalized':
@@ -2811,6 +2814,8 @@ class DiagnosticProvider:
                     if diag is not None:
                         diagnostics.append(diag)
                         continue
+                if not measurable:
+                    continue
                 # Salta envelope e valori vuoti
                 if not val_str or val_str.startswith('[') or val_str.startswith('#'):
                     continue

@@ -433,6 +433,26 @@ class TestPointerBoundsDopo222:
         assert 'loop_unit' in errs[0].message
         assert errs[0].range.start.line == _line_of(text, 'loop_unit')
 
+    @pytest.mark.parametrize('unit', ['normalised', '[normalized'])
+    def test_unita_sconosciuta_non_zittisce_start_envelope(
+            self, bridge, refs_dir, unit):
+        """Tace la misura della finestra, non il resto della fase.
+
+        `start` come envelope e' un errore del motore sotto qualunque unita'
+        (`pointer.start` non accetta curve): non ha bisogno di una scala. Con
+        il `continue` sull'unita' ignota spariva insieme ai bounds, e chi
+        correggeva `loop_unit` si trovava un secondo render fallito che il
+        language server conosceva gia'. Vale anche per il valore che non si
+        legge ancora (a meta' scrittura): la curva su `start` resta una curva.
+        """
+        text = _pointer(f"      loop_unit: {unit}\n"
+                        "      start: [[0, 0], [10, 1]]\n")
+        errs = self._errors(bridge, refs_dir, text)
+        start_line = _line_of(text, 'start:')
+        assert [e for e in errs if e.range.start.line == start_line], (
+            "l'errore su start come envelope e' sparito sotto un'unita' "
+            "che non si puo' usare")
+
 
 # =============================================================================
 # 4. Diagnostica: il vocabolario del valore
