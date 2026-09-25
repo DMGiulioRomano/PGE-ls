@@ -251,6 +251,64 @@ def test_range_anchors_match(pge):
     assert set(bridge.get_range_anchors()) == set(RANGE_ANCHORS)
 
 
+def _range_unit_definitions():
+    """Il modulo del motore che dichiara le unita' del `_range` (PGE #267)."""
+    from granular_ls.schema_bridge import _import_pge_module
+    defs = _import_pge_module('parameters.parameter_definitions')
+    if not hasattr(defs, 'RANGE_UNITS'):
+        pytest.skip("engine precede RANGE_UNITS (PGE #267)")
+    return defs
+
+
+def test_range_units_letti_dal_vivo(pge):
+    """Vocabolario e dominio vengono dal motore, non dal fallback statico.
+
+    L'ordine conta: la prima grafia e' il default che l'hover dichiara e che
+    la completion propone per primo, e il motore la chiama canonica.
+    """
+    from granular_ls.schema_bridge import SchemaBridge
+    defs = _range_unit_definitions()
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    assert bridge.get_range_units() == list(defs.RANGE_UNITS)
+    assert bridge.get_range_units()[0] == defs.RANGE_UNIT_DEFAULT
+    assert bridge.get_relative_range_bounds() == tuple(
+        defs.RELATIVE_RANGE_BOUNDS)
+
+
+def test_la_grafia_relativa_e_quella_del_motore(pge):
+    """`relative` e' l'unica grafia che il LS confronta per nome.
+
+    Il vocabolario arriva dal vivo, ma quale delle sue voci voglia dire
+    «frazione della base» e' semantica, non un elenco: la decide
+    `range_unit_is_relative`, e qui si pretende che dica la stessa cosa.
+    """
+    from granular_ls.range_unit import RANGE_UNIT_RELATIVE, is_relative
+    defs = _range_unit_definitions()
+    assert RANGE_UNIT_RELATIVE == defs.RANGE_UNIT_RELATIVE
+    for grafia in (*defs.RANGE_UNITS, None, '', 'Relative', 1):
+        assert is_relative(grafia) == defs.range_unit_is_relative(grafia), grafia
+
+
+def test_range_unit_path_letto_dal_vivo(pge):
+    """Ogni `ParameterSpec.range_unit_path` del motore diventa un legame.
+
+    E' il meccanismo dichiarativo di #267: cablare un secondo parametro nel
+    motore e' una riga nello schema, e qui deve bastare la stessa riga.
+    """
+    from granular_ls.schema_bridge import SchemaBridge, _import_pge_module
+    _range_unit_definitions()
+    schema = _import_pge_module('parameters.parameter_schema')
+    attesi = {
+        spec.range_unit_path: spec.name
+        for specs in schema.ALL_SCHEMAS.values() for spec in specs
+        if getattr(spec, 'range_unit_path', None)
+    }
+    assert attesi, "il motore dichiara RANGE_UNITS ma nessun range_unit_path"
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    letti = {l.unit_path: l.base.name for l in bridge.get_range_unit_bindings()}
+    assert letti == attesi
+
+
 def _literal_from_engine_source(relpath: str, name: str):
     """Legge un letterale di modulo dal sorgente PGE senza importarlo.
 
@@ -457,10 +515,17 @@ def test_snapshot_roundtrip_preserves_surface(pge):
 
     for getter in ('get_deviation_probability_keys', 'get_stream_context_keys',
                    'get_grain_envelope_names', 'get_distribution_modes',
-                   'get_range_anchors'):
+                   'get_range_anchors', 'get_range_units'):
         assert set(getattr(snap_bridge, getter)()) == set(getattr(src_bridge, getter)()), (
             f"Lo snapshot perde superficie su {getter}()"
         )
+    # PGE #267: il legame fra una chiave `_range_unit` e i suoi due parametri.
+    def legami(bridge):
+        return {(l.unit_path, l.base.name, l.range.name)
+                for l in bridge.get_range_unit_bindings()}
+    assert legami(snap_bridge) == legami(src_bridge)
+    assert (snap_bridge.get_relative_range_bounds()
+            == src_bridge.get_relative_range_bounds())
     # Regressione del bug snapshot: le deviation_probability keys non devono essere vuote.
     assert snap_bridge.get_deviation_probability_keys()
 
