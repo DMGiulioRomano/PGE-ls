@@ -3419,6 +3419,11 @@ class DiagnosticProvider:
 
         ys: List[float] = []
         for item in raw:
+            # Il breakpoint dict `{t, v, type?}` e' la stessa Y di `[t, v]`:
+            # `EnvelopeBuilder.parse` lo normalizza prima di guardarlo, quindi
+            # qui si fa lo stesso invece di scartarlo come forma sconosciuta.
+            if isinstance(item, dict) and 't' in item and 'v' in item:
+                item = [item['t'], item['v']]
             # Le macro-forme si riconoscono per prime: un ciclo compatto ha
             # `item[1]` numerico e cadrebbe fra i breakpoint piatti.
             if is_loop_block(item) or is_bp_group(item):

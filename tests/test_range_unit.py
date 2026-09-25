@@ -451,6 +451,23 @@ class TestDominioRelativo:
                        "      duration_range_unit: relative\n")
         assert len(self._range_errors(bridge, text)) == 1
 
+    @pytest.mark.parametrize('envelope', [
+        '[{t: 0, v: 0.2}, {t: 10, v: 1.5}]',
+        '{type: linear, points: [{t: 0, v: 0.2}, {t: 10, v: 1.5}]}',
+        '[[0, 0.2], {t: 10, v: 1.5, type: cubic}]',
+    ])
+    def test_envelope_con_breakpoint_dict(self, bridge, envelope):
+        """Il breakpoint `{t, v, type?}` e' la stessa Y di `[t, v]`: il motore
+        lo normalizza prima di guardarlo (`EnvelopeBuilder.parse`) e ne valida
+        la Y come le altre. Letto come una forma sconosciuta, la frazione fuori
+        dominio passava in silenzio proprio su questa grafia."""
+        text = _stream("      duration: 0.05\n"
+                       f"      duration_range: {envelope}\n"
+                       "      duration_range_unit: relative\n")
+        errs = self._range_errors(bridge, text)
+        assert len(errs) == 1
+        assert '1.5' in errs[0].message
+
     def test_stringa_numerica(self, bridge):
         text = _stream("      duration: 0.05\n"
                        '      duration_range: "1.5"\n'
@@ -530,6 +547,13 @@ class TestTettoBandaRelativa:
     def test_range_envelope(self, bridge):
         text = _stream("      duration: 8\n"
                        "      duration_range: [[0, 0.1], [10, 0.5]]\n"
+                       "      duration_range_unit: relative\n", anchor='min')
+        assert len(self._band(bridge, text)) == 1
+
+    def test_base_envelope_con_breakpoint_dict(self, bridge):
+        """Ogni breakpoint della base conta, anche scritto `{t, v}`."""
+        text = _stream("      duration: [{t: 0, v: 1}, {t: 10, v: 8}]\n"
+                       "      duration_range: 0.5\n"
                        "      duration_range_unit: relative\n", anchor='min')
         assert len(self._band(bridge, text)) == 1
 

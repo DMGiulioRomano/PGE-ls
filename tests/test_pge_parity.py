@@ -1037,6 +1037,20 @@ GRAIN_RANGE_UNIT_CORPUS = [
     ('relativo-envelope-fuori', "duration: 0.05\n"
                                 "duration_range: [[0, 0.2], [10, 1.5]]\n"
                                 "duration_range_unit: relative", 'center'),
+    # Il breakpoint dict `{t, v, type?}`: il motore lo normalizza in `[t, v]`.
+    ('relativo-envelope-dict', "duration: 0.05\n"
+                               "duration_range: [{t: 0, v: 0.2}, "
+                               "{t: 10, v: 0.8}]\n"
+                               "duration_range_unit: relative", 'center'),
+    ('relativo-envelope-dict-fuori', "duration: 0.05\n"
+                                     "duration_range: [{t: 0, v: 0.2}, "
+                                     "{t: 10, v: 1.5}]\n"
+                                     "duration_range_unit: relative",
+     'center'),
+    ('relativo-points-dict-fuori', "duration: 0.05\n"
+                                   "duration_range: {type: linear, points: "
+                                   "[{t: 0, v: 0.2}, {t: 10, v: 1.5}]}\n"
+                                   "duration_range_unit: relative", 'center'),
     ('assoluto-esplicito', "duration: 0.05\nduration_range: 0.5\n"
                            "duration_range_unit: absolute", 'center'),
     # Il vocabolario, la chiave vuota e il range mancante.
@@ -1083,6 +1097,14 @@ GRAIN_RANGE_UNIT_CORPUS = [
     ('tetto-relativo-base-envelope', "duration: [[0, 1], [10, 8]]\n"
                                      "duration_range: 0.5\n"
                                      "duration_range_unit: relative", 'min'),
+    ('tetto-relativo-base-dict', "duration: [{t: 0, v: 1}, {t: 10, v: 8}]\n"
+                                 "duration_range: 0.5\n"
+                                 "duration_range_unit: relative", 'min'),
+    ('tetto-relativo-base-dict-dentro', "duration: [{t: 0, v: 1}, "
+                                        "{t: 10, v: 6}]\n"
+                                        "duration_range: 0.5\n"
+                                        "duration_range_unit: relative",
+     'min'),
     ('tetto-relativo-range-envelope', "duration: 8\n"
                                       "duration_range: [[0, 0.1], [10, 0.5]]\n"
                                       "duration_range_unit: relative", 'min'),
