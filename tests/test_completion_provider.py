@@ -98,14 +98,15 @@ def bridge():
                           default=0.0, is_smart=False),
         ],
         'bounds': {
-            'density':            make_raw_bounds(0.01, 4000.0),
+            # Nessun tetto da PGE #272 (e effective_density lo segue).
+            'density':            make_raw_bounds(0.01, None),
             'fill_factor':        make_raw_bounds(0.001, 50.0),
             'distribution':       make_raw_bounds(0.0, 1.0),
             'volume':             make_raw_bounds(-60.0, 0.0),
             'grain_duration':     make_raw_bounds(0.001, 10.0),
             'grain_envelope':     make_raw_bounds(0.0, 1.0),
             'pointer_speed_ratio':make_raw_bounds(0.01, 10.0),
-            'effective_density':  make_raw_bounds(1.0, 4000.0),
+            'effective_density':  make_raw_bounds(1.0, None),
         },
     }
     return SchemaBridge(raw)
@@ -427,10 +428,18 @@ class TestGetCompletionsStrutturaItem:
         item = self._get_density_item(bridge)
         assert item.kind == CompletionItemKind.Field
 
-    def test_detail_contiene_min_max(self, bridge):
+    def test_detail_dichiara_il_pavimento_senza_tetto(self, bridge):
+        """density non ha tetto (PGE #272): il detail era vuoto, con lo
+        stesso `and` dei due estremi che spegneva l'hover."""
         item = self._get_density_item(bridge)
-        assert '0.01' in item.detail
-        assert '4000' in item.detail
+        assert item.detail == '≥ 0.01'
+
+    def test_detail_contiene_min_max(self, bridge):
+        provider = CompletionProvider(bridge)
+        ctx = make_context(context_type='key', current_text='fill')
+        result = provider.get_completions(ctx, document_text="fill")
+        item = next(i for i in result if i.label == 'fill_factor')
+        assert item.detail == '[0.001, 50.0]'
 
     def test_documentation_e_markup_content(self, bridge):
         item = self._get_density_item(bridge)
@@ -602,7 +611,7 @@ def make_bridge_with_stream_keys():
             },
         ],
         'bounds': {
-            'density':        make_raw_bounds(0.01, 4000.0),
+            'density':        make_raw_bounds(0.01, None),
             'fill_factor':    make_raw_bounds(0.001, 50.0),
             'volume':         make_raw_bounds(-60.0, 0.0),
             'grain_duration': make_raw_bounds(0.001, 10.0),
@@ -1873,3 +1882,48 @@ class TestReadDirectionCompletions:
         ctx = make_context(context_type='value', current_key='reverse',
                            parent_path=['grain'], current_text='')
         assert provider.get_completions(ctx, '') == []
+
+
+# =============================================================================
+# voices: raw bounds senza tetto
+# =============================================================================
+
+class TestVoicesRawBoundsSenzaTetto:
+    """`num_voices` e `scatter` leggono i raw bounds del bridge: con
+    `max_val=None` il detail stampava `[1, None]` e gli snippet envelope
+    facevano `_fmt(None)`, cioe' un TypeError dentro la completion."""
+
+    @pytest.fixture
+    def voices_bridge(self):
+        return SchemaBridge({
+            'specs': [make_raw_spec('density', 'density', default=None)],
+            'bounds': {
+                'density': make_raw_bounds(0.01, None),
+                'num_voices': make_raw_bounds(1, None),
+            },
+        })
+
+    def test_detail_dichiara_il_pavimento(self, voices_bridge):
+        provider = CompletionProvider(voices_bridge)
+        ctx = make_context(context_type='key', current_text='num',
+                           parent_path=['voices'], indent_level=3)
+        items = provider.get_completions(ctx, '')
+        item = next(i for i in items if i.label == 'num_voices')
+        assert item.detail == '≥ 1'
+
+    def test_snippet_envelope_disegna_sopra_il_pavimento(self, voices_bridge):
+        provider = CompletionProvider(voices_bridge)
+        document = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    voices:\n"
+            "      num_voices: \n"
+        )
+        ctx = make_context(context_type='value', current_text='',
+                           current_key='num_voices', parent_path=['voices'],
+                           indent_level=3, leading_spaces=6, cursor_line=4)
+        items = provider.get_completions(ctx, document)
+        linear = next(i for i in items if '2 punti' in i.label)
+        assert '${2:1.0}' in linear.insert_text
+        assert 'None' not in linear.insert_text

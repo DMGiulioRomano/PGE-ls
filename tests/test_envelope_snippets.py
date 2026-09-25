@@ -64,7 +64,8 @@ def bridge():
                           default=0.0, is_smart=False),
         ],
         'bounds': {
-            'density':        make_raw_bounds(0.01, 4000.0),
+            # Nessun tetto da PGE #272.
+            'density':        make_raw_bounds(0.01, None),
             'volume':         make_raw_bounds(-120.0, 12.0),
             'grain_duration': make_raw_bounds(0.001, 10.0),
         },
@@ -459,7 +460,7 @@ class TestGetSnippetsWithBounds:
     get_snippets_for_parameter_with_context(yaml_path, end_time) genera snippet
     con Y values derivati dai bounds del parametro specifico.
 
-    density (0.01, 4000.0) -> y_min=0.01, y_max=4000.0
+    density (0.01, None)   -> y_min=0.01, y_max=4000.0 (tetto di disegno)
     pan (-3600.0, 3600.0)  -> y_min=-3600.0, y_max=3600.0
     volume (-120.0, 12.0)  -> y_min=-120.0, y_max=12.0
     """
@@ -479,7 +480,7 @@ class TestGetSnippetsWithBounds:
                  'range_path':None,'deviation_probability_key':'volume'},
             ],
             'bounds': {
-                'density': {'min_val':0.01,'max_val':4000.0,'min_range':0.0,
+                'density': {'min_val':0.01,'max_val':None,'min_range':0.0,
                             'max_range':0.0,'default_jitter':0.0,'variation_mode':'additive'},
                 'pan':     {'min_val':-3600.0,'max_val':3600.0,'min_range':0.0,
                             'max_range':360.0,'default_jitter':30.0,'variation_mode':'additive'},
@@ -493,13 +494,33 @@ class TestGetSnippetsWithBounds:
         p = EnvelopeSnippetProvider(rich_bridge)
         assert hasattr(p, 'get_snippets_for_parameter_with_context')
 
-    def test_density_y_max_e_4000(self, rich_bridge):
-        """density ha max=4000.0 -> y_max nello snippet deve essere 4000.0."""
+    def test_density_y_max_e_la_soglia_del_motore(self, rich_bridge):
+        """density non ha tetto (PGE #272): lo snippet arriva alla soglia oltre
+        cui il motore avvisa, dichiarata come tale — non a `_DEFAULT_Y_MAX`
+        (1 grano al secondo) per caso."""
+        from granular_ls.envelope_snippets import DENSITY_NOTICE_THRESHOLD
         p = EnvelopeSnippetProvider(rich_bridge)
         items = p.get_snippets_for_parameter_with_context('density', 10.0)
         # Cerca lo snippet lineare 2 punti
         linear = next(i for i in items if '2 punti' in i.label)
-        assert '4000.0' in linear.insert_text
+        assert f'${{4:{DENSITY_NOTICE_THRESHOLD}}}' in linear.insert_text
+
+    def test_density_la_doc_non_spaccia_il_disegno_per_un_tetto(self, rich_bridge):
+        p = EnvelopeSnippetProvider(rich_bridge)
+        items = p.get_snippets_for_parameter_with_context('density', 10.0)
+        for item in items:
+            doc = item.documentation.value
+            if 'Range parametro' not in doc:
+                continue
+            assert 'Range parametro: ≥ 0.01' in doc, item.label
+            assert '[0.01, 4000.0]' not in doc, item.label
+            assert 'nessun tetto' in doc, item.label
+
+    def test_parametro_chiuso_doc_invariata(self, rich_bridge):
+        p = EnvelopeSnippetProvider(rich_bridge)
+        items = p.get_snippets_for_parameter_with_context('volume', 10.0)
+        linear = next(i for i in items if '2 punti' in i.label)
+        assert 'Range parametro: [-120.0, 12.0]' in linear.documentation.value
 
     def test_density_y_min_e_0_01(self, rich_bridge):
         """density ha min=0.01 -> y_min nello snippet deve essere 0.01."""
@@ -703,3 +724,61 @@ class TestNuoviSnippetMisti:
             if item.label in new_labels:
                 assert isinstance(item, CompletionItem)
                 assert item.insert_text_format == InsertTextFormat.Snippet
+
+
+# =============================================================================
+# draw_bounds: la finestra Y di snippet e GUI (PGE-ls #51)
+# =============================================================================
+
+class TestDrawBounds:
+    """Una sola risposta a «fino a dove si disegna», per snippet e GUI.
+
+    Per un parametro senza tetto l'asse Y ne vuole comunque uno: e' un tetto
+    di DISEGNO, dichiarato per parametro con la sua ragione, mai un bound —
+    nessuna diagnostica lo legge.
+    """
+
+    def test_chiuso_e_il_dominio(self):
+        from granular_ls.envelope_snippets import draw_bounds
+        b = draw_bounds('volume', -120.0, 12.0)
+        assert (b.y_min, b.y_max) == (-120.0, 12.0)
+        assert b.ceiling_note is None
+
+    def test_density_arriva_alla_soglia_d_avviso_del_motore(self):
+        from granular_ls.envelope_snippets import (
+            DENSITY_NOTICE_THRESHOLD, draw_bounds,
+        )
+        b = draw_bounds('density', 0.01, None)
+        assert (b.y_min, b.y_max) == (0.01, DENSITY_NOTICE_THRESHOLD)
+        assert b.ceiling_note
+
+    def test_loop_arrivano_al_file_intero(self):
+        """Quello che disegnavano gia' — ora per dichiarazione."""
+        from granular_ls.envelope_snippets import draw_bounds
+        for key, floor in (('loop_start', 0), ('loop_end', 0.0),
+                           ('loop_dur', 0.005)):
+            b = draw_bounds('pointer.' + key, floor, None)
+            assert (b.y_min, b.y_max) == (floor, 1.0), key
+            assert b.ceiling_note, key
+
+    def test_senza_tetto_non_dichiarato_resta_sopra_il_pavimento(self):
+        """Un parametro che perde il tetto domani e che nessuno ha dichiarato:
+        la parita' lo segnala, ma intanto lo snippet non scende sotto il
+        pavimento e non e' piatto."""
+        from granular_ls.envelope_snippets import draw_bounds
+        for floor in (0.0, 0.5, 1.0, 20.0):
+            b = draw_bounds('nuovo', floor, None)
+            assert b.y_max > b.y_min, floor
+            assert b.ceiling_note, floor
+
+    def test_ignoto_e_il_default(self):
+        from granular_ls.envelope_snippets import draw_bounds
+        b = draw_bounds('orfano', None, None)
+        assert (b.y_min, b.y_max) == (0.0, 1.0)
+        assert b.ceiling_note is None
+
+    def test_la_tabella_ha_una_ragione_per_ogni_tetto(self):
+        from granular_ls.envelope_snippets import OPEN_CEILING_DRAW_MAX
+        for path, (tetto, ragione) in OPEN_CEILING_DRAW_MAX.items():
+            assert tetto > 0, path
+            assert ragione.strip(), path
