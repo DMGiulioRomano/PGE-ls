@@ -97,7 +97,9 @@ def bridge():
                           default=0.0, is_smart=False),
         ],
         'bounds': {
-            'density':        make_raw_bounds(0.01, 4000.0),
+            # Nessun tetto da PGE #272: resta il pavimento, guardia contro
+            # la divisione in `1.0 / density`.
+            'density':        make_raw_bounds(0.01, None),
             'fill_factor':    make_raw_bounds(0.001, 50.0),
             'distribution':   make_raw_bounds(0.0, 1.0),
             'volume':         make_raw_bounds(-60.0, 0.0),
@@ -809,9 +811,9 @@ class TestGetDiagnosticsEnvelopeBounds:
             "    onset: 0.0\n"
             "    duration: 10.0\n"
             "    sample: f.wav\n"
-            "    density:\n"
-            "      - [0.0, 100.0]\n"
-            "      - [10.0, 9999.0]\n"   # 9999 > 4000 (max density)
+            "    fill_factor:\n"
+            "      - [0.0, 2.0]\n"
+            "      - [10.0, 9999.0]\n"   # 9999 > 50 (max fill_factor)
         )
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if d.severity == DiagnosticSeverity.Error]
@@ -843,7 +845,7 @@ class TestGetDiagnosticsEnvelopeBounds:
             "    sample: f.wav\n"
             "    density:\n"
             "      - [0.0, 100.0]\n"
-            "      - [10.0, 9999.0]\n"
+            "      - [10.0, -5.0]\n"
         )
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if d.severity == DiagnosticSeverity.Error]
@@ -891,17 +893,17 @@ class TestEnvelopeBoundsInline:
 
     def test_inline_fuori_bounds_produce_errore(self, bridge):
         provider = DiagnosticProvider(bridge)
-        yaml = self._stream("    density: [[0.0, 100.0], [10.0, 9999.0]]\n")
+        yaml = self._stream("    density: [[0.0, 100.0], [10.0, -5.0]]\n")
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if d.severity == DiagnosticSeverity.Error
                   and 'fuori dai bounds' in d.message]
         assert len(errors) == 1
         assert "'density'" in errors[0].message
-        assert '9999' in errors[0].message
+        assert '-5' in errors[0].message
 
     def test_inline_errore_punta_alla_riga_della_chiave(self, bridge):
         provider = DiagnosticProvider(bridge)
-        yaml = self._stream("    density: [[0.0, 100.0], [10.0, 9999.0]]\n")
+        yaml = self._stream("    density: [[0.0, 100.0], [10.0, -5.0]]\n")
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if d.severity == DiagnosticSeverity.Error
                   and 'fuori dai bounds' in d.message]
@@ -916,15 +918,15 @@ class TestEnvelopeBoundsInline:
 
     def test_inline_compact_loop_valida_y_del_pattern(self, bridge):
         provider = DiagnosticProvider(bridge)
-        # Compact: [[[x_pct, y], ...], end_time, n_reps] — 9999 nel pattern
+        # Compact: [[[x_pct, y], ...], end_time, n_reps] — -5 nel pattern
         yaml = self._stream(
-            "    density: [[[0, 100.0], [50, 9999.0], [100, 100.0]], 10, 3]\n"
+            "    density: [[[0, 100.0], [50, -5.0], [100, 100.0]], 10, 3]\n"
         )
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if d.severity == DiagnosticSeverity.Error
                   and 'fuori dai bounds' in d.message]
         assert len(errors) == 1
-        assert '9999' in errors[0].message
+        assert '-5' in errors[0].message
 
     def test_inline_breakpoint_singolo(self, bridge):
         provider = DiagnosticProvider(bridge)
@@ -2437,7 +2439,7 @@ def rd_bridge():
                           group_priority=2),
         ],
         'bounds': {
-            'density': make_raw_bounds(0.01, 4000.0),
+            'density': make_raw_bounds(0.01, None),
             'reverse': make_raw_bounds(0, 1, variation_mode='invert'),
             'read_direction': make_raw_bounds(-1, 1, variation_mode='negate'),
         },
@@ -4453,3 +4455,177 @@ class TestDistribuzioneTemporaleDelCiclo:
         )
         errs = self._overflow(provider, yaml)
         assert [d.range.start.line for d in errs] == [10]
+
+
+# =============================================================================
+# density senza tetto (PGE #272, PGE-ls #51)
+# =============================================================================
+
+def _bounds_errors(diags):
+    """I diagnostici dei bound generici, scalari ed envelope."""
+    return [d for d in diags
+            if d.severity == DiagnosticSeverity.Error
+            and ('fuori range' in d.message or 'fuori dai bounds' in d.message)]
+
+
+def _density_stream(body: str) -> str:
+    return (
+        "streams:\n"
+        "  - stream_id: s1\n"
+        "    onset: 0.0\n"
+        "    duration: 10.0\n"
+        "    sample: f.wav\n"
+        + body
+    )
+
+
+class TestDensitySenzaTetto:
+    """`max_val=None` e' «illimitato verso l'alto», non «bounds sconosciuti».
+
+    Il pavimento resta un errore vero — l'inter-onset e' `1.0 / density` — e
+    deve continuare a esserlo anche adesso che il tetto e' caduto. Prima i
+    lettori chiedevano entrambi gli estremi con lo stesso `and`, e con il
+    tetto spariva anche il pavimento.
+    """
+
+    def test_zero_e_sotto_il_pavimento(self, bridge):
+        diags = DiagnosticProvider(bridge).get_diagnostics(
+            _density_stream("    density: 0\n"))
+        errs = _bounds_errors(diags)
+        assert [d.range.start.line for d in errs] == [5]
+        assert '≥ 0.01' in errs[0].message
+        assert 'None' not in errs[0].message
+
+    def test_negativo_e_sotto_il_pavimento(self, bridge):
+        diags = DiagnosticProvider(bridge).get_diagnostics(
+            _density_stream("    density: -5\n"))
+        assert len(_bounds_errors(diags)) == 1
+
+    def test_nessun_valore_sfora_un_tetto_che_non_c_e(self, bridge):
+        """50000 era un errore contro il vecchio tetto; ora il motore lo rende
+        (e ne parla sul clip log sopra DENSITY_NOTICE_THRESHOLD)."""
+        diags = DiagnosticProvider(bridge).get_diagnostics(
+            _density_stream("    density: 50000\n"))
+        assert _bounds_errors(diags) == []
+
+    def test_envelope_block_style_sotto_il_pavimento(self, bridge):
+        diags = DiagnosticProvider(bridge).get_diagnostics(_density_stream(
+            "    density:\n"
+            "      - [0.0, 100.0]\n"
+            "      - [5.0, 50000.0]\n"
+            "      - [10.0, 0.0]\n"))
+        errs = _bounds_errors(diags)
+        assert [d.range.start.line for d in errs] == [8]
+        assert '≥ 0.01' in errs[0].message
+
+    def test_envelope_inline_sotto_il_pavimento(self, bridge):
+        diags = DiagnosticProvider(bridge).get_diagnostics(_density_stream(
+            "    density: [[0, 0], [5, 9000]]\n"))
+        errs = _bounds_errors(diags)
+        assert len(errs) == 1
+        assert 'Valore envelope 0' in errs[0].message
+
+    def test_envelope_inline_sopra_il_vecchio_tetto_e_valido(self, bridge):
+        diags = DiagnosticProvider(bridge).get_diagnostics(_density_stream(
+            "    density: [[0, 10], [5, 9000]]\n"))
+        assert _bounds_errors(diags) == []
+
+
+@pytest.fixture
+def loop_bridge():
+    """I `loop_*` hanno `max_val=None` da sempre: il tetto vero e' la durata
+    del sample, passata dinamicamente dal motore."""
+    raw = {
+        'specs': [
+            make_raw_spec('density', 'density', default=None),
+            make_raw_spec('loop_start', 'pointer.loop_start', default=None),
+            make_raw_spec('loop_end', 'pointer.loop_end', default=None,
+                          exclusive_group='loop_bounds', group_priority=1),
+            make_raw_spec('loop_dur', 'pointer.loop_dur', default=None,
+                          exclusive_group='loop_bounds', group_priority=99),
+        ],
+        'bounds': {
+            'density': make_raw_bounds(0.01, None),
+            'loop_start': make_raw_bounds(0, None),
+            'loop_end': make_raw_bounds(0.0, None),
+            'loop_dur': make_raw_bounds(0.005, None),
+        },
+    }
+    return SchemaBridge(raw)
+
+
+class TestLoopRestanoAllaFase9:
+    """Accendere il pavimento senza tetto non deve toccare i `loop_*`.
+
+    I loro bounds del registro valgono DOPO che `loop_unit` li ha riscalati
+    (`_pre_normalize_loop_params`): il `0.005` di `loop_dur` e' in secondi.
+    Li misura la fase 9, che l'unita' la conosce. Il loro silenzio nei bound
+    generici prima lo dava per caso `max_val=None`; ora e' dichiarato.
+    """
+
+    def test_loop_dur_normalized_sotto_0_005_e_valido(self, loop_bridge):
+        diags = DiagnosticProvider(loop_bridge).get_diagnostics(_density_stream(
+            "    pointer:\n"
+            "      loop_unit: normalized\n"
+            "      loop_start: 0.1\n"
+            "      loop_dur: 0.003\n"))
+        assert [d for d in diags if d.severity == DiagnosticSeverity.Error] == []
+
+    def test_loop_dur_envelope_normalized_e_valido(self, loop_bridge):
+        diags = DiagnosticProvider(loop_bridge).get_diagnostics(_density_stream(
+            "    pointer:\n"
+            "      loop_unit: normalized\n"
+            "      loop_start: 0.1\n"
+            "      loop_dur:\n"
+            "        - [0.0, 0.003]\n"
+            "        - [10.0, 0.5]\n"))
+        assert _bounds_errors(diags) == []
+
+    def test_loop_start_negativo_un_errore_solo(self, loop_bridge):
+        """Quello della fase 9: il generico non ci aggiunge un doppione."""
+        diags = DiagnosticProvider(loop_bridge).get_diagnostics(_density_stream(
+            "    pointer:\n"
+            "      loop_start: -1\n"
+            "      loop_dur: 1.0\n"))
+        errs = [d for d in diags if d.severity == DiagnosticSeverity.Error
+                and d.range.start.line == 6]
+        assert len(errs) == 1
+        assert 'fuori range' not in errs[0].message
+
+
+class TestVoicesRawBoundsSenzaTetto:
+    """Il check scalare di `voices.num_voices`/`scatter` legge i raw bounds.
+
+    Con `max_val=None` confrontava `val > None`: un TypeError che
+    `get_diagnostics` inghiotte restituendo `[]`, cioe' TUTTA la diagnostica
+    del documento spenta, non solo quella riga.
+    """
+
+    @pytest.fixture
+    def voices_bridge(self):
+        raw = {
+            'specs': [make_raw_spec('density', 'density', default=None)],
+            'bounds': {
+                'density': make_raw_bounds(0.01, None),
+                'num_voices': make_raw_bounds(1, None),
+            },
+        }
+        return SchemaBridge(raw)
+
+    def test_pavimento_misurato_e_il_resto_sopravvive(self, voices_bridge):
+        diags = DiagnosticProvider(voices_bridge).get_diagnostics(_density_stream(
+            "    density: -5\n"
+            "    voices:\n"
+            "      num_voices: 0\n"))
+        linee = {d.range.start.line for d in diags
+                 if d.severity == DiagnosticSeverity.Error}
+        assert {5, 7} <= linee
+        voce = next(d for d in diags if d.range.start.line == 7)
+        assert '≥ 1' in voce.message and 'None' not in voce.message
+
+    def test_nessun_tetto_da_sforare(self, voices_bridge):
+        diags = DiagnosticProvider(voices_bridge).get_diagnostics(_density_stream(
+            "    voices:\n"
+            "      num_voices: 500\n"))
+        assert [d for d in diags if d.severity == DiagnosticSeverity.Error
+                and 'num_voices' in d.message] == []
