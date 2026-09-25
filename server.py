@@ -982,14 +982,16 @@ def _resolve_envelope_context(
         # il suo pavimento (PGE-ls #51).
         p = bridge.get_parameter_by_key(context.current_key)
         if p is not None:
-            y_min, y_max, _ = draw_bounds(p.yaml_path, p.min_val, p.max_val)
+            window = draw_bounds(p.yaml_path, p.min_val, p.max_val)
+            y_min, y_max = window.y_min, window.y_max
         else:
             raw = bridge.get_raw_bounds(context.current_key)
             if raw:
                 # Il path YAML, come lo passa la completion: `voices.scatter`.
                 path = '.'.join([*context.parent_path, context.current_key])
-                y_min, y_max, _ = draw_bounds(
+                window = draw_bounds(
                     path, raw.get('min_val'), raw.get('max_val'))
+                y_min, y_max = window.y_min, window.y_max
 
     stream_ctx = YamlAnalyzer.get_stream_context_at_line(text, line)
     if param_time_unit == 'normalized':

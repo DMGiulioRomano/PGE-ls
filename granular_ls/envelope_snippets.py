@@ -17,7 +17,9 @@ from lsprotocol.types import (
     MarkupKind,
 )
 
-from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
+from granular_ls.schema_bridge import (
+    SchemaBridge, ParameterInfo, unit_scaled_paths,
+)
 
 
 def _fmt(v: float) -> str:
@@ -451,7 +453,9 @@ DENSITY_NOTICE_THRESHOLD = 4000.0
 # averlo, e sceglierlo e' una decisione per parametro, non un default che
 # capita: `_DEFAULT_Y_MAX` avrebbe disegnato density fino a 1 grano al
 # secondo. La parita' pretende una voce per ogni parametro senza tetto del
-# motore.
+# motore. Per i `loop_*` il `None` del registro non e' un'assenza ma un tetto
+# dinamico (la durata del sample): la finestra resta dichiarata qui, e la doc
+# degli snippet non la spaccia per un dominio (`DrawBounds.unit_scaled`).
 _LOOP_DRAW_REASON = ("l'intero file con `loop_unit: normalized`; in secondi "
                      "il tetto vero e' la durata del sample")
 OPEN_CEILING_DRAW_MAX: Dict[str, Tuple[float, str]] = {
@@ -469,10 +473,17 @@ class DrawBounds(NamedTuple):
     `ceiling_note` e' None quando `y_max` e' il tetto vero del parametro (o il
     default di chi non ha bounds); altrimenti il parametro non ha tetto, e la
     nota dice perche' si disegna fin li'.
+
+    `unit_scaled` e' True per le posizioni che `loop_unit` riscala
+    (`schema_bridge.unit_scaled_paths`): i bounds del registro valgono dopo la
+    riscalatura, quindi la finestra non descrive il numero nello YAML e la doc
+    non la puo' dichiarare come suo dominio — lo stesso motivo per cui
+    `get_value_domain` non ne da' uno all'hover.
     """
     y_min: float
     y_max: float
     ceiling_note: Optional[str] = None
+    unit_scaled: bool = False
 
 
 def draw_bounds(yaml_path: str, min_val: Optional[float],
@@ -484,6 +495,15 @@ def draw_bounds(yaml_path: str, min_val: Optional[float],
     `(0, 1)` — density disegnata da 0, sotto il pavimento — mentre gli
     snippet tenevano il pavimento e prendevano `_DEFAULT_Y_MAX`.
     """
+    bounds = _draw_window(yaml_path, min_val, max_val)
+    if yaml_path in unit_scaled_paths():
+        return bounds._replace(unit_scaled=True)
+    return bounds
+
+
+def _draw_window(yaml_path: str, min_val: Optional[float],
+                 max_val: Optional[float]) -> DrawBounds:
+    """La finestra Y, senza chiedersi se il registro descrive il numero."""
     y_min = min_val if min_val is not None else _DEFAULT_Y_MIN
     if max_val is not None:
         return DrawBounds(y_min, max_val)
@@ -501,7 +521,18 @@ def draw_bounds(yaml_path: str, min_val: Optional[float],
 
 
 def _range_doc(bounds: DrawBounds) -> Optional[str]:
-    """«Range parametro» per uno snippet: None se `y_max` e' un tetto vero."""
+    """«Range parametro» per uno snippet: None se `y_max` e' un tetto vero.
+
+    Per le posizioni che `loop_unit` riscala non si dichiara un dominio: il
+    `≥ 0.005` di `loop_dur` e' in secondi, e un tetto c'e' (la durata del
+    sample) anche se il registro non lo porta. Si dice solo cosa si disegna.
+    """
+    if bounds.unit_scaled:
+        drawn = (f'dipende da `loop_unit` — lo snippet disegna '
+                 f'[{_fmt(bounds.y_min)}, {_fmt(bounds.y_max)}]')
+        if bounds.ceiling_note is None:
+            return drawn
+        return f'{drawn}, {bounds.ceiling_note}'
     if bounds.ceiling_note is None:
         return None
     return (f'≥ {_fmt(bounds.y_min)} — nessun tetto; lo snippet arriva a '

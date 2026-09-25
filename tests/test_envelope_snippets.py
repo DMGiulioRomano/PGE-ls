@@ -782,3 +782,70 @@ class TestDrawBounds:
         for path, (tetto, ragione) in OPEN_CEILING_DRAW_MAX.items():
             assert tetto > 0, path
             assert ragione.strip(), path
+
+
+class TestLoopSnippetDoc:
+    """La doc degli snippet delle posizioni che `loop_unit` riscala.
+
+    I bounds del registro per `pointer.loop_*` valgono DOPO la riscalatura
+    (`_pre_normalize_loop_params`): il `≥ 0.005` di `loop_dur` e' in secondi,
+    e `loop_dur: 0.003` sotto `normalized` su un file di 10 s e' valido. Per
+    questo `SchemaBridge.get_value_domain` non da' loro un dominio generico, e
+    l'hover non stampa un Range. La doc degli snippet non puo' dire il
+    contrario: niente «≥ 0.005», e niente «nessun tetto» — il tetto c'e', e'
+    la durata del sample, solo che il registro non lo porta.
+    """
+
+    @pytest.fixture
+    def loop_provider(self):
+        raw = {
+            'specs': [
+                make_raw_spec('loop_dur', 'pointer.loop_dur', default=None),
+                make_raw_spec('loop_start', 'pointer.loop_start', default=None),
+                make_raw_spec('pointer_start', 'pointer.start', default=0.0),
+            ],
+            'bounds': {
+                'loop_dur': make_raw_bounds(0.005, None),
+                'loop_start': make_raw_bounds(0, None),
+            },
+        }
+        return EnvelopeSnippetProvider(SchemaBridge(raw))
+
+    @staticmethod
+    def _range_lines(provider, path):
+        items = provider.get_snippets_for_parameter_with_context(path, 10.0)
+        return [
+            line.split('Range parametro: ', 1)[1]
+            for item in items
+            for line in item.documentation.value.split('\n')
+            if line.startswith('Range parametro: ')
+        ]
+
+    @pytest.mark.parametrize('path', [
+        'pointer.loop_dur', 'pointer.loop_start', 'pointer.start',
+    ])
+    def test_la_doc_rimanda_a_loop_unit(self, loop_provider, path):
+        righe = self._range_lines(loop_provider, path)
+        assert righe, path
+        for riga in righe:
+            assert 'nessun tetto' not in riga, riga
+            assert '≥' not in riga, riga
+            assert '`loop_unit`' in riga, riga
+
+    def test_la_finestra_di_disegno_resta(self, loop_provider):
+        """Cambia la doc, non lo snippet: `loop_dur` si disegna come prima."""
+        items = loop_provider.get_snippets_for_parameter_with_context(
+            'pointer.loop_dur', 10.0)
+        linear = next(i for i in items if '2 punti' in i.label)
+        assert '${2:0.005}' in linear.insert_text
+        assert '${4:1.0}' in linear.insert_text
+        assert 'lo snippet disegna [0.005, 1.0]' in linear.documentation.value
+
+    def test_draw_bounds_marca_solo_le_posizioni_riscalate(self):
+        """La marca viene da `unit_scaled_paths`, la stessa lettura del
+        bridge: density resta un dominio dichiarabile, i `loop_*` no."""
+        from granular_ls.envelope_snippets import draw_bounds
+        assert not draw_bounds('density', 0.01, None).unit_scaled
+        assert not draw_bounds('volume', -120.0, 12.0).unit_scaled
+        for key in ('start', 'loop_start', 'loop_end', 'loop_dur'):
+            assert draw_bounds('pointer.' + key, 0.0, None).unit_scaled, key
