@@ -21,6 +21,7 @@ Risoluzione del nome chiave:
     Se nessuna strategia trova il parametro, ritorna None.
 """
 
+import os
 import re
 from typing import Dict, Optional, Tuple
 
@@ -34,6 +35,28 @@ from granular_ls.envelope_shapes import (
 from granular_ls.read_direction import (
     DEVIATION_PROBABILITY_DOCS,
     READ_DIRECTION_DOC,
+)
+from granular_ls.loop_unit import (
+    INVALID_HINT as _LOOP_UNIT_INVALID_HINT,
+    LOOP_UNIT_SCOPE,
+    LOOP_UNITS,
+    MODE_ABSOLUTE,
+    MODE_INVALID,
+    MODE_NORMALIZED,
+    find_loop_unit,
+    loop_unit_mode,
+    stream_sample,
+)
+from granular_ls.range_unit import (
+    RELATIVE_ANCHOR_BANDS,
+    center_half_width,
+    find_key,
+    fmt_bound,
+    is_relative,
+    key_path,
+    range_unit_key_doc,
+    relative_anchor_doc,
+    stream_span,
 )
 from granular_ls.pitch_units import (
     PITCH_BLOCK_KEYS,
@@ -95,7 +118,12 @@ _STREAM_CONTEXT_DOCS = {
         "con `density` o `distribution` diverse gli stream si desincronizzano "
         "pur condividendo l'RNG."
     ),
-    'time_mode':           "Modalita tempo degli envelope: absolute (default) | normalized.",
+    'time_mode': (
+        "Modalita tempo degli envelope: absolute (default) | normalized.\n\n"
+        "Riguarda l'asse del tempo, non le posizioni nel sample del blocco "
+        "`pointer` (`start`, `loop_start`, `loop_end`, `loop_dur`): quelle "
+        "le governa `loop_unit`, che da PGE #222 non eredita piu' da qui."
+    ),
     'time_scale':          'Moltiplicatore globale dei tempi (default: 1.0).',
     'range_always_active': 'Se True, il range si applica anche senza deviation_probability (default: False).',
     'distribution_mode':   None,  # generata dinamicamente da get_distribution_modes()
@@ -134,25 +162,37 @@ _STREAM_CONTEXT_DOCS = {
         "> **Non accetta envelope.** E' un valore raw processato direttamente\n"
         "> dal PointerController prima del pipeline standard.\n\n"
         "Default: `0.0` (inizio del sample).\n\n"
-        "Se `loop_unit` o `time_mode` e' `normalized`, il valore e' in [0.0, 1.0]\n"
-        "e viene moltiplicato per la durata del sample sorgente."
+        "Con `loop_unit: normalized` il valore e' in [0.0, 1.0] e viene\n"
+        "moltiplicato per la durata del sample sorgente. L'unita' e' quella\n"
+        "di `loop_unit` e basta: `start` e' una posizione nel sample come\n"
+        "`loop_start`, anche senza nessun loop dichiarato."
     ),
     'loop_unit': (
-        "**Meta-parametro: unita di misura dei parametri loop.**\n\n"
-        "Controlla come vengono interpretati `loop_start`, `loop_end`, `loop_dur` e `start`.\n\n"
+        "**Meta-parametro: unita' delle posizioni nel sample.**\n\n"
+        "Controlla come vengono interpretati `start`, `loop_start`, `loop_end`\n"
+        "e `loop_dur`: sono tutte posizioni nel file, stesso dominio.\n\n"
         "Valori accettati:\n"
+        "- `seconds` (default): i valori sono in **secondi**.\n"
+        "- `absolute`: alias storico di `seconds`, stessa lettura.\n"
         "- `normalized`: i valori sono in \\[0.0, 1.0\\] e vengono scalati per la\n"
         "  durata del sample sorgente (`sample_dur_sec`). Comodo per definire\n"
-        "  loop indipendentemente dalla lunghezza del sample.\n"
-        "- `absolute` (o assente): i valori sono in **secondi assoluti**.\n\n"
-        "Se `loop_unit` non e' specificato, il sistema usa `time_mode` dello stream\n"
-        "come fallback.\n\n"
+        "  loop indipendentemente dalla lunghezza del sample.\n\n"
+        "**Non eredita da `time_mode`** (PGE #222): assente vale `seconds`,\n"
+        "qualunque sia il `time_mode` dello stream. Le due chiavi parlano di\n"
+        "assi diversi — `time_mode` del tempo degli envelope sulla `duration`\n"
+        "dello stream, `loop_unit` del valore delle posizioni sulla durata del\n"
+        "file — e possono coesistere.\n\n"
+        "Il vocabolario e' chiuso: un valore fuori dai tre (`normalised`,\n"
+        "`Normalized`, la chiave lasciata vuota) e' un\n"
+        "`InvalidFieldValueError` al render, non un silenzioso \"assoluto\".\n\n"
         "> **Non e' un parametro sintetizzabile.** Non accetta envelope o range.\n"
         "> E' un meta-parametro che modifica l'interpretazione degli altri."
     ),
     'duration_unit': (
         "**Meta-parametro: unita di misura della durata del grano.**\n\n"
-        "Controlla come vengono interpretati `grain.duration` e `grain.duration_range`.\n\n"
+        "Controlla come vengono interpretati `grain.duration` e `grain.duration_range`.\n"
+        "Il range solo se assoluto: con `duration_range_unit: relative` e' una\n"
+        "frazione della base e non ha unita' da convertire.\n\n"
         "Valori accettati:\n"
         "- `seconds` (default): i valori sono in **secondi**.\n"
         "- `samples`: i valori sono in **campioni** alla frequenza di output del\n"
@@ -172,8 +212,8 @@ _STREAM_CONTEXT_DOCS = {
     ),
 }
 
-# Parametri del blocco pointer che dipendono da loop_unit / time_mode
-_POINTER_UNIT_PARAMS = {'start', 'loop_start', 'loop_end', 'loop_dur'}
+# Parametri del blocco pointer che dipendono da loop_unit (e solo da lei)
+_POINTER_UNIT_PARAMS = frozenset(LOOP_UNIT_SCOPE)
 
 # Documentazione per le chiavi blocco di primo livello (pointer, pitch, grain, deviation_probability, voices)
 _BLOCK_KEY_DOCS = {
@@ -186,7 +226,8 @@ _BLOCK_KEY_DOCS = {
         "- `loop_start` — Inizio del loop\n"
         "- `loop_end` — Fine del loop *(esclusivo con `loop_dur`)*\n"
         "- `loop_dur` — Durata del loop — ha priorità su `loop_end`\n"
-        "- `loop_unit` — Unità dei parametri loop: `absolute` \\| `normalized`\n\n"
+        "- `loop_unit` — Unità delle posizioni nel sample (`start` e loop):\n"
+        "  `seconds` (default) \\| `absolute` \\| `normalized`\n\n"
         "> Tutti i parametri accettano envelope `[[t, v], ...]` tranne\n"
         "> `loop_unit` (meta-parametro) e `start` (valore raw).\n\n"
         "**Confinamento al loop.** Con un loop attivo la posizione di lettura\n"
@@ -207,6 +248,8 @@ _BLOCK_KEY_DOCS = {
         "- `duration` — Durata del grano (default: `0.05` s; min 1 campione)\n"
         "- `duration_unit` — Unità di `duration`/`duration_range`: `seconds` \\|\n"
         "  `samples` \\| `milliseconds`\n"
+        "- `duration_range_unit` — `duration_range` come quantità (`absolute`,\n"
+        "  default) o come frazione della base (`relative`)\n"
         "- `envelope` — Forma dell'inviluppo del grano (default: `hanning`)\n"
         "- `reverse` — Verso all'indietro, chiave vuota (nessun valore)\n"
         "- `read_direction` — Verso dichiarato: `-1` indietro, `+1` avanti,\n"
@@ -264,181 +307,91 @@ _BLOCK_KEY_DOCS = {
 def _get_effective_unit_mode(document_text: str,
                               cursor_line: int) -> Tuple[str, str]:
     """
-    Determina l'unita' di misura effettiva per i parametri del blocco pointer.
+    Determina l'unita' effettiva delle posizioni nel sample del blocco pointer.
 
-    Logica (speculare al motore):
-        loop_unit = params.get('loop_unit') or config.time_mode
+    Logica (speculare a `PointerController._pre_normalize_loop_params`, PGE
+    #222):
 
-    1. Cerca 'loop_unit' nel blocco pointer: dello stesso stream.
-    2. Se assente, cerca 'time_mode' nello stream padre.
-    3. Se nessuno dei due e' presente, default 'absolute'.
+    1. Cerca `loop_unit` nel blocco pointer: dello stesso stream.
+    2. Se assente, vale il default `seconds`. Nessun'altra chiave conta:
+       prima di #222 qui si ripiegava su `time_mode`, che il motore non
+       consulta piu'.
+    3. Se presente, il valore (letto via YAML) decide: `normalized`, le due
+       grafie dei secondi, oppure un valore fuori vocabolario — che il motore
+       rifiuta, e che quindi non e' un sinonimo di "assoluto".
+    4. Se il frammento non si legge (a meta' scrittura, o un alias YAML che
+       solo il documento intero risolve) la scala resta ignota come per un
+       valore fuori vocabolario, ma la fonte e' `unreadable`: non c'e' un
+       errore del motore da nominare, e la fase 17 infatti tace.
 
     Returns:
         (mode, source) dove:
-            mode   : 'normalized' | 'absolute'
-            source : 'loop_unit' | 'time_mode' | 'default'
+            mode   : 'normalized' | 'absolute' | 'invalid'
+            source : 'loop_unit' | 'default' | 'unreadable'
     """
     if not document_text:
-        return ('absolute', 'default')
-
-    lines = document_text.split('\n')
-
-    # --- Trova i confini dello stream corrente ---
-    stream_start = None
-    stream_end = len(lines)
-    for i in range(cursor_line, -1, -1):
-        raw = lines[i] if i < len(lines) else ''
-        stripped = raw.strip()
-        leading = len(raw) - len(raw.lstrip())
-        if (stripped.startswith('- ') or stripped == '-') and leading == 2:
-            stream_start = i
-            break
-    if stream_start is None:
-        return ('absolute', 'default')
-    for i in range(stream_start + 1, len(lines)):
-        raw = lines[i]
-        stripped = raw.strip()
-        leading = len(raw) - len(raw.lstrip())
-        if (stripped.startswith('- ') or stripped == '-') and leading == 2:
-            stream_end = i
-            break
-
-    # --- Cerca loop_unit dentro il blocco pointer: (a 6 spazi) ---
-    pointer_start = None
-    for i in range(stream_start, stream_end):
-        raw = lines[i]
-        stripped = raw.strip()
-        leading = len(raw) - len(raw.lstrip())
-        if leading == 4 and (stripped == 'pointer:' or stripped.startswith('pointer:')):
-            pointer_start = i
-            break
-
-    if pointer_start is not None:
-        pointer_end = stream_end
-        for i in range(pointer_start + 1, stream_end):
-            raw = lines[i]
-            if not raw.strip():
-                continue
-            if (len(raw) - len(raw.lstrip())) <= 4:
-                pointer_end = i
-                break
-        for i in range(pointer_start + 1, pointer_end):
-            raw = lines[i]
-            stripped = raw.strip()
-            if len(raw) - len(raw.lstrip()) != 6:
-                continue
-            m = re.match(r'^loop_unit\s*:\s*(.+)', stripped)
-            if m:
-                val = m.group(1).strip().strip('"\'')
-                mode = 'normalized' if val == 'normalized' else 'absolute'
-                return (mode, 'loop_unit')
-
-    # --- Fallback: cerca time_mode nello stream ---
-    for i in range(stream_start, stream_end):
-        raw = lines[i]
-        stripped = raw.strip()
-        if stripped.startswith('- '):
-            stripped = stripped[2:].strip()
-        leading = len(raw) - len(raw.lstrip())
-        if leading > 4:
-            continue
-        m = re.match(r'^time_mode\s*:\s*(.+)', stripped)
-        if m:
-            val = m.group(1).strip().strip('"\'')
-            mode = 'normalized' if val == 'normalized' else 'absolute'
-            return (mode, 'time_mode')
-
-    return ('absolute', 'default')
+        return (MODE_ABSOLUTE, 'default')
+    decl = find_loop_unit(document_text.split('\n'), cursor_line)
+    if decl is None:
+        return (MODE_ABSOLUTE, 'default')
+    if not decl.readable:
+        return (MODE_INVALID, 'unreadable')
+    return (loop_unit_mode(decl.value), 'loop_unit')
 
 
-def _get_stream_duration(document_text: str, cursor_line: int) -> Optional[float]:
+def _unit_mode_note(mode: str, source: str,
+                    sample_duration: Optional[float] = None) -> str:
+    """Costruisce la nota Markdown sull'unita' effettiva da appendere all'hover.
+
+    Il limite dinamico e' la durata del **file** in `sample`, non la
+    `duration` dello stream: le posizioni vivono nel sample. La `duration`
+    dello stream e' il riferimento di `time_mode`, cioe' dell'altro asse — ed
+    e' esattamente la confusione fra i due che PGE #222 ha tolto al motore.
+    Senza un file leggibile il limite non si dice.
     """
-    Estrae il valore di 'duration' dello stream corrente dal documento.
-
-    Usa la stessa logica di boundary detection di _get_effective_unit_mode.
-    Restituisce None se 'duration' non e' presente o non e' un numero valido.
-    """
-    if not document_text:
-        return None
-
-    lines = document_text.split('\n')
-
-    # Trova i confini dello stream corrente
-    stream_start = None
-    stream_end = len(lines)
-    for i in range(cursor_line, -1, -1):
-        raw = lines[i] if i < len(lines) else ''
-        stripped = raw.strip()
-        leading = len(raw) - len(raw.lstrip())
-        if (stripped.startswith('- ') or stripped == '-') and leading == 2:
-            stream_start = i
-            break
-    if stream_start is None:
-        return None
-    for i in range(stream_start + 1, len(lines)):
-        raw = lines[i]
-        stripped = raw.strip()
-        leading = len(raw) - len(raw.lstrip())
-        if (stripped.startswith('- ') or stripped == '-') and leading == 2:
-            stream_end = i
-            break
-
-    # Cerca 'duration' a indentazione 4 (o inline dopo '- ')
-    for i in range(stream_start, stream_end):
-        raw = lines[i]
-        stripped = raw.strip()
-        if stripped.startswith('- '):
-            stripped = stripped[2:].strip()
-        leading = len(raw) - len(raw.lstrip())
-        if leading > 4:
-            continue
-        m = re.match(r'^duration\s*:\s*([0-9]*\.?[0-9]+)', stripped)
-        if m:
-            try:
-                return float(m.group(1))
-            except ValueError:
-                return None
-
-    return None
-
-
-def _unit_mode_note(mode: str, source: str, duration: Optional[float] = None) -> str:
-    """Costruisce la nota Markdown sull'unita' effettiva da appendere all'hover."""
-    if mode == 'normalized':
-        source_label = {
-            'loop_unit': '`loop_unit: normalized`',
-            'time_mode': '`time_mode: normalized` (fallback)',
-        }.get(source, 'modalita\' normalized')
+    if mode == MODE_INVALID and source == 'unreadable':
+        return (
+            '\n\n---\n'
+            '**Unità effettiva: non determinabile** — il valore di '
+            '`loop_unit` non si legge da solo come YAML.'
+        )
+    if mode == MODE_INVALID:
+        return (
+            '\n\n---\n'
+            '**Unità effettiva: nessuna** — `loop_unit` fuori vocabolario '
+            f'({" | ".join(f"`{u}`" for u in LOOP_UNITS)})\n\n'
+            f'> {_LOOP_UNIT_INVALID_HINT[0].upper()}{_LOOP_UNIT_INVALID_HINT[1:]}.'
+        )
+    if mode == MODE_NORMALIZED:
         note = (
             '\n\n---\n'
-            f'**Unità effettiva: `normalized`** — da {source_label}\n\n'
+            '**Unità effettiva: `normalized`** — da `loop_unit: normalized`\n\n'
             '> Il valore è in \\[0.0, 1.0\\] e viene scalato per la durata '
             'del sample sorgente (`sample_dur_sec`).'
         )
-        if duration is not None:
+        if sample_duration is not None:
             note += (
                 f'\n\n**Limite dinamico:** `[0.0, 1.0]` '
-                f'→ `[0.0 s, {duration} s]` '
-                f'(da `duration: {duration}` dello stream)'
+                f'→ `[0.0 s, {sample_duration:.3f} s]` (durata di `sample`)'
             )
         return note
-    else:
-        source_label = {
-            'loop_unit': '`loop_unit: absolute`',
-            'time_mode': '`time_mode: absolute`',
-            'default':   'default (nessun `loop_unit` o `time_mode` specificato)',
-        }.get(source, 'modalita\' absolute')
-        note = (
-            '\n\n---\n'
-            f'**Unità effettiva: `absolute`** — {source_label}\n\n'
-            '> Il valore è in **secondi assoluti**.'
+    source_label = {
+        'loop_unit': 'da `loop_unit` (`seconds` e `absolute` sono la '
+                     'stessa lettura)',
+        'default':   'default: `loop_unit` assente vale `seconds`, '
+                     'qualunque sia il `time_mode` dello stream',
+    }.get(source, 'secondi')
+    note = (
+        '\n\n---\n'
+        f'**Unità effettiva: `seconds`** — {source_label}\n\n'
+        '> Il valore è in **secondi assoluti**.'
+    )
+    if sample_duration is not None:
+        note += (
+            f'\n\n**Limite dinamico:** `[0.0 s, {sample_duration:.3f} s]` '
+            f'(durata di `sample`)'
         )
-        if duration is not None:
-            note += (
-                f'\n\n**Limite dinamico:** `[0.0 s, {duration} s]` '
-                f'(da `duration: {duration}` dello stream)'
-            )
-        return note
+    return note
 
 
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
@@ -467,8 +420,12 @@ class HoverProvider:
         # ritorna Hover oppure None
     """
 
-    def __init__(self, bridge: SchemaBridge):
+    def __init__(self, bridge: SchemaBridge, refs_dir: str = ''):
         self._bridge = bridge
+        # Path assoluto a refs/ del progetto PGE, lo stesso che riceve il
+        # DiagnosticProvider: serve a dire nella nota d'unita' del pointer
+        # la durata del file, che e' il limite vero delle posizioni.
+        self._refs_dir = refs_dir
 
         # Indice yaml_path -> ParameterInfo per lookup O(1), costruito una
         # volta in __init__ (stesso pattern del DiagnosticProvider).
@@ -562,6 +519,20 @@ class HoverProvider:
                 context.current_text, document_text, context.cursor_line
             )
 
+        # Chiave `<param>_range_unit` (PGE #267): la doc la costruisce il
+        # legame che il bridge legge dallo schema, al path e solo li'.
+        path = key_path(context.parent_path or [], context.current_text)
+        for binding in self._bridge.get_range_unit_bindings():
+            if binding.unit_path == path:
+                return Hover(contents=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=range_unit_key_doc(
+                        binding.unit_path, binding.range.yaml_path,
+                        binding.base.yaml_path,
+                        self._bridge.get_range_units(),
+                        self._bridge.get_relative_range_bounds()),
+                ))
+
         # Usa la parola COMPLETA alla posizione cursore, non solo il prefisso.
         # Necessario perche' YamlAnalyzer taglia a line_up_to_cursor,
         # quindi se il cursore e' a meta' di 'density' current_text='den'.
@@ -583,6 +554,8 @@ class HoverProvider:
             if is_pointer_param:
                 hover = self._append_unit_note(hover, document_text,
                                                context.cursor_line)
+            hover = self._append_range_unit_note(hover, param, document_text,
+                                                 context.cursor_line)
             return hover
 
         # Prova come stream context key
@@ -647,6 +620,14 @@ class HoverProvider:
         doc = _STREAM_CONTEXT_DOCS.get(key_name)
         if doc is None:
             return None
+
+        # La banda e il tetto scritti sopra valgono per il range assoluto: con
+        # una chiave `<param>_range_unit: relative` (PGE #267) cambiano formula.
+        if key_name == 'range_anchor':
+            nota = relative_anchor_doc([
+                b.unit_path for b in self._bridge.get_range_unit_bindings()])
+            if nota:
+                doc = f'{doc}\n\n{nota}'
 
         full_text = f'**{key_name}**\n\n{doc}'
         return Hover(
@@ -1014,8 +995,8 @@ class HoverProvider:
                           cursor_line: int) -> Hover:
         """Aggiunge la nota sull'unità effettiva a un Hover esistente."""
         mode, source = _get_effective_unit_mode(document_text, cursor_line)
-        duration = _get_stream_duration(document_text, cursor_line)
-        note = _unit_mode_note(mode, source, duration)
+        note = _unit_mode_note(
+            mode, source, self._sample_duration(document_text, cursor_line))
         old_value = hover.contents.value if hover.contents else ''
         return Hover(
             contents=MarkupContent(
@@ -1023,6 +1004,96 @@ class HoverProvider:
                 value=old_value + note,
             )
         )
+
+    def _sample_duration(self, document_text: str,
+                         cursor_line: int) -> Optional[float]:
+        """La durata del file in `sample`, se refs/ e il file sono leggibili.
+
+        Stessa lettura della fase 9 della diagnostica (`stream_sample`),
+        perche' hover e bounds devono dire lo stesso limite sulla stessa riga.
+        """
+        if not self._refs_dir or not document_text:
+            return None
+        sample = stream_sample(document_text.split('\n'), cursor_line)
+        if not sample:
+            return None
+        from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+        return DiagnosticProvider._read_wav_duration(
+            os.path.join(self._refs_dir, sample))
+
+    # Come si chiamano i valori di `grain.duration`, per unita': un range
+    # assoluto e' nella stessa unita' della sua base.
+    _GRAIN_DURATION_UNIT_WORDS = {
+        'seconds': 'secondi', 'milliseconds': 'millisecondi',
+        'samples': 'campioni',
+    }
+
+    def _append_range_unit_note(self, hover: Hover, param: ParameterInfo,
+                                document_text: str, cursor_line: int) -> Hover:
+        """La lettura del `_range` in vigore, se `param` ne ha una (PGE #267).
+
+        Lo stesso numero dice due cose diverse a seconda della chiave sorella:
+        una quantita' nell'unita' della base, o una frazione della base. La
+        nota dice quale, leggendo la chiave `<param>_range_unit` dello stream
+        sotto il cursore come la legge il motore — assente e' il default, una
+        grafia fuori vocabolario non e' un sinonimo di niente.
+        """
+        binding = next((b for b in self._bridge.get_range_unit_bindings()
+                        if b.range.yaml_path == param.yaml_path), None)
+        if binding is None:
+            return hover
+
+        units = self._bridge.get_range_units()
+        lines = document_text.split('\n') if document_text else []
+        span = stream_span(lines, cursor_line) if lines else None
+        decl = find_key(lines, *span, binding.unit_path) if span else None
+        base = binding.base.yaml_path
+
+        if decl is not None and not decl.readable:
+            note = (f'**Unità del range: non determinabile** — il valore di '
+                    f'`{binding.unit_path}` non si legge da solo come YAML.')
+        elif decl is not None and decl.value not in units:
+            note = (f'**Unità del range: nessuna** — `{binding.unit_path}` '
+                    f'fuori vocabolario ({" | ".join(f"`{u}`" for u in units)})'
+                    f'\n\n> Il motore rifiuta il render '
+                    f'(`InvalidFieldValueError`).')
+        elif decl is not None and is_relative(decl.value):
+            bounds = self._bridge.get_relative_range_bounds()
+            lo, hi = (fmt_bound(v) for v in bounds)
+            note = (
+                f'**Unità del range: `{decl.value}`** — da '
+                f'`{binding.unit_path}`\n\n'
+                f'> Il valore è una **frazione di `{base}`** in '
+                f'\\[{lo}, {hi}\\], letta istante per istante: l\'unità della '
+                'base non la scala.\n\n'
+                'Con frazione `r`: `range_anchor: center` → '
+                f'`{RELATIVE_ANCHOR_BANDS["center"]}` '
+                f'({center_half_width(bounds)} al massimo), '
+                f'`min` → `{RELATIVE_ANCHOR_BANDS["min"]}`.'
+            )
+        else:
+            fonte = (f'da `{binding.unit_path}`' if decl is not None
+                     else f'default: `{binding.unit_path}` assente')
+            spelling = decl.value if decl is not None else units[0]
+            unita = f'di `{base}`'
+            if base == 'grain.duration' and span:
+                # Letta via YAML, la grafia puo' essere una lista o un dict:
+                # non e' un'unita' (la rifiuta la fase 11), e come chiave di
+                # dizionario solleverebbe TypeError portandosi via l'hover.
+                d_unit = find_key(lines, *span, 'grain.duration_unit')
+                grafia = d_unit.value if d_unit is not None else 'seconds'
+                parola = (self._GRAIN_DURATION_UNIT_WORDS.get(grafia)
+                          if isinstance(grafia, str) else None)
+                if parola:
+                    unita = f'di `{base}`, in {parola}'
+            note = (f'**Unità del range: `{spelling}`** — {fonte}\n\n'
+                    f'> Il valore è una quantità nell\'unità {unita}.')
+
+        old_value = hover.contents.value if hover.contents else ''
+        return Hover(contents=MarkupContent(
+            kind=MarkupKind.Markdown,
+            value=old_value + '\n\n---\n' + note,
+        ))
 
     def _build_hover(self, param: ParameterInfo) -> Hover:
         """

@@ -74,7 +74,7 @@ streams:
     pointer:
       loop_start: 0.2
       loop_end: 0.8
-      loop_unit: normalized
+      loop_unit: normalized   # posizioni come frazione del sample (default: seconds)
       start: 0.0
     grain:
       duration: 0.05
