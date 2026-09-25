@@ -394,7 +394,7 @@ def _unit_mode_note(mode: str, source: str,
     return note
 
 
-from granular_ls.schema_bridge import SchemaBridge, ParameterInfo
+from granular_ls.schema_bridge import SchemaBridge, ParameterInfo, domain_label
 from granular_ls.yaml_analyzer import YamlContext
 from granular_ls.voice_strategies import (
     VOICE_DIMENSIONS,
@@ -939,9 +939,11 @@ class HoverProvider:
                 meta += ' · richiesto'
             if kwarg_spec.enum_values:
                 meta += ' · valori: ' + ', '.join(f'`{v}`' for v in kwarg_spec.enum_values)
-            elif kwarg_spec.min_val is not None or kwarg_spec.max_val is not None:
-                bounds = f'[{kwarg_spec.min_val}, {kwarg_spec.max_val}]'
-                meta += f' · range: `{bounds}`'
+            else:
+                # `pitch_range` ha il solo minimo: era `[0.0, None]`.
+                bounds = domain_label(kwarg_spec.min_val, kwarg_spec.max_val)
+                if bounds is not None:
+                    meta += f' · range: `{bounds}`'
             kwargs_lines.append(f'- **`{kwarg_name}`** ({meta}) — {kwarg_spec.description}')
         header = f'**{strategy_name}** (strategy `{dim}`)\n\n{spec.description}'
         if kwargs_lines:

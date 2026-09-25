@@ -396,6 +396,89 @@ def test_il_lettore_ast_vede_l_assegnazione_annotata(tmp_path, monkeypatch):
     assert _literal_from_engine_source('m.py', 'SOLO_TIPO') is None
 
 
+def _density_controller_literal(name: str):
+    """Un letterale di `controllers/density_controller.py`, via AST.
+
+    Il modulo importa lo schema e l'orchestratore, cioe' numpy: stessa
+    ragione di `_pointer_controller_literal`.
+    """
+    for relpath in ('pge/controllers/density_controller.py',
+                    'controllers/density_controller.py'):
+        value = _literal_from_engine_source(relpath, name)
+        if value is not None:
+            return value
+    return None
+
+
+# =============================================================================
+# Parametri senza tetto (PGE #272, PGE-ls #51)
+# =============================================================================
+
+def test_density_notice_threshold_match(pge):
+    """Il tetto di DISEGNO di density e' la soglia d'avviso del motore.
+
+    Non e' un bound — nessuna diagnostica lo legge — ma e' dichiarato come
+    «il punto oltre cui il motore scrive sul clip log», e questo lo resta
+    solo finche' i due numeri coincidono.
+    """
+    from granular_ls.envelope_snippets import DENSITY_NOTICE_THRESHOLD
+    engine = _density_controller_literal('DENSITY_NOTICE_THRESHOLD')
+    if engine is None:
+        pytest.skip("engine precede DENSITY_NOTICE_THRESHOLD (PGE #272)")
+    assert DENSITY_NOTICE_THRESHOLD == engine
+
+
+def test_ogni_parametro_senza_tetto_ha_un_tetto_di_disegno(pge):
+    """Il giorno che un altro parametro perde il tetto, lo si deve decidere.
+
+    Senza una voce in `OPEN_CEILING_DRAW_MAX` snippet e GUI ripiegano su un
+    tetto di comodo generico: e' quello che #51 chiama «`_DEFAULT_Y_MAX` per
+    caso». Qui il caso diventa un test rosso che nomina il parametro.
+
+    Nel verso opposto basta che ogni voce nomini un parametro che esiste:
+    una voce su un parametro che il tetto ce l'ha non viene mai letta.
+    """
+    from granular_ls.envelope_snippets import OPEN_CEILING_DRAW_MAX
+    from granular_ls.schema_bridge import SchemaBridge
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    senza_tetto = {
+        p.yaml_path for p in bridge.get_completion_parameters()
+        if p.min_val is not None and p.max_val is None
+    }
+    assert senza_tetto - set(OPEN_CEILING_DRAW_MAX) == set()
+    esistenti = {p.yaml_path for p in bridge.get_all_parameters()}
+    assert set(OPEN_CEILING_DRAW_MAX) - esistenti == set()
+
+
+def test_density_senza_tetto_dal_vivo(pge):
+    """Il pavimento di density resta misurato sul registro vero."""
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+    from granular_ls.schema_bridge import SchemaBridge
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    density = bridge.get_parameter('density')
+    if density.max_val is not None:
+        pytest.skip("engine precede PGE #272: density ha ancora un tetto")
+    assert density.min_val is not None
+
+    provider = DiagnosticProvider(bridge)
+
+    def errori(valore):
+        doc = ("streams:\n"
+               "  - stream_id: s1\n"
+               "    onset: 0.0\n"
+               "    duration: 10.0\n"
+               "    sample: f.wav\n"
+               f"    density: {valore}\n")
+        return [d for d in provider.get_diagnostics(doc)
+                if d.range.start.line == 5 and d.severity == 1]
+
+    assert len(errori(0)) == 1
+    assert len(errori(-5)) == 1
+    assert errori(density.min_val) == []
+    assert errori(50000) == []
+    assert f'Range: ≥ {density.min_val}' in bridge.get_documentation(density)
+
+
 def test_loop_units_match(pge):
     """Il vocabolario di `pointer.loop_unit` (PGE #222) e' ricopiato a mano.
 
