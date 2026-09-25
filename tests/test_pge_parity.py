@@ -991,6 +991,210 @@ def test_band_ceiling_mirror_matches_engine(pge, base, mod_range, tmp_path,
 
 
 # =============================================================================
+# La banda relativa: `grain.duration_range_unit` (PGE #267, issue #50)
+# =============================================================================
+#
+# La stessa domanda al motore e al language server: questo blocco grain rende
+# o no? Il motore risponde con la sua catena vera, nell'ordine in cui la
+# percorre — `Generator._eval_math_expressions` sulle stringhe,
+# `Stream._pre_normalize_grain_params` sull'unita' della durata (che lascia
+# fuori il range relativo), `ParameterOrchestrator._range_unit_from_spec` sul
+# vocabolario e sul range mancante, `GranularParser.parse_parameter` sui bound
+# e sul tetto della banda. Nessuno di questi pezzi importa numpy, e
+# `stream.py` — che invece lo importa — non si importa: il metodo si estrae
+# dal sorgente come `_eval_math_expressions`.
+#
+# Il confronto e' accetta/rifiuta, sull'intero blocco: i messaggi sono scritti
+# per due superfici diverse.
+
+GRAIN_RANGE_UNIT_CORPUS = [
+    # (id, righe del blocco grain, range_anchor)
+    ('assoluto', "duration: 0.05\nduration_range: 0.5", 'center'),
+    ('assoluto-fuori', "duration: 0.05\nduration_range: 1.5", 'center'),
+    ('relativo', "duration: 0.05\nduration_range: 0.5\n"
+                 "duration_range_unit: relative", 'center'),
+    ('relativo-fuori', "duration: 0.05\nduration_range: 1.5\n"
+                       "duration_range_unit: relative", 'center'),
+    ('relativo-stringa', 'duration: 0.05\nduration_range: "1.5"\n'
+                         'duration_range_unit: relative', 'center'),
+    ('relativo-envelope', "duration: 0.05\n"
+                          "duration_range: [[0, 0.2], [10, 0.8]]\n"
+                          "duration_range_unit: relative", 'center'),
+    ('relativo-envelope-fuori', "duration: 0.05\n"
+                                "duration_range: [[0, 0.2], [10, 1.5]]\n"
+                                "duration_range_unit: relative", 'center'),
+    ('assoluto-esplicito', "duration: 0.05\nduration_range: 0.5\n"
+                           "duration_range_unit: absolute", 'center'),
+    # Il vocabolario, la chiave vuota e il range mancante.
+    ('grafia-sconosciuta', "duration: 0.05\nduration_range: 0.5\n"
+                           "duration_range_unit: relativo", 'center'),
+    ('grafia-maiuscola', "duration: 0.05\nduration_range: 0.5\n"
+                         "duration_range_unit: Relative", 'center'),
+    ('grafia-null', "duration: 0.05\nduration_range: 0.5\n"
+                    "duration_range_unit: null", 'center'),
+    ('grafia-vuota', "duration: 0.05\nduration_range: 0.5\n"
+                     "duration_range_unit:", 'center'),
+    ('relativo-senza-range', "duration: 0.05\n"
+                             "duration_range_unit: relative", 'center'),
+    ('relativo-range-null', "duration: 0.05\nduration_range: null\n"
+                            "duration_range_unit: relative", 'center'),
+    ('assoluto-senza-range', "duration: 0.05\n"
+                             "duration_range_unit: absolute", 'center'),
+    # L'unita' della durata: scala il range assoluto, non la frazione.
+    ('ms-relativo', "duration_unit: milliseconds\nduration: 50\n"
+                    "duration_range: 0.5\nduration_range_unit: relative",
+     'center'),
+    ('ms-relativo-cinque', "duration_unit: milliseconds\nduration: 50\n"
+                           "duration_range: 5\nduration_range_unit: relative",
+     'center'),
+    ('ms-assoluto-cinque', "duration_unit: milliseconds\nduration: 50\n"
+                           "duration_range: 5", 'center'),
+    ('ms-assoluto-fuori', "duration_unit: milliseconds\nduration: 50\n"
+                          "duration_range: 1500", 'center'),
+    ('campioni-relativo', "duration_unit: samples\nduration: 2400\n"
+                          "duration_range: 0.9\nduration_range_unit: relative",
+     'center'),
+    ('campioni-relativo-fuori', "duration_unit: samples\nduration: 2400\n"
+                                "duration_range: 2400\n"
+                                "duration_range_unit: relative", 'center'),
+    # Il tetto della banda sotto `min`: base + range * |base|.
+    ('tetto-relativo', "duration: 8\nduration_range: 0.5\n"
+                       "duration_range_unit: relative", 'min'),
+    ('tetto-assoluto', "duration: 8\nduration_range: 0.5", 'min'),
+    ('tetto-relativo-dentro', "duration: 6\nduration_range: 0.5\n"
+                              "duration_range_unit: relative", 'min'),
+    ('tetto-relativo-ms', "duration_unit: milliseconds\nduration: 8000\n"
+                          "duration_range: 0.5\nduration_range_unit: relative",
+     'min'),
+    ('tetto-relativo-base-envelope', "duration: [[0, 1], [10, 8]]\n"
+                                     "duration_range: 0.5\n"
+                                     "duration_range_unit: relative", 'min'),
+    ('tetto-relativo-range-envelope', "duration: 8\n"
+                                      "duration_range: [[0, 0.1], [10, 0.5]]\n"
+                                      "duration_range_unit: relative", 'min'),
+    ('tetto-relativo-base-default', "duration_range: 0.5\n"
+                                    "duration_range_unit: relative", 'min'),
+    ('tetto-relativo-center', "duration: 8\nduration_range: 0.5\n"
+                              "duration_range_unit: relative", 'center'),
+]
+
+
+def _load_pre_normalize_grain_params():
+    """`Stream._pre_normalize_grain_params`, il metodo vero, senza stream.py.
+
+    `core/stream.py` importa numpy e soundfile; il metodo no. Si estrae dal
+    sorgente e si esegue con i nomi che usa, presi dai moduli del motore che
+    li definiscono (quelli si importano senza numpy) o, per i letterali di
+    `stream.py`, riletti via AST.
+    """
+    import ast
+    from granular_ls.schema_bridge import _import_pge_module
+
+    relpath = next((r for r in ('pge/core/stream.py', 'core/stream.py')
+                    if (Path(PGE_SRC) / r).exists()), None)
+    if relpath is None:
+        pytest.skip("core/stream.py non trovato in questo checkout")
+    sorgente = Path(PGE_SRC) / relpath
+    tree = ast.parse(sorgente.read_text(encoding='utf-8'))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)
+               and n.name == '_pre_normalize_grain_params'), None)
+    if fn is None:
+        pytest.skip("engine senza _pre_normalize_grain_params")
+
+    defs = _range_unit_definitions()
+    exc = _import_pge_module('shared.exceptions')
+    namespace = {
+        'GRAIN_DURATION_UNITS': _literal_from_engine_source(
+            relpath, 'GRAIN_DURATION_UNITS'),
+        '_GRAIN_DURATION_UNIT_LABELS': _literal_from_engine_source(
+            relpath, '_GRAIN_DURATION_UNIT_LABELS'),
+        'InvalidFieldValueError': exc.InvalidFieldValueError,
+        'MissingFieldError': exc.MissingFieldError,
+        'SECONDS_PER_MILLISECOND': _import_pge_module(
+            'shared.constants').SECONDS_PER_MILLISECOND,
+        'range_unit_is_relative': defs.range_unit_is_relative,
+        'scale_raw_param_values': _import_pge_module(
+            'envelopes.envelope').scale_raw_param_values,
+    }
+    modulo = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(modulo)
+    exec(compile(modulo, str(sorgente), 'exec'), namespace)
+    grezza = namespace['_pre_normalize_grain_params']
+
+    class _Stream:
+        stream_id = 's1'
+
+    return lambda params: grezza(_Stream(), params, 48000)
+
+
+def _engine_rejects_grain(stream: dict, anchor: str) -> bool:
+    """La catena del motore su `grain_duration`, dal Generator al parser."""
+    from types import SimpleNamespace
+    from granular_ls.schema_bridge import _import_pge_module
+
+    evaluate, _ = _load_eval_math_expressions()
+    pre_normalize = _load_pre_normalize_grain_params()
+    exc = _import_pge_module('shared.exceptions')
+    schema = _import_pge_module('parameters.parameter_schema')
+    orchestrator = _import_pge_module(
+        'parameters.parameter_orchestrator').ParameterOrchestrator
+    GranularParser = _import_pge_module('parameters.parser').GranularParser
+    spec = next(s for specs in schema.ALL_SCHEMAS.values() for s in specs
+                if s.name == 'grain_duration')
+
+    context = SimpleNamespace(sample_dur_sec=10.0, output_sr=48000,
+                              stream_id='s1', rng_id='r1', duration=10.0)
+    config = SimpleNamespace(context=context, time_mode='absolute',
+                             distribution_mode='uniform', range_anchor=anchor,
+                             duration=10.0, seed=None)
+    try:
+        params = pre_normalize(evaluate(stream))
+        value = schema.resolve_yaml_path(params, spec.yaml_path, spec.default)
+        range_val = schema.resolve_yaml_path(params, spec.range_path, None)
+        unit = orchestrator._range_unit_from_spec(
+            SimpleNamespace(_config=config), spec, params, range_val)
+        GranularParser(config).parse_parameter(
+            spec.name, value, range_val, range_unit=unit)
+    except exc.ConfigError:
+        return True
+    return False
+
+
+@pytest.mark.parametrize('caso,righe,anchor', GRAIN_RANGE_UNIT_CORPUS,
+                         ids=[c[0] for c in GRAIN_RANGE_UNIT_CORPUS])
+def test_range_unit_mirror_matches_engine(pge, caso, righe, anchor, tmp_path,
+                                         monkeypatch):
+    import yaml as pyyaml
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+    from granular_ls.schema_bridge import SchemaBridge
+    from lsprotocol.types import DiagnosticSeverity
+
+    # Il logger del motore apre un file relativo alla cwd al primo parse.
+    monkeypatch.chdir(tmp_path)
+
+    grain = ''.join(f"      {r}\n" for r in righe.split('\n'))
+    testo = ("streams:\n  - stream_id: s1\n    onset: 0.0\n"
+             "    duration: 10.0\n    sample: f.wav\n"
+             f"    range_anchor: {anchor}\n    grain:\n" + grain)
+
+    motore_rifiuta = _engine_rejects_grain(
+        pyyaml.safe_load(testo)['streams'][0], anchor)
+
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    ls_rifiuta = any(
+        d.severity == DiagnosticSeverity.Error
+        for d in DiagnosticProvider(bridge).get_diagnostics(testo)
+    )
+
+    assert ls_rifiuta == motore_rifiuta, (
+        f"Drift su {caso}: motore "
+        f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
+        f"LS {'rifiuta' if ls_rifiuta else 'accetta'}"
+    )
+
+
+# =============================================================================
 # Le stringhe che il Generator trasforma: la pipeline reale, non il solo gate
 # =============================================================================
 #
