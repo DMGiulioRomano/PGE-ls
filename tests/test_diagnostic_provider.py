@@ -2164,19 +2164,68 @@ class TestLoopEndLeLoopStart:
                   and 'loop_end' in d.message]
         assert len(errors) == 0
 
-    def test_loop_dur_presente_nessun_errore_degenere(self, bridge):
-        # loop_dur ha priorita': loop_end viene ignorato dal motore.
-        provider = DiagnosticProvider(bridge)
+    @staticmethod
+    def _degeneri(provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and 'degenere' in d.message]
+
+    def test_loop_dur_accanto_a_loop_end_non_spegne_il_controllo(
+            self, loop_bridge):
+        """#55: scritti insieme, il gruppo esclusivo `loop_bounds` tiene
+        `loop_end` (group_priority=1) e scarta `loop_dur`. Il motore valida
+        quindi la finestra e rifiuta lo stream: l'Error deve restare."""
         yaml = self._stream(
             "      loop_start: 2.0\n"
             "      loop_end: 1.0\n"
             "      loop_dur: 3.0\n"
         )
-        result = provider.get_diagnostics(yaml)
-        errors = [d for d in result
-                  if d.severity == DiagnosticSeverity.Error
-                  and 'degenere' in d.message]
-        assert len(errors) == 0
+        errori = self._degeneri(DiagnosticProvider(loop_bridge), yaml)
+        assert len(errori) == 1
+        assert errori[0].range.start.line == 6
+
+    def test_loop_dur_accanto_a_loop_end_finestra_valida(self, loop_bridge):
+        yaml = self._stream(
+            "      loop_start: 1.0\n"
+            "      loop_end: 2.0\n"
+            "      loop_dur: 3.0\n"
+        )
+        assert self._degeneri(DiagnosticProvider(loop_bridge), yaml) == []
+
+    def test_se_vincesse_loop_dur_il_controllo_tacerebbe(self):
+        """Chi vince non e' scritto nella fase 10: lo dice il bridge, come
+        per `_check_exclusive_groups`. Con le priorita' invertite il motore
+        costruirebbe `loop_dur` e non validerebbe l'ordine."""
+        invertito = SchemaBridge({
+            'specs': [
+                make_raw_spec('loop_start', 'pointer.loop_start', default=None),
+                make_raw_spec('loop_end', 'pointer.loop_end', default=None,
+                              exclusive_group='loop_bounds', group_priority=99),
+                make_raw_spec('loop_dur', 'pointer.loop_dur', default=None,
+                              exclusive_group='loop_bounds', group_priority=1),
+            ],
+            'bounds': {
+                'loop_start': make_raw_bounds(0, None),
+                'loop_end': make_raw_bounds(0.0, None),
+                'loop_dur': make_raw_bounds(0.005, None),
+            },
+        })
+        yaml = self._stream(
+            "      loop_start: 2.0\n"
+            "      loop_end: 1.0\n"
+            "      loop_dur: 3.0\n"
+        )
+        assert self._degeneri(DiagnosticProvider(invertito), yaml) == []
+
+    def test_bridge_senza_il_gruppo_non_dichiara_chi_vince(self, bridge):
+        """Un bridge che non conosce `loop_bounds` non sa se il motore
+        costruira' `loop_dur`: niente Error, la direzione sicura."""
+        yaml = self._stream(
+            "      loop_start: 2.0\n"
+            "      loop_end: 1.0\n"
+            "      loop_dur: 3.0\n"
+        )
+        assert self._degeneri(DiagnosticProvider(bridge), yaml) == []
 
     def test_loop_end_envelope_esente(self, bridge):
         # Endpoint dinamici (envelope): nessun controllo statico.
@@ -2190,6 +2239,41 @@ class TestLoopEndLeLoopStart:
                   if d.severity == DiagnosticSeverity.Error
                   and 'loop_end' in d.message and 'degenere' in d.message]
         assert len(errors) == 0
+
+
+class TestLoopEndLoopDurInsieme:
+    """#55: `loop_end` e `loop_dur` nello stesso blocco dicono una cosa sola.
+
+    Chi vince lo dice `_check_exclusive_groups`, dalle priorita' del bridge:
+    `loop_end`. Una seconda regola scritta a mano diceva il contrario sulle
+    stesse righe (Warning che si contraddicevano a due a due).
+    """
+
+    DOC = (
+        "streams:\n"
+        "  - stream_id: s1\n"
+        "    duration: 10.0\n"
+        "    sample: a.wav\n"
+        "    pointer:\n"
+        "      loop_start: 1.0\n"
+        "      loop_end: 2.0\n"
+        "      loop_dur: 3.0\n"
+    )
+    RIGA_END, RIGA_DUR = 6, 7
+
+    def _sulla_riga(self, loop_bridge, riga):
+        return [d for d in DiagnosticProvider(loop_bridge).get_diagnostics(self.DOC)
+                if d.range.start.line == riga]
+
+    def test_una_sola_diagnostica_per_riga(self, loop_bridge):
+        assert len(self._sulla_riga(loop_bridge, self.RIGA_END)) == 1
+        assert len(self._sulla_riga(loop_bridge, self.RIGA_DUR)) == 1
+
+    def test_ignorato_e_loop_dur_non_loop_end(self, loop_bridge):
+        su_end = self._sulla_riga(loop_bridge, self.RIGA_END)
+        su_dur = self._sulla_riga(loop_bridge, self.RIGA_DUR)
+        assert not any('ignorat' in d.message for d in su_end)
+        assert all('ignorat' in d.message for d in su_dur)
 
 
 # =============================================================================
