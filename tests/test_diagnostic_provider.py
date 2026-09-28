@@ -2664,6 +2664,182 @@ class TestReadDirection:
 
 
 # =============================================================================
+# grain.reverse con un valore (issue PGE-ls #56)
+# =============================================================================
+
+class TestReverseConUnValore:
+    """`grain.reverse` si scrive vuota, e con qualunque valore il motore la
+    rifiuta (`Stream._init_grain_reverse`) prima di costruire alcunche'.
+
+    Il bridge la espone come parametro smart con bound `[0, 1]`
+    (`variation_mode: invert`), e i controlli generici la trattavano come un
+    numero o un envelope qualsiasi: muti su `1`, `true`, `auto`, e su `5` un
+    «fuori range [0, 1]» che suggeriva `0` e `1` come rimedio.
+    """
+
+    @staticmethod
+    def _grain(body: str) -> str:
+        return _stream_yaml("    grain:\n" + body)
+
+    @staticmethod
+    def _errors(provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    @staticmethod
+    def _reverse_errors(errs):
+        return [d for d in errs if 'lasciato vuoto' in d.message]
+
+    # --- la chiave vuota e' la sintassi -------------------------------------
+
+    @pytest.mark.parametrize('riga', [
+        'reverse:',
+        'reverse: null',
+        'reverse: Null',
+        'reverse: ~',
+        'reverse:  # sempre all\'indietro',
+    ])
+    def test_le_grafie_del_null_sono_valide(self, rd_bridge, riga):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(f"      {riga}\n")
+        assert self._errors(provider, yaml) == []
+
+    # --- qualunque valore e' un errore ---------------------------------------
+
+    @pytest.mark.parametrize('valore', [
+        '1', '0', '-1', '5', '0.5',
+        'true', 'false', 'auto', "'auto'", "''",
+        '[]', '{}',
+        '[[0, 0], [10, 1]]',
+        '[[0, 0], [10, 5]]',
+        '{points: [[0, 0], [10, 1]]}',
+        '(1)',
+    ])
+    def test_ogni_valore_e_un_errore(self, rd_bridge, valore):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(f"      reverse: {valore}\n")
+        errs = self._errors(provider, yaml)
+        assert len(errs) == 1, [e.message for e in errs]
+        assert self._reverse_errors(errs) == errs
+
+    def test_nessun_bound_zero_uno_nel_messaggio(self, rd_bridge):
+        """Il bound del registro suggeriva `0` e `1` come rimedio, e il motore
+        rifiuta anche quelli."""
+        provider = DiagnosticProvider(rd_bridge)
+        for valore in ('5', '[[0, 0], [10, 5]]'):
+            errs = self._errors(provider, self._grain(f"      reverse: {valore}\n"))
+            assert len(errs) == 1
+            assert 'fuori' not in errs[0].message
+            assert '[0, 1]' not in errs[0].message
+
+    def test_il_messaggio_ha_il_testo_del_motore_e_il_valore(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        errs = self._errors(provider, self._grain("      reverse: true\n"))
+        assert errs[0].message.startswith("'grain.reverse': True ")
+        assert 'grain.reverse deve essere lasciato vuoto.' in errs[0].message
+
+    def test_ancoraggio_alla_riga_della_chiave(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        errs = self._errors(provider, self._grain("      reverse: 1\n"))
+        # streams(0) - stream_id(1) onset(2) duration(3) sample(4) grain(5)
+        assert errs[0].range.start.line == 6
+
+    def test_envelope_block_style_una_diagnostica_sulla_chiave(self, rd_bridge):
+        """Il valore sulle righe sotto e' un valore: niente bound sui
+        breakpoint, un errore solo, sulla chiave."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      reverse:\n"
+            "        - [0, 0]\n"
+            "        - [10, 5]\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert len(errs) == 1, [e.message for e in errs]
+        assert self._reverse_errors(errs) == errs
+        assert errs[0].range.start.line == 6
+
+    def test_bp_group_malformato_non_aggiunge_un_secondo_errore(self, rd_bridge):
+        """Il motore non costruisce mai quell'envelope: dire che l'interp non
+        va manderebbe a correggere la cosa sbagliata."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      reverse: [[[0, 0], [1, 1]], bogus]\n")
+        errs = self._errors(provider, yaml)
+        assert len(errs) == 1, [e.message for e in errs]
+        assert self._reverse_errors(errs) == errs
+
+    def test_bp_group_block_style_non_aggiunge_un_secondo_errore(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      reverse:\n"
+            "        - [[[0, 0], [1, 1]], bogus]\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert len(errs) == 1, [e.message for e in errs]
+        assert self._reverse_errors(errs) == errs
+
+    def test_senza_la_chiave_nello_schema_resta_un_errore(self, bridge):
+        """La regola e' del motore, non del registro: uno snapshot che non ha
+        `grain.reverse` fra i parametri non la spegne."""
+        provider = DiagnosticProvider(bridge)
+        errs = self._errors(provider, self._grain("      reverse: 1\n"))
+        assert len(self._reverse_errors(errs)) == 1
+
+    # --- con read_direction accanto parla la coppia ---------------------------
+
+    def test_con_read_direction_parla_solo_la_coppia(self, rd_bridge):
+        """Il motore alza la coppia prima di guardare il valore di reverse."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain(
+            "      reverse: 1\n"
+            "      read_direction: 1\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert len(errs) == 2
+        assert all('grain_direction' in e.message for e in errs)
+        assert self._reverse_errors(errs) == []
+
+    # --- ambito ------------------------------------------------------------
+
+    def test_la_regola_e_per_stream(self, rd_bridge):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    grain:\n"
+            "      reverse: 1\n"
+            "  - stream_id: s2\n"
+            "    onset: 0.0\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    grain:\n"
+            "      reverse:\n"
+        )
+        errs = self._errors(provider, yaml)
+        assert [e.range.start.line for e in errs] == [6]
+
+    def test_la_chiave_di_deviation_probability_non_c_entra(self, rd_bridge):
+        """`deviation_probability: {reverse: N}` e' la probabilita' del
+        ribaltamento, non il verso: ha un valore per costruzione."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = _stream_yaml(
+            "    grain:\n"
+            "      reverse:\n"
+            "    deviation_probability:\n"
+            "      reverse: 50\n"
+        )
+        assert self._reverse_errors(self._errors(provider, yaml)) == []
+
+    def test_documento_a_meta_scrittura_non_segnalato(self, rd_bridge):
+        """Frammento non interpretabile come YAML: si tace, come altrove."""
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = self._grain("      reverse: [[0, 0], [10,\n")
+        assert self._reverse_errors(self._errors(provider, yaml)) == []
+
+
+# =============================================================================
 # pointer.start con un envelope (PGE #199, PR #200 — issue PGE-ls #39)
 # =============================================================================
 
