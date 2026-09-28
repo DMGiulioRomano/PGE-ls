@@ -807,6 +807,30 @@ class TestReadDirectionHover:
 
 
 # =============================================================================
+# Blocco pointer: chi vince fra loop_end e loop_dur (#55)
+# =============================================================================
+
+
+class TestPointerBlockLoopBounds:
+    """Scritti insieme, il motore tiene `loop_end` e scarta `loop_dur`
+    (`group_priority`); la doc del blocco diceva il contrario. La premessa e'
+    tenuta dal vivo in `test_pge_parity.py`."""
+
+    def _voce(self, bridge, chiave):
+        doc = HoverProvider(bridge).get_hover(
+            make_context(current_text='pointer')).contents.value
+        return doc[doc.index(f'- `{chiave}` —'):].split('\n')[0]
+
+    def test_loop_dur_non_ha_la_precedenza(self, bridge):
+        voce = self._voce(bridge, 'loop_dur')
+        assert 'priorit' not in voce
+        assert 'ignorat' in voce
+
+    def test_loop_end_vince(self, bridge):
+        assert 'vince' in self._voce(bridge, 'loop_end')
+
+
+# =============================================================================
 # deviation_probability: chiave vuota contro chiave assente (PGE #209, #210)
 # =============================================================================
 
