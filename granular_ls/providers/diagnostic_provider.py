@@ -65,6 +65,7 @@ from granular_ls.read_direction import (
     EXCLUSIVE_HINT,
     READ_DIRECTION_PATH,
     REVERSE_PATH,
+    REVERSE_VALUE_HINT,
     check_read_direction,
 )
 from granular_ls.deviation_probability import (
@@ -116,10 +117,18 @@ _PITCH_OWNED_PREFIX = 'pitch.'
 # il dominio e' l'insieme {-1, +1} e lo schema non ha modo di dirlo — un check
 # generico accetterebbe 0 e 0.5, che il motore rifiuta. Stessa cosa per lo
 # 'step' imposto e per il gruppo esclusivo 'grain_direction', che qui e' un
-# errore e non una priorita'. Il check dedicato e' _check_read_direction; il
+# errore e non una priorita'. Il check dedicato e' _check_grain_direction; il
 # path e' escluso dai generici per non dire due volte cose diverse sullo
 # stesso problema, come gia' per il blocco pitch.
-_READ_DIRECTION_OWNED = frozenset({READ_DIRECTION_PATH})
+#
+# grain.reverse (issue PGE-ls #56) sta nello stesso gruppo e ha lo stesso
+# problema, piu' netto: il bridge la espone con bounds [0, 1], ma il motore la
+# vuole vuota e rifiuta qualunque valore (`Stream._init_grain_reverse`). I
+# generici tacevano su `1`, `true`, `auto`, e su `5` dicevano «fuori range
+# [0, 1]», che proponeva come rimedio due valori rifiutati anche loro. Uscire
+# dai generici la toglie anche da `_check_missing_values`, dove la chiave vuota
+# e' la sintassi e non un valore mancante.
+_GRAIN_DIRECTION_OWNED = frozenset({READ_DIRECTION_PATH, REVERSE_PATH})
 
 
 # Le chiavi del blocco pitch che il motore passa a `parse_parameter`, cioè
@@ -151,7 +160,7 @@ def _is_generically_checkable(yaml_path: str) -> bool:
     arriverebbe accanto a una sbagliata.
     """
     return (not yaml_path.startswith(_PITCH_OWNED_PREFIX)
-            and yaml_path not in _READ_DIRECTION_OWNED)
+            and yaml_path not in _GRAIN_DIRECTION_OWNED)
 
 # grain.duration_unit (PGE #158, terza unità in v5.2.0): unità di misura di
 # grain.duration e grain.duration_range. Meta-parametro, gemello di loop_unit
@@ -298,13 +307,14 @@ class DiagnosticProvider:
         # I parametri che il motore passa a `parse_parameter`, e che quindi
         # diventano un envelope quando lo sono: gli smart, meno le chiavi di
         # contesto dello stream (solo, mute, ...), che il bridge espone come
-        # parametri ma che il motore legge altrove, e meno `grain.reverse`,
-        # che e' smart nello schema ma che il motore vuole vuota e rifiuta con
-        # qualunque valore (`Stream._init_grain_reverse`) prima di costruire.
+        # parametri ma che il motore legge altrove. `grain.reverse`, smart
+        # nello schema, qui non c'e' gia' piu': il motore la vuole vuota e
+        # rifiuta qualunque valore prima di costruire, quindi sta fuori dai
+        # generici (`_GRAIN_DIRECTION_OWNED`).
         contesto = frozenset(bridge.get_stream_context_keys())
         self._envelope_param_paths = frozenset(
             path for path, p in self._params_by_yaml_path.items()
-            if p.is_smart and path not in contesto and path != REVERSE_PATH
+            if p.is_smart and path not in contesto
         )
 
     def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
@@ -384,8 +394,15 @@ class DiagnosticProvider:
             and d.range.start.line not in dp_lines
         )
 
-        # Fase 5d: validazione BP group [points, interp] (PGE #64).
-        diagnostics.extend(self._check_bp_groups(lines))
+        # Fase 5d: validazione BP group [points, interp] (PGE #64). Non sul
+        # valore di grain.reverse: il motore lo rifiuta prima di costruirne
+        # l'envelope, e dire che l'interp non va manderebbe a correggere la
+        # cosa sbagliata. Lo dice la fase 14.
+        reverse_lines = self._grain_reverse_lines(lines, grain_blocks)
+        diagnostics.extend(
+            d for d in self._check_bp_groups(lines)
+            if d.range.start.line not in reverse_lines
+        )
 
         # Fase 5b: validazione grain.envelope (finestratura del grano).
         diagnostics.extend(self._check_grain_envelope(document_text))
@@ -420,9 +437,11 @@ class DiagnosticProvider:
         # Fase 13: range_anchor fuori enum (PGE range-anchor-mode).
         diagnostics.extend(self._check_range_anchor(lines))
 
-        # Fase 14: grain.read_direction (PGE #207) — dominio a due valori,
-        # 'step' imposto, gruppo esclusivo con grain.reverse.
-        diagnostics.extend(self._check_read_direction(lines, grain_blocks))
+        # Fase 14: il verso del grano — il gruppo esclusivo 'grain_direction',
+        # grain.reverse che si scrive vuota (issue PGE-ls #56) e
+        # grain.read_direction (PGE #207): dominio a due valori, 'step'
+        # imposto.
+        diagnostics.extend(self._check_grain_direction(lines, grain_blocks))
 
         # Fase 15: corpo di deviation_probability che non si costruisce come
         # envelope (PGE #209). Prima diventava un AlwaysGate in silenzio.
@@ -686,12 +705,9 @@ class DiagnosticProvider:
         diagnostics = []
         lines = document_text.split('\n')
 
-        # Chiavi per cui il valore null (riga 'key:' senza niente) è semanticamente
-        # valido secondo il motore PGE. Non vengono segnalate come "manca il valore".
-        # Esempio: 'grain.reverse:' senza valore → forzato sempre reverse.
-        NULL_VALID_PATHS: frozenset = frozenset({'grain.reverse'})
-
-        # 1. Parametri numerici del bridge (pitch.* escluso: unit-driven)
+        # 1. Parametri numerici del bridge. Esclusi quelli con un check
+        # dedicato: pitch.* (unit-driven), e il verso del grano, dove
+        # `grain.reverse:` senza valore e' la sintassi (sempre all'indietro).
         numeric_yaml_paths: set = {
             p.yaml_path
             for p in self._bridge.get_all_parameters()
@@ -760,23 +776,18 @@ class DiagnosticProvider:
             yaml_path = (current_prefix + '.' + key) if current_prefix else key
 
             if yaml_path in numeric_yaml_paths:
-                # Chiavi per cui null è sintassi valida: non controllare il valore.
-                if yaml_path in NULL_VALID_PATHS:
-                    pass  # 'key:' senza valore è intenzionale (es. grain.reverse)
-
-                else:
-                    # Parametro numerico: accetta envelope lista (- [...]) o
-                    # dict (type:/points:) — qualsiasi contenuto più indentato.
-                    if not self._has_block_value(lines, i, leading):
-                        diagnostics.append(Diagnostic(
-                            range=self._line_range(i),
-                            message=(
-                                f"'{yaml_path}' richiede un valore "
-                                f"(float o envelope [[t, v], ...]) ma non ne ha uno."
-                            ),
-                            severity=DiagnosticSeverity.Error,
-                            source=SOURCE,
-                        ))
+                # Parametro numerico: accetta envelope lista (- [...]) o
+                # dict (type:/points:) — qualsiasi contenuto più indentato.
+                if not self._has_block_value(lines, i, leading):
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(i),
+                        message=(
+                            f"'{yaml_path}' richiede un valore "
+                            f"(float o envelope [[t, v], ...]) ma non ne ha uno."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
 
             elif current_prefix is None and key in self._STREAM_VALUE_REQUIRED:
                 # Campo obbligatorio stream senza valore
@@ -3031,9 +3042,15 @@ class DiagnosticProvider:
           - read_direction_line: riga della chiave read_direction (o None)
           - reverse_line:    riga della chiave reverse (o None)
 
-        Le due righe del verso servono a _check_read_direction: il gruppo
+        Le due righe del verso servono a _check_grain_direction: il gruppo
         esclusivo 'grain_direction' è per-blocco-grain, quindi va deciso qui
         dove i confini del blocco sono già noti.
+
+        La riga `grain:` si riconosce in tutte le sue grafie: con un commento
+        inline, come ogni riga YAML, e sulla riga del trattino quando è la
+        prima chiave dello stream (`  - grain:`), dove l'indentazione grezza è
+        quella del trattino ma il livello della chiave è 4. Un blocco non
+        riconosciuto qui non lo guarda nessuna delle fasi che ne dipendono.
         """
         blocks: List[dict] = []
         for stream_start, stream_end_incl, _keys in streams:
@@ -3043,7 +3060,11 @@ class DiagnosticProvider:
                 raw = lines[n]
                 stripped = raw.strip()
                 leading = len(raw) - len(raw.lstrip())
-                if leading == 4 and stripped == 'grain:':
+                if leading == 2 and stripped.startswith('- '):
+                    stripped = stripped[2:].strip()
+                    leading = 4
+                if (leading == 4
+                        and _strip_inline_comment(stripped) == 'grain:'):
                     grain_start = n
                     break
             if grain_start is None:
@@ -3128,19 +3149,27 @@ class DiagnosticProvider:
             blocks.append(info)
         return blocks
 
-    def _check_read_direction(self, lines: List[str],
-                              grain_blocks: List[dict]) -> List[Diagnostic]:
+    def _check_grain_direction(self, lines: List[str],
+                               grain_blocks: List[dict]) -> List[Diagnostic]:
         """
-        Valida `grain.read_direction` (PGE #207) e il gruppo 'grain_direction'.
+        Valida il verso di lettura del grano: il gruppo 'grain_direction',
+        `grain.reverse` e `grain.read_direction` (PGE #207).
 
-        Due controlli, nell'ordine in cui li fa il motore:
+        Tre controlli, nell'ordine in cui li fa il motore
+        (`Stream._init_grain_reverse`, poi `_normalize_read_direction`); alla
+        prima violazione il motore solleva, e qui si tace sul resto del blocco:
 
         1. **`reverse` + `read_direction` insieme**: errore esplicito, non una
            priorità. Il motore lo solleva prima di ogni altra validazione, e
            qui si fa lo stesso — con entrambe le chiavi scritte non ha senso
            dire anche cosa c'è che non va nel valore di una delle due.
-        2. **Il valore**: dominio `{-1, +1}`, `step` imposto, e i guard sulle
-           macro-forme. La regola sta in `read_direction.py`.
+        2. **`reverse` con un valore** (issue PGE-ls #56): la chiave si scrive
+           vuota, e qualunque valore è rifiutato — anche `0`, `1`, `true`, un
+           envelope. Vuota vuol dire `null`, in ogni sua grafia, come la legge
+           PyYAML.
+        3. **Il valore di `read_direction`**: dominio `{-1, +1}`, `step`
+           imposto, e i guard sulle macro-forme. La regola sta in
+           `read_direction.py`.
 
         Ancoraggio: la riga della chiave. Il valore incriminato è nel
         messaggio, così un envelope block-style resta leggibile anche quando
@@ -3152,10 +3181,7 @@ class DiagnosticProvider:
             rd_line = block['read_direction_line']
             rev_line = block['reverse_line']
 
-            if rd_line is None:
-                continue
-
-            if rev_line is not None:
+            if rd_line is not None and rev_line is not None:
                 # Le due chiavi governano la stessa grandezza con semantiche
                 # opposte: il render fallisce, non sceglie.
                 message = f"Gruppo esclusivo 'grain_direction': {EXCLUSIVE_HINT}"
@@ -3166,6 +3192,26 @@ class DiagnosticProvider:
                         severity=DiagnosticSeverity.Error,
                         source=SOURCE,
                     ))
+                continue
+
+            if rev_line is not None:
+                found, raw = self._read_key_value(lines, rev_line, block['end'])
+                # Non interpretabile: l'utente sta ancora scrivendo, e si tace
+                # come altrove nel provider. Il null in ogni grafia (`reverse:`,
+                # `null`, `~`) arriva come None: è la sintassi.
+                if found and raw is not None:
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(rev_line),
+                        message=(
+                            f"'{REVERSE_PATH}': {raw!r} non è ammesso. "
+                            f"{REVERSE_VALUE_HINT}"
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source=SOURCE,
+                    ))
+                continue
+
+            if rd_line is None:
                 continue
 
             found, raw = self._read_key_value(lines, rd_line, block['end'])
@@ -3189,6 +3235,22 @@ class DiagnosticProvider:
             ))
 
         return diagnostics
+
+    def _grain_reverse_lines(self, lines: List[str],
+                             grain_blocks: List[dict]) -> set:
+        """Le righe che portano il valore di `grain.reverse`: la chiave e,
+        sotto di lei, il valore block-style.
+
+        Servono a chi controlla la forma di un envelope riga per riga senza
+        sapere di che chiave è: su queste righe il motore non costruisce mai
+        niente, perché rifiuta la chiave prima (fase 14).
+        """
+        righe: set = set()
+        for block in grain_blocks:
+            n = block['reverse_line']
+            if n is not None:
+                righe.update(range(n, self._block_end(lines, n, block['end'], 6)))
+        return righe
 
     def _check_deviation_probability(
         self, lines: List[str],
@@ -4046,7 +4108,7 @@ class DiagnosticProvider:
         `Generator` e noi no — o una forma da cui non si ricava nessuna Y.
 
         L'ancoraggio è la riga della chiave anche per gli envelope block-style,
-        come già fa `_check_read_direction`: il valore incriminato sta nel
+        come già fa `_check_grain_direction`: il valore incriminato sta nel
         messaggio, e la chiave è dove si va a correggerlo.
         """
         if key_line is None or minimo is None or massimo is None:

@@ -914,6 +914,165 @@ def test_read_direction_in_schema_bridge(pge):
     assert 'read_direction' in bridge.get_deviation_probability_keys()
 
 
+# =============================================================================
+# grain.reverse con un valore (issue PGE-ls #56)
+# =============================================================================
+#
+# Il motore vuole `grain.reverse` vuota e rifiuta qualunque valore in
+# `Stream._init_grain_reverse`, dopo aver rifiutato la coppia con
+# `read_direction`. Il bridge la espone con bound `[0, 1]`, e i controlli
+# generici la trattavano come un numero qualsiasi: il corpus e' la tabella
+# della issue, piu' le grafie del null e le forme che la chiave non costruisce
+# mai. Si confronta *quale* campo nomina il primo errore, non solo se c'e', e
+# si pretende che il language server non ne aggiunga altri.
+
+def _load_init_grain_reverse():
+    """`Stream._init_grain_reverse`, il metodo vero, senza importare stream.py.
+
+    `core/stream.py` importa numpy e soundfile; il metodo usa solo
+    `InvalidFieldValueError` e `READ_DIRECTION_FIELD`, che vivono in moduli
+    importabili senza. Stessa estrazione di `_load_pre_normalize_grain_params`.
+    """
+    import ast
+    from granular_ls.schema_bridge import _import_pge_module
+
+    relpath = next((r for r in ('pge/core/stream.py', 'core/stream.py')
+                    if (Path(PGE_SRC) / r).exists()), None)
+    if relpath is None:
+        pytest.skip("core/stream.py non trovato in questo checkout")
+    sorgente = Path(PGE_SRC) / relpath
+    tree = ast.parse(sorgente.read_text(encoding='utf-8'))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)
+               and n.name == '_init_grain_reverse'), None)
+    if fn is None:
+        pytest.skip("engine senza Stream._init_grain_reverse")
+    try:
+        read_direction_field = _import_pge_module(
+            'parameters.read_direction').READ_DIRECTION_FIELD
+    except Exception:
+        pytest.skip("engine precede grain.read_direction (PGE #207)")
+
+    namespace = {
+        'InvalidFieldValueError': _import_pge_module(
+            'shared.exceptions').InvalidFieldValueError,
+        'READ_DIRECTION_FIELD': read_direction_field,
+    }
+    modulo = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(modulo)
+    exec(compile(modulo, str(sorgente), 'exec'), namespace)
+    grezza = namespace['_init_grain_reverse']
+
+    class _Stream:
+        stream_id = 's1'
+
+    return lambda params: grezza(_Stream(), params)
+
+
+def _engine_grain_direction_field(stream: dict):
+    """Il campo che il motore nomina rifiutando il verso, o None se accetta.
+
+    Davanti c'e' il `Generator`, che valuta le espressioni su tutto lo YAML:
+    `(1)` arriva come `1`, ed e' un valore come un altro.
+    """
+    from granular_ls.schema_bridge import _import_pge_module
+
+    evaluate, _ = _load_eval_math_expressions()
+    init_grain_reverse = _load_init_grain_reverse()
+    errore = _import_pge_module('shared.exceptions').InvalidFieldValueError
+    try:
+        init_grain_reverse(evaluate(stream))
+    except errore as err:
+        return err.field
+    return None
+
+
+GRAIN_REVERSE_CORPUS = [
+    # la chiave vuota e le grafie del null: il verso forzato all'indietro
+    'reverse:',
+    'reverse: null',
+    'reverse: ~',
+    # la tabella della issue
+    'reverse: 1',
+    'reverse: true',
+    'reverse: false',
+    'reverse: auto',
+    'reverse: 5',
+    'reverse: [[0, 0], [10, 5]]',
+    'reverse: [[0, 0], [10, 1]]',
+    # le altre grafie di un valore
+    'reverse: 0',
+    "reverse: 'auto'",
+    "reverse: ''",
+    'reverse: "1"',
+    'reverse: (1)',
+    'reverse: []',
+    'reverse: {points: [[0, 0], [10, 1]]}',
+    'reverse: [[[0, 0], [1, 1]], bogus]',
+    'reverse:\n  - [0, 0]\n  - [10, 5]',
+    # con read_direction accanto parla la coppia, prima del valore
+    'reverse:\nread_direction: 1',
+    'reverse: 1\nread_direction: 1',
+    'reverse: 1\nread_direction: 0',
+]
+
+
+@pytest.mark.parametrize('righe', GRAIN_REVERSE_CORPUS,
+                         ids=lambda v: v.replace('\n', ' | '))
+def test_grain_reverse_mirror_matches_engine(pge, righe):
+    import yaml as pyyaml
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+    from granular_ls.read_direction import (
+        READ_DIRECTION_PATH, REVERSE_PATH, REVERSE_VALUE_HINT,
+    )
+    from granular_ls.schema_bridge import SchemaBridge
+    from lsprotocol.types import DiagnosticSeverity
+
+    grain = ''.join(f"      {r}\n" for r in righe.split('\n'))
+    testo = ("streams:\n  - stream_id: s1\n    onset: 0.0\n"
+             "    duration: 10.0\n    sample: f.wav\n    grain:\n" + grain)
+
+    motore = _engine_grain_direction_field(
+        pyyaml.safe_load(testo)['streams'][0])
+
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    errori = [d for d in DiagnosticProvider(bridge).get_diagnostics(testo)
+              if d.severity == DiagnosticSeverity.Error]
+    # Per il testo e non per il path in testa: anche il vecchio «'grain.reverse':
+    # valore 5.0 fuori range [0, 1]» cominciava cosi'.
+    if any('grain_direction' in d.message for d in errori):
+        ls = READ_DIRECTION_PATH
+    elif any(REVERSE_VALUE_HINT in d.message for d in errori):
+        ls = REVERSE_PATH
+    else:
+        ls = None
+
+    assert ls == motore, (
+        f"Drift su {righe!r}: il motore nomina {motore!r}, il language "
+        f"server {ls!r}"
+    )
+    # Al posto dei controlli generici, non accanto: un errore per la chiave,
+    # due per la coppia (una riga ciascuna), nessuno dove il motore accetta.
+    atteso = {None: 0, REVERSE_PATH: 1, READ_DIRECTION_PATH: 2}[motore]
+    assert len(errori) == atteso, [d.message for d in errori]
+
+
+def test_grain_reverse_hint_ha_il_testo_del_motore(pge):
+    """Chi legge la diagnostica e poi l'errore di render riconosce lo stesso
+    problema: la prima frase del suggerimento e' quella del motore."""
+    from granular_ls.read_direction import REVERSE_PATH, REVERSE_VALUE_HINT
+    from granular_ls.schema_bridge import _import_pge_module
+
+    init_grain_reverse = _load_init_grain_reverse()
+    errore = _import_pge_module('shared.exceptions').InvalidFieldValueError
+    with pytest.raises(errore) as info:
+        init_grain_reverse({'grain': {'reverse': 1}})
+
+    assert info.value.field == REVERSE_PATH
+    prima_riga = info.value.hint.split('\n')[0]
+    assert REVERSE_VALUE_HINT.startswith(prima_riga)
+
+
 def test_time_distribution_names_match(pge):
     """I nomi replicati sono quelli del registro, alias compresi."""
     from granular_ls.read_direction import TIME_DISTRIBUTION_NAMES

@@ -244,6 +244,21 @@ EXCLUSIVE_HINT = (
     "oppure grain.reverse (chiave vuota = sempre indietro), non entrambe."
 )
 
+# `grain.reverse` con un valore (issue PGE-ls #56). Il bridge la espone con
+# bound `[0, 1]`, ma il motore non la legge come un numero: la vuole vuota e
+# rifiuta qualunque valore in `Stream._init_grain_reverse`, prima di costruire
+# alcunché. La prima frase è quella del motore, così la diagnostica e l'errore
+# di render si riconoscono (la parità lo verifica); il resto dice perché
+# nemmeno `0` o `1` vanno bene, che è ciò che quel bound lasciava intendere.
+REVERSE_VALUE_HINT = (
+    "grain.reverse deve essere lasciato vuoto. La chiave scritta senza valore "
+    "vuol dire «sempre all'indietro», e nessun valore è ammesso: né "
+    "true/false, né 0/1, né un envelope.\n"
+    "Per il verso che segue pointer.speed_ratio (modalità 'auto') ometti la "
+    "chiave; per un verso dichiarato, anche variabile nel tempo, usa "
+    "grain.read_direction (-1 indietro, +1 avanti)."
+)
+
 
 # =============================================================================
 # RICONOSCIMENTO DELLE FORME
