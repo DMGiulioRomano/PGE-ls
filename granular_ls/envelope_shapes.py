@@ -11,7 +11,8 @@ riconoscere le forme sintattiche di un envelope serializzato:
   - loop block (compact):   [pattern, end_time, n_reps, interp?, time_dist?, wrap?]
 
 e le posizioni in cui il builder espande un loop block
-(`compact_block_positions`).
+(`compact_block_positions`), piu' il lettore unico delle Y di un envelope
+(`envelope_y_paths`), che mette insieme le forme come fa il builder.
 
 Le regole discriminanti sono identiche a EnvelopeBuilder in PGE
 (src/pge/envelopes/envelope_builder.py): il BP group e' l'unica lista a
@@ -246,3 +247,92 @@ def compact_blocks(body) -> list:
     lista = body.get('points') if isinstance(body, dict) else body
     return [lista if pos is None else lista[pos]
             for pos in compact_block_positions(body)]
+
+
+def _pattern_y_paths(points, path: tuple) -> list:
+    """Le Y dei punti dentro una macro-forma (ciclo o BP group).
+
+    Un punto conta solo se il builder lo espanderebbe: `[t, v]` o
+    `[t, v, type]` con t e v numerici. Il ciclo compatto ne riconosce la
+    forma senza guardare i numeri, ma una Y che non e' un numero non e' una
+    Y che un bound possa respingere.
+    """
+    return [(path + (j, 1), p[1]) for j, p in enumerate(points)
+            if is_valid_point(p)]
+
+
+def envelope_y_paths(body) -> list:
+    """
+    Le Y di un corpo envelope come le legge il builder, e dove stanno.
+
+    Mirror della lettura di `Envelope.__init__` piu' `EnvelopeBuilder.parse`
+    in PGE, ristretta alle Y: sono i valori dei breakpoint espansi, cioe'
+    quelli che `GranularParser._validate_and_clip` confronta con i bound e
+    per cui, in `strict`, alza `ParameterBoundError`.
+
+      - un dict envelope porta il corpo sotto `points` (`type` e' l'interp
+        globale, non un valore);
+      - il corpo intero puo' essere un ciclo compatto o un BP group (forma
+        diretta): le Y stanno nei punti del suo elemento 0 — ne' `end_time`
+        ne' `n_reps` ne' l'interp lo sono;
+      - altrimenti ogni elemento e' un breakpoint `[t, v]`, un `[t, v, type]`,
+        un dict `{t, v, type?}` (che il builder normalizza in lista prima di
+        guardarlo), un ciclo o un BP group.
+
+    Le forme si riconoscono con i predicati di questo modulo, gli stessi del
+    builder, sul valore come il Generator lo consegna: le stringhe numeriche
+    si convertono (`normalize_engine_values`), le espressioni fra parentesi
+    no. Un elemento che ne contiene una si salta intero, e con lui un corpo
+    in forma diretta: l'esito dell'`eval` non si prevede, e in uno slot
+    strutturale decide la forma stessa (`'(1+1)'` come interp di un gruppo
+    diventa `2`, e il gruppo smette di esserlo).
+
+    Un elemento che il builder rifiuta non spegne gli altri: la Y di un
+    breakpoint buono resta una Y che, corretto il resto, il motore
+    confronterebbe con i bound. Una forma che non e' un envelope invece non
+    ha Y — `[t, v]` senza parentesi esterne il builder lo scorre numero per
+    numero e alza sul primo, prima di qualunque bound.
+
+    Returns:
+        Lista di `(percorso, y)` in ordine di scrittura. `percorso` e' la
+        tupla di chiavi e indici che porta dal corpo al numero — `(1, 'v')`
+        per la `v` del secondo breakpoint dict, `('points', 0, 2, 1)` per la
+        Y del terzo punto di un ciclo diretto dentro un dict — cosi' chi ha il
+        nodo YAML del corpo ne ricava la riga. Lista vuota se il corpo non e'
+        un envelope.
+    """
+    body = normalize_engine_values(body)
+    prefisso: tuple = ()
+    if isinstance(body, dict):
+        if 'points' not in body:
+            return []
+        body, prefisso = body['points'], ('points',)
+    if not isinstance(body, list):
+        return []
+
+    if is_loop_block(body) or is_bp_group(body):
+        if contains_math_expression(body):
+            return []
+        return _pattern_y_paths(body[0], prefisso + (0,))
+
+    ys: list = []
+    for i, item in enumerate(body):
+        path = prefisso + (i,)
+        if contains_math_expression(item):
+            continue
+        if isinstance(item, dict):
+            if 't' not in item or 'v' not in item:
+                continue
+            punto = [item['t'], item['v']]
+            if 'type' in item:
+                punto.append(item['type'])
+            if is_breakpoint(punto) or is_3tuple_breakpoint(punto):
+                ys.append((path + ('v',), item['v']))
+            continue
+        # Le macro-forme per prime: un ciclo ha `item[1]` numerico, e letto
+        # come breakpoint darebbe il suo `end_time` come Y.
+        if is_loop_block(item) or is_bp_group(item):
+            ys.extend(_pattern_y_paths(item[0], path + (0,)))
+        elif is_breakpoint(item) or is_3tuple_breakpoint(item):
+            ys.append((path + (1,), item[1]))
+    return ys
