@@ -41,6 +41,7 @@ from granular_ls.envelope_shapes import (
     VALID_INTERP_TYPES,
     compact_block_positions,
     contains_math_expression,
+    envelope_y_paths,
     is_bp_group,
     is_bp_group_candidate,
     is_loop_block,
@@ -383,15 +384,11 @@ class DiagnosticProvider:
             if d.range.start.line not in scaled_lines
         )
 
-        # Righe dentro un blocco deviation_probability: le loro Y sono
-        # probabilità in scala 0-100, non valori del parametro omonimo.
-        dp_lines = self._deviation_probability_lines(lines, streams)
-
-        # Fase 5: controllo bounds nei valori envelope (breakpoints Y).
+        # Fase 5: controllo bounds nei valori envelope (breakpoints Y), in
+        # ogni grafia che il builder del motore costruisce (issue #58).
         diagnostics.extend(
-            d for d in self._check_envelope_bounds(document_text)
+            d for d in self._check_envelope_bounds(lines, streams)
             if d.range.start.line not in scaled_lines
-            and d.range.start.line not in dp_lines
         )
 
         # Fase 5d: validazione BP group [points, interp] (PGE #64). Non sul
@@ -854,146 +851,100 @@ class DiagnosticProvider:
 
 
     def _check_envelope_bounds(
-        self, document_text: str
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
     ) -> List[Diagnostic]:
         """
-        Controlla i valori Y dei breakpoints negli envelope standard.
+        Le Y degli envelope contro i bound del parametro, in ogni grafia.
 
-        Due forme riconosciute:
-          - block-style: chiave nuda seguita da righe '- [t, y]'
-          - inline: 'key: [[t, v], ...]' sulla riga della chiave
-            (anche breakpoint singolo [t, y] e formato compact loop)
+        Il motore, in `strict` (il default di `CLIP_LOG_CONFIG`), costruisce
+        l'`Envelope` da qualunque grafia accetti e alza `ParameterBoundError`
+        se anche un solo breakpoint espanso esce dai bound
+        (`GranularParser._validate_and_clip`). Qui la stessa lettura, sulla
+        struttura e non sul testo: lo stream si compone come YAML
+        (`_compose_stream`), i valori che il motore costruisce come envelope
+        li elenca `_envelope_value_nodes` — la stessa lista della fase 20 —
+        e le Y le estrae `envelope_y_paths` con i predicati del builder.
 
-        Produce Error se un valore y e' fuori dai bounds del parametro.
+        Il valore si leggeva riga per riga, con `ast.literal_eval`, che non e'
+        YAML: una parola nuda (`cubic`, `step`) o una chiave senza virgolette
+        (`{t: 0}`) non sono letterali Python, un valore che comincia con `{`
+        non entrava nemmeno nel ramo inline, e a blocchi contavano solo le
+        righe `- [`. Il dict `{type, points}`, il breakpoint `{t, v}`,
+        l'interp per punto e il BP group con l'interp nudo passavano muti, e
+        il render falliva senza nessuna diagnostica (issue #58).
+
+        Stesso confronto degli scalari: `self._value_domains` con
+        `outside_domain`, quindi gli override dinamici del motore (il minimo
+        di `grain.duration` è un campione, non lo `0.001` del registro), il
+        pavimento senza tetto di `density` (#51) e l'esclusione delle
+        posizioni che `loop_unit` riscala restano come sono. La chiave si risolve per path, non per nome locale: `duration`
+        dello stream non prende i bound di `grain.duration`. Chi non ha un
+        dominio generico non si misura qui — il blocco pitch, i `loop_*`, le
+        voices, la `curve` della finestra — e `deviation_probability` non ci
+        arriva affatto: le sue Y sono probabilita' in scala 0-100, non valori
+        del parametro omonimo, e il suo corpo lo giudica la fase 15.
+
+        Ancoraggio: la riga della Y, una diagnostica per ogni Y fuori. Uno
+        stream a meta' scrittura non si legge e tace, senza spegnere gli
+        altri.
         """
-        import ast
-        diagnostics = []
-        lines = document_text.split('\n')
+        diagnostics: List[Diagnostic] = []
 
-        # La **stessa** mappa del controllo sugli scalari: i due confronti sono
-        # lo stesso confronto su forme diverse, e leggendo il bridge per conto
-        # proprio questo saltava gli override dinamici del motore (il minimo
-        # di `grain.duration`, che è un campione e non lo `0.001` del
-        # registro). Il filtro pitch.* e l'esclusione dei `loop_*` sono già
-        # dentro la mappa.
-        params_bounds = self._value_domains
-
-        # Indice di risoluzione chiave -> yaml_path (chiave locale e path
-        # completo, primo match in ordine di registrazione): usato dal ramo
-        # block-style e da quello inline senza riscandire params_bounds.
-        key_to_path: Dict[str, str] = {}
-        for yp in params_bounds:
-            key_to_path.setdefault(yp.split('.')[-1], yp)
-            key_to_path.setdefault(yp, yp)
-
-        # Scansione: tiene traccia del parametro corrente e del suo path
-        current_param_path = None
-        current_indent = 0
-
-        for n, line in enumerate(lines):
-            stripped = line.strip()
-            if not stripped or stripped.startswith('#'):
+        for stream_start, stream_end_incl, _keys in streams:
+            letto = self._compose_stream(lines, stream_start, stream_end_incl)
+            if letto is None:
                 continue
+            stream_node, costruisci = letto
 
-            leading = len(line) - len(line.lstrip())
-
-            # Rilevamento riga con parametro e valore lista (chiave senza valore)
-            if ': ' not in stripped and stripped.endswith(':'):
-                key = stripped[:-1].strip()
-                if key and all(c.isalnum() or c == '_' for c in key):
-                    current_param_path = key_to_path.get(key)
-                    current_indent = leading
-                continue
-
-            # Reset se siamo risaliti di livello
-            if current_param_path and leading <= current_indent:
-                current_param_path = None
-
-            # Analisi riga breakpoint
-            if current_param_path and stripped.startswith('- ['):
-                bounds = params_bounds.get(current_param_path)
-                if bounds is None:
+            for path, value_node in self._envelope_value_nodes(stream_node,
+                                                               costruisci):
+                domain = self._value_domains.get(path)
+                if domain is None:
                     continue
-                min_val, max_val = bounds
-
-                try:
-                    inner = stripped[2:].strip()
-                    parsed_list = ast.literal_eval(inner)
-                    if not isinstance(parsed_list, list):
+                for percorso, y in envelope_y_paths(costruisci(value_node)):
+                    if not outside_domain(y, *domain):
                         continue
-
-                    # Determina il formato e raccoglie i valori Y da controllare
-                    y_values_to_check: list = []
-
-                    # Formato compact: [[[p1, p2, ...], end_time, n_reps, ...]]
-                    # Il primo elemento e' una lista di liste (i punti del pattern).
-                    # Ogni punto ha forma [x_pct, y] dove x_pct e' percentuale [0,100].
-                    if (len(parsed_list) >= 2
-                            and isinstance(parsed_list[0], list)
-                            and all(isinstance(pt, list) for pt in parsed_list[0])):
-                        # pattern points: ciascuno e' [x_pct, y]
-                        for pt in parsed_list[0]:
-                            if isinstance(pt, list) and len(pt) >= 2:
-                                y_values_to_check.append((n, pt[1]))
-
-                    # Formato dict con 'points': gestito separatamente
-                    # (le righe points sono righe distinte con '- [')
-                    # qui arrivano solo i breakpoints standard [t, y]
-                    elif (len(parsed_list) >= 2
-                              and isinstance(parsed_list[0], (int, float))
-                              and isinstance(parsed_list[1], (int, float))):
-                        # Breakpoint standard [t, y]
-                        y_values_to_check.append((n, parsed_list[1]))
-
-                    for line_n, y_val in y_values_to_check:
-                        if isinstance(y_val, (int, float)):
-                            if outside_domain(y_val, min_val, max_val):
-                                diagnostics.append(Diagnostic(
-                                    range=Range(
-                                        start=Position(line=line_n, character=0),
-                                        end=Position(line=line_n,
-                                                     character=len(lines[line_n])),
-                                    ),
-                                    message=(
-                                        f"Valore envelope {y_val} fuori dai bounds "
-                                        f"del parametro '{current_param_path}': "
-                                        f"{domain_label(min_val, max_val)}."
-                                    ),
-                                    severity=DiagnosticSeverity.Error,
-                                    source='pge-ls',
-                                ))
-                except Exception:
-                    pass
-                continue
-
-            # Envelope inline sulla riga della chiave: 'key: [[t, v], ...]',
-            # breakpoint singolo [t, y] o compact loop. Stessa risoluzione e
-            # stesso messaggio del ramo block-style; valori non parseabili
-            # vengono ignorati (tolleranza, come literal_eval sui breakpoint).
-            m_inline = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(\[.*)$',
-                                stripped)
-            if m_inline:
-                inline_path = key_to_path.get(m_inline.group(1))
-                if inline_path is None:
-                    continue
-                min_val, max_val = params_bounds[inline_path]
-                for y_val in self._extract_envelope_y_values(m_inline.group(2)):
-                    if outside_domain(y_val, min_val, max_val):
-                        diagnostics.append(Diagnostic(
-                            range=Range(
-                                start=Position(line=n, character=0),
-                                end=Position(line=n, character=len(line)),
-                            ),
-                            message=(
-                                f"Valore envelope {y_val} fuori dai bounds "
-                                f"del parametro '{inline_path}': "
-                                f"{domain_label(min_val, max_val)}."
-                            ),
-                            severity=DiagnosticSeverity.Error,
-                            source='pge-ls',
-                        ))
+                    y_node = self._node_at(value_node, percorso)
+                    if y_node is None:
+                        continue
+                    riga = stream_start + y_node.start_mark.line
+                    diagnostics.append(Diagnostic(
+                        range=Range(
+                            start=Position(line=riga, character=0),
+                            end=Position(line=riga,
+                                         character=len(lines[riga])),
+                        ),
+                        message=(
+                            f"Valore envelope {y} fuori dai bounds "
+                            f"del parametro '{path}': "
+                            f"{domain_label(*domain)}."
+                        ),
+                        severity=DiagnosticSeverity.Error,
+                        source='pge-ls',
+                    ))
 
         return diagnostics
+
+    @classmethod
+    def _node_at(cls, node, percorso: tuple):
+        """Il sotto-nodo a cui porta `percorso`, o None se non c'e'.
+
+        Il percorso e' quello di `envelope_y_paths`: indici nelle sequenze,
+        chiavi nei mapping. Il valore costruito e il nodo hanno la stessa
+        forma, quindi il percorso vale per tutti e due.
+        """
+        for passo in percorso:
+            if isinstance(passo, int):
+                if (not isinstance(node, yaml.SequenceNode)
+                        or passo >= len(node.value)):
+                    return None
+                node = node.value[passo]
+            else:
+                node = dict(cls._mapping_items(node)).get(passo)
+                if node is None:
+                    return None
+        return node
 
     # -------------------------------------------------------------------------
     # FASE 1: PARSING
@@ -1822,14 +1773,20 @@ class DiagnosticProvider:
     @staticmethod
     def _extract_envelope_y_values(value_str: str) -> List[float]:
         """
-        Estrae i valori Y da un envelope serializzato.
+        Estrae i valori Y da un envelope serializzato, per il blocco pitch.
 
-        Formati riconosciuti (stessi di _check_envelope_bounds):
+        Formati riconosciuti:
           - breakpoints standard: [[t, y], ...] oppure il singolo [t, y]
           - compact loop: [[[x_pct, y], ...], end_time, ...]
           - BP group diretto: [[[t, y], ...], 'interp'] (PGE #64)
           - misto: BP group e loop block come item della lista esterna
         Formati non riconosciuti: lista vuota (tolleranza).
+
+        È la lettura sul testo che i bound generici hanno lasciato con la
+        issue #58 (`ast.literal_eval` non è YAML: `cubic` nudo, `{t: 0}` e il
+        dict `{type, points}` non ci passano); la usa ancora solo
+        `_check_pitch_value_bounds`. La lettura strutturale è
+        `envelope_y_paths`.
         """
         import ast
         ys: List[float] = []
@@ -3585,46 +3542,15 @@ class DiagnosticProvider:
         non è una Y e che sotto `range_anchor: min` fa scattare un Error su
         uno YAML che rende, cioè il modo peggiore di sbagliarsi.
 
-        Stessa apertura che `_extract_envelope_y_values` fa sul testo; qui la
-        struttura è già parsata, quindi si riusano le forme di
-        `envelope_shapes` invece di riconoscerle di nuovo.
+        La lettura è quella di `envelope_y_paths`, la stessa dei bound
+        generici (fase 5), senza i percorsi: una regola sola per dire quali
+        numeri di un envelope sono Y.
 
         Lista vuota se non se ne ricava nessuna Y: una forma che non
         riconosciamo non è una forma senza valori, quindi chi chiama non ci
         legge dentro un permesso.
         """
-        if isinstance(raw, dict):
-            raw = raw.get('points')
-        if not isinstance(raw, list):
-            return []
-
-        def _is_num(v) -> bool:
-            return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-        def _ys_of_pattern(points) -> List[float]:
-            """Le Y dei punti piatti dentro una macro-forma."""
-            return [float(pt[1]) for pt in points
-                    if isinstance(pt, list) and len(pt) >= 2 and _is_num(pt[1])]
-
-        # Macro-forma come corpo intero: le Y stanno nel suo elemento 0.
-        if is_loop_block(raw) or is_bp_group(raw):
-            return _ys_of_pattern(raw[0])
-
-        ys: List[float] = []
-        for item in raw:
-            # Il breakpoint dict `{t, v, type?}` e' la stessa Y di `[t, v]`:
-            # `EnvelopeBuilder.parse` lo normalizza prima di guardarlo, quindi
-            # qui si fa lo stesso invece di scartarlo come forma sconosciuta.
-            if isinstance(item, dict) and 't' in item and 'v' in item:
-                item = [item['t'], item['v']]
-            # Le macro-forme si riconoscono per prime: un ciclo compatto ha
-            # `item[1]` numerico e cadrebbe fra i breakpoint piatti.
-            if is_loop_block(item) or is_bp_group(item):
-                ys.extend(_ys_of_pattern(item[0]))
-            elif (isinstance(item, list) and len(item) >= 2
-                    and _is_num(item[0]) and _is_num(item[1])):
-                ys.append(float(item[1]))
-        return ys
+        return [float(y) for _percorso, y in envelope_y_paths(raw)]
 
     @staticmethod
     def _block_end(lines: List[str], key_line: int, limit: int,
@@ -3960,40 +3886,6 @@ class DiagnosticProvider:
             if contains_math_expression(ciclo):
                 continue
             yield ciclo, node
-
-    def _deviation_probability_lines(
-        self, lines: List[str],
-        streams: List[Tuple[int, int, dict]],
-    ) -> 'frozenset[int]':
-        """Le righe coperte da un blocco `deviation_probability:`.
-
-        Le Y scritte lì sono **probabilità**, in scala 0-100 (`RandomGate`
-        confronta `uniform(0, 100)` e clampa gli estremi), non valori del
-        parametro che porta lo stesso nome: il gate non le confronta mai con
-        i suoi bound. `_check_envelope_bounds` invece risolve la chiave per
-        nome locale, e `volume: [[0, 20], [10, 90]]` — la forma che l'hover
-        insegna — prendeva due Error contro i bound di `volume` in decibel.
-
-        Stesso mestiere di `_scaled_unit_suppressed_lines`, e per lo stesso
-        motivo: una scala diversa da quella in cui sono espressi i bound.
-
-        Serve solo ai bound degli **envelope**. Quelli scalari risolvono sul
-        path completo (`deviation_probability.volume`), che non è un
-        parametro, quindi non ci arrivano; il corpo del blocco lo giudica la
-        fase 15, che è l'unica a sapere cosa il motore ci costruisce.
-        """
-        covered: set = set()
-        for stream_start, stream_end_incl, _keys in streams:
-            stream_end = stream_end_incl + 1
-            # Stessa ricerca della fase 15, e per costruzione: la soppressione
-            # deve coprire il blocco che quella fase giudica, non un altro.
-            key_line = self._find_key_line_at_indent(
-                lines, stream_start, stream_end, DEVIATION_PROBABILITY_PATH, 4)
-            if key_line is None:
-                continue
-            covered.update(range(
-                key_line, self._block_end(lines, key_line, stream_end, 4)))
-        return frozenset(covered)
 
     def _scaled_unit_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
         """Righe di duration/duration_range dentro un blocco grain in un'unità
