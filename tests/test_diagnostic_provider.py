@@ -2184,6 +2184,30 @@ class TestLoopEndLeLoopStart:
         assert len(errori) == 1
         assert errori[0].range.start.line == 6
 
+    def test_con_loop_dur_scartato_il_rimedio_e_togliere_loop_end(
+            self, loop_bridge):
+        """`loop_dur` e' gia' scritto: consigliare di usarlo e' il rimedio
+        che l'utente ha gia' provato, e sulla stessa riga il Warning del
+        gruppo dice di rimuoverlo. La finestra che voleva e' quella di
+        `loop_dur`, e a spegnerla e' `loop_end`."""
+        yaml = self._stream(
+            "      loop_start: 2.0\n"
+            "      loop_end: 1.0\n"
+            "      loop_dur: 3.0\n"
+        )
+        [errore] = self._degeneri(DiagnosticProvider(loop_bridge), yaml)
+        assert 'usa `loop_dur`' not in errore.message
+        assert 'rimuovi `loop_end`' in errore.message
+
+    def test_senza_loop_dur_il_rimedio_resta_usare_loop_dur(
+            self, loop_bridge):
+        yaml = self._stream(
+            "      loop_start: 2.0\n"
+            "      loop_end: 1.0\n"
+        )
+        [errore] = self._degeneri(DiagnosticProvider(loop_bridge), yaml)
+        assert 'usa `loop_dur`' in errore.message
+
     def test_loop_dur_accanto_a_loop_end_finestra_valida(self, loop_bridge):
         yaml = self._stream(
             "      loop_start: 1.0\n"

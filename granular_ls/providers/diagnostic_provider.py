@@ -2588,14 +2588,27 @@ class DiagnosticProvider:
 
             if (loop_start_val is not None and loop_end_val is not None
                     and loop_end_val <= loop_start_val):
+                # Arrivati qui un `loop_dur` scritto e' per forza scartato:
+                # consigliarlo sarebbe il rimedio gia' tentato, e sulla stessa
+                # riga il Warning del gruppo dice di rimuoverlo.
+                if 'pointer.loop_dur' in scritti:
+                    rimedio = (
+                        '`loop_dur` e\' scritto ma il motore lo scarta '
+                        '(gruppo esclusivo con `loop_end`): per un loop a '
+                        'cavallo della fine del file rimuovi `loop_end`.'
+                    )
+                else:
+                    rimedio = (
+                        'Per un loop a cavallo della fine del file usa '
+                        '`loop_dur` (`loop_end` resta confinato a '
+                        '[0, sample_dur]).'
+                    )
                 diagnostics.append(Diagnostic(
                     range=self._line_range(loop_end_line),
                     message=(
                         f'`loop_end` ({loop_end_val}) deve essere maggiore di '
                         f'`loop_start` ({loop_start_val}): finestra di loop '
-                        'degenere. Per un loop a cavallo della fine del file usa '
-                        '`loop_dur` (`loop_end` resta confinato a '
-                        '[0, sample_dur]).'
+                        f'degenere. {rimedio}'
                     ),
                     severity=DiagnosticSeverity.Error,
                     source=SOURCE,
