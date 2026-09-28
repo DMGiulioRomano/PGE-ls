@@ -3109,6 +3109,12 @@ class DiagnosticProvider:
         Le due righe del verso servono a _check_grain_direction: il gruppo
         esclusivo 'grain_direction' è per-blocco-grain, quindi va deciso qui
         dove i confini del blocco sono già noti.
+
+        La riga `grain:` si riconosce in tutte le sue grafie: con un commento
+        inline, come ogni riga YAML, e sulla riga del trattino quando è la
+        prima chiave dello stream (`  - grain:`), dove l'indentazione grezza è
+        quella del trattino ma il livello della chiave è 4. Un blocco non
+        riconosciuto qui non lo guarda nessuna delle fasi che ne dipendono.
         """
         blocks: List[dict] = []
         for stream_start, stream_end_incl, _keys in streams:
@@ -3118,7 +3124,11 @@ class DiagnosticProvider:
                 raw = lines[n]
                 stripped = raw.strip()
                 leading = len(raw) - len(raw.lstrip())
-                if leading == 4 and stripped == 'grain:':
+                if leading == 2 and stripped.startswith('- '):
+                    stripped = stripped[2:].strip()
+                    leading = 4
+                if (leading == 4
+                        and _strip_inline_comment(stripped) == 'grain:'):
                     grain_start = n
                     break
             if grain_start is None:

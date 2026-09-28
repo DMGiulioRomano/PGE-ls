@@ -3397,6 +3397,75 @@ class TestGrainCommentoInlineENull:
 
 
 # =============================================================================
+# La riga del blocco grain, in tutte le sue grafie
+# =============================================================================
+
+class TestRigaDelBloccoGrain:
+    """
+    `_scan_grain_blocks` riconosceva solo `    grain:` nudo. Con un commento
+    inline (`grain:  # …`) o come prima chiave dello stream, sulla riga del
+    trattino (`  - grain:`), il blocco non esisteva per le fasi che lo
+    scandiscono: unità della durata (un falso positivo: 480 campioni sono
+    10 ms) e verso del grano.
+
+    Finché `grain.reverse` passava dai bound generici, che il blocco lo
+    trovano da sé, il buco era coperto per caso; con la chiave fuori dai
+    generici (issue #56) sarebbe diventato silenzio su uno YAML che il motore
+    rifiuta.
+    """
+
+    @staticmethod
+    def _col_commento(body: str) -> str:
+        return _stream_yaml("    grain:  # granulazione\n" + body)
+
+    @staticmethod
+    def _sul_trattino(body: str) -> str:
+        return ("streams:\n  - grain:\n" + body
+                + "    stream_id: s1\n    onset: 0.0\n"
+                  "    duration: 10.0\n    sample: f.wav\n")
+
+    @staticmethod
+    def _errors(provider, yaml):
+        return [d for d in provider.get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error]
+
+    @pytest.mark.parametrize('grafia', ['_col_commento', '_sul_trattino'])
+    def test_soppressione_dei_bound_nell_unita_dichiarata(self, bridge, grafia):
+        provider = DiagnosticProvider(bridge)
+        yaml = getattr(self, grafia)(
+            "      duration_unit: samples\n"
+            "      duration: 480\n"
+        )
+        assert self._errors(provider, yaml) == []
+
+    @pytest.mark.parametrize('grafia', ['_col_commento', '_sul_trattino'])
+    def test_unita_ignota(self, bridge, grafia):
+        provider = DiagnosticProvider(bridge)
+        yaml = getattr(self, grafia)("      duration_unit: bogus\n")
+        assert len(self._errors(provider, yaml)) == 1
+
+    @pytest.mark.parametrize('grafia', ['_col_commento', '_sul_trattino'])
+    @pytest.mark.parametrize('riga', ['reverse: 5', 'reverse: 1',
+                                      'read_direction: 0'])
+    def test_verso_del_grano(self, rd_bridge, grafia, riga):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = getattr(self, grafia)(f"      {riga}\n")
+        errs = self._errors(provider, yaml)
+        assert len(errs) == 1, [e.message for e in errs]
+        assert 'non è ammesso' in errs[0].message
+        # La riga della chiave, subito sotto quella del blocco.
+        riga_grain = next(n for n, r in enumerate(yaml.split('\n'))
+                          if 'grain:' in r)
+        assert errs[0].range.start.line == riga_grain + 1
+
+    @pytest.mark.parametrize('grafia', ['_col_commento', '_sul_trattino'])
+    def test_reverse_vuota_resta_valida(self, rd_bridge, grafia):
+        provider = DiagnosticProvider(rd_bridge)
+        yaml = getattr(self, grafia)("      reverse:\n")
+        assert self._errors(provider, yaml) == []
+
+
+# =============================================================================
 # deviation_probability: corpo che non si costruisce come envelope (PGE #209)
 # =============================================================================
 
