@@ -2158,3 +2158,117 @@ def test_pointer_start_guard_del_motore_e_ancora_isinstance(pge):
     ), ("il guard di pointer.start non e' piu' `not isinstance(self.start, "
         "(int, float))`: il mirror in _check_pointer_start_envelope va "
         "riallineato")
+
+
+# =============================================================================
+# loop_end + loop_dur: chi vince, e la finestra degenere (#55)
+# =============================================================================
+#
+# Scritti insieme, `ExclusiveGroupSelector` tiene il membro di `loop_bounds`
+# con `group_priority` piu' bassa e porta l'altro a `None`; con `loop_dur` a
+# `None`, `PointerController._validate_loop_bounds` valida `loop_end` e rifiuta
+# la finestra degenere. PGE-ls diceva il contrario (vince `loop_dur`) e sulla
+# stessa premessa spegneva l'Error.
+
+def test_loop_bounds_vince_loop_end_nello_schema_del_motore(pge):
+    """La premessa della doc del blocco `pointer` (hover), che e' prosa e non
+    legge il bridge: gira anche senza numpy/soundfile."""
+    from granular_ls.schema_bridge import _import_pge_module
+
+    schema = _import_pge_module(
+        'parameters.parameter_schema').POINTER_PARAMETER_SCHEMA
+    spec = {s.name: s for s in schema}
+    end, dur = spec['loop_end'], spec['loop_dur']
+    assert end.exclusive_group is not None
+    assert end.exclusive_group == dur.exclusive_group
+    assert end.group_priority < dur.group_priority, (
+        "il motore ora preferisce loop_dur a loop_end: la voce del blocco "
+        "pointer in hover_provider._BLOCK_KEY_DOCS va riallineata")
+
+
+def test_la_finestra_degenere_resta_segnalata_con_loop_dur_dal_vivo(pge):
+    """Il lato LS col bridge vero: il gruppo esclusivo che la fase 10 legge
+    deve arrivare dallo schema del motore, non solo dalle fixture."""
+    from granular_ls.schema_bridge import SchemaBridge
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+
+    provider = DiagnosticProvider(SchemaBridge.from_python_path(PGE_SRC))
+    assert _loop_ls_segnala(provider, {'loop_start': 0.5, 'loop_end': 0.2,
+                                       'loop_dur': 0.1})
+
+
+LOOP_BOUNDS_CORPUS = [
+    {'loop_start': 0.5, 'loop_end': 0.2, 'loop_dur': 0.1},
+    {'loop_start': 0.5, 'loop_end': 0.5, 'loop_dur': 0.1},
+    {'loop_start': 0.5, 'loop_end': 0.2, 'loop_dur': 9.0},
+    {'loop_start': 0.2, 'loop_end': 0.5, 'loop_dur': 0.1},
+    {'loop_start': 0.5, 'loop_end': 0.2},
+    {'loop_start': 0.2, 'loop_end': 0.5},
+    {'loop_start': 0.5, 'loop_dur': 0.1},
+]
+
+
+def _loop_engine_accetta(pointer: dict) -> bool:
+    """Il motore costruisce un PointerController con questo blocco?
+
+    Solo `InvalidFieldValueError` e' il rifiuto (vedi
+    `_pointer_start_engine_accetta`).
+    """
+    from granular_ls.schema_bridge import _import_pge_module
+
+    PointerController = _import_pge_module(
+        'controllers.pointer_controller').PointerController
+    stream_config = _import_pge_module('core.stream_config')
+    InvalidFieldValueError = _import_pge_module(
+        'shared.exceptions').InvalidFieldValueError
+    contesto = stream_config.StreamContext.from_yaml(
+        {'stream_id': 's1', 'sample': 'f.wav', 'duration': 10.0, 'onset': 0.0},
+        sample_dur_sec=10.0,
+    )
+    try:
+        PointerController(dict(pointer),
+                          stream_config.StreamConfig(context=contesto))
+        return True
+    except InvalidFieldValueError:
+        return False
+
+
+def _loop_ls_segnala(provider, pointer: dict) -> bool:
+    from lsprotocol.types import DiagnosticSeverity
+
+    documento = (
+        "streams:\n"
+        "  - stream_id: s1\n"
+        "    sample: f.wav\n"
+        "    duration: 10.0\n"
+        "    pointer:\n"
+        + ''.join(f"      {k}: {v}\n" for k, v in pointer.items())
+    )
+    return any(d.severity == DiagnosticSeverity.Error
+               and 'degenere' in d.message
+               for d in provider.get_diagnostics(documento))
+
+
+@pytest.mark.parametrize('pointer', LOOP_BOUNDS_CORPUS,
+                         ids=lambda p: ','.join(f'{k}={v}' for k, v in p.items()))
+def test_loop_bounds_mirror_matches_engine(pge, pointer, tmp_path,
+                                          monkeypatch):
+    from granular_ls.schema_bridge import SchemaBridge
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+
+    # Il logger del motore scrive `logs/` nella cartella corrente.
+    monkeypatch.chdir(tmp_path)
+    try:
+        assert _loop_engine_accetta({'loop_start': 0.2, 'loop_end': 0.5})
+    except ImportError:
+        pytest.skip("PointerController non costruibile senza numpy/soundfile")
+
+    motore_accetta = _loop_engine_accetta(pointer)
+    provider = DiagnosticProvider(SchemaBridge.from_python_path(PGE_SRC))
+    ls_segnala = _loop_ls_segnala(provider, pointer)
+
+    assert ls_segnala == (not motore_accetta), (
+        f"Drift su {pointer}: il motore "
+        f"{'accetta' if motore_accetta else 'rifiuta'}, il LS "
+        f"{'segnala' if ls_segnala else 'tace'} la finestra degenere"
+    )

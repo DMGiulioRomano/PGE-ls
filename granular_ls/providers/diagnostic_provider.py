@@ -416,8 +416,8 @@ class DiagnosticProvider:
         # Fase 7: start bypassato da loop_start envelope.
         diagnostics.extend(self._check_start_bypassed_by_loop_start(lines, streams))
 
-        # Fase 8: loop_dur e loop_end presenti insieme (loop_dur ha priorita').
-        diagnostics.extend(self._check_loop_dur_overrides_loop_end(lines, streams))
+        # (Fase 8 rimossa, #55: `loop_end` accanto a `loop_dur` e' un gruppo
+        # esclusivo, e chi vince lo dice gia' `_check_exclusive_groups`.)
 
         # Fase 9: bounds dinamici per i parametri pointer (normalized vs absolute).
         diagnostics.extend(self._check_pointer_param_bounds(
@@ -2511,86 +2511,6 @@ class DiagnosticProvider:
 
         return diagnostics
 
-    def _check_loop_dur_overrides_loop_end(
-        self, lines: List[str],
-        streams: List[Tuple[int, int, dict]],
-    ) -> List[Diagnostic]:
-        """
-        Warning quando loop_dur e loop_end sono entrambi presenti nello stesso
-        blocco pointer:.
-
-        Regola motore: se loop_dur e' definito, viene usato per calcolare
-        loop_end = loop_start + loop_dur, ignorando completamente loop_end.
-        """
-        diagnostics = []
-
-        for stream_start, stream_end_incl, _keys in streams:
-            stream_end = stream_end_incl + 1
-            # Trova il blocco pointer: (header a 4 spazi)
-            pointer_start = None
-            for n in range(stream_start, stream_end):
-                raw = lines[n]
-                stripped = raw.strip()
-                leading = len(raw) - len(raw.lstrip())
-                if leading == 4 and (stripped == 'pointer:' or stripped.startswith('pointer:')):
-                    pointer_start = n
-                    break
-            if pointer_start is None:
-                continue
-
-            # Trova la fine del blocco pointer
-            pointer_end = stream_end
-            for n in range(pointer_start + 1, stream_end):
-                raw = lines[n]
-                if not raw.strip():
-                    continue
-                if (len(raw) - len(raw.lstrip())) <= 4:
-                    pointer_end = n
-                    break
-
-            # Dentro il blocco pointer: trova loop_dur e loop_end (a 6 spazi)
-            loop_dur_line: Optional[int] = None
-            loop_end_line: Optional[int] = None
-
-            for n in range(pointer_start + 1, pointer_end):
-                raw = lines[n]
-                stripped = raw.strip()
-                leading = len(raw) - len(raw.lstrip())
-                if not stripped or stripped.startswith('#') or leading != 6:
-                    continue
-                m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:', stripped)
-                if not m:
-                    continue
-                key = m.group(1)
-                if key == 'loop_dur':
-                    loop_dur_line = n
-                elif key == 'loop_end':
-                    loop_end_line = n
-
-            if loop_dur_line is not None and loop_end_line is not None:
-                diagnostics.append(Diagnostic(
-                    range=self._line_range(loop_end_line),
-                    message=(
-                        '`loop_end` ignorato: quando `loop_dur` e\' definito, '
-                        'il motore calcola `loop_end = loop_start + loop_dur` '
-                        'e ignora il valore di `loop_end`. '
-                        'Rimuovi `loop_end` oppure usa solo `loop_end` senza `loop_dur`.'
-                    ),
-                    severity=DiagnosticSeverity.Warning,
-                    source=SOURCE,
-                ))
-                diagnostics.append(Diagnostic(
-                    range=self._line_range(loop_dur_line),
-                    message=(
-                        '`loop_dur` ha priorita\' su `loop_end`: '
-                        'il motore usa `loop_end = loop_start + loop_dur`.'
-                    ),
-                    severity=DiagnosticSeverity.Warning,
-                    source=SOURCE,
-                ))
-
-        return diagnostics
-
     def _check_loop_end_le_loop_start(
         self, lines: List[str],
         streams: List[Tuple[int, int, dict]],
@@ -2604,9 +2524,13 @@ class DiagnosticProvider:
         i bound statici: se loop_start o loop_end sono envelope (lista/dict)
         gli endpoint sono dinamici e l'engine esenta il controllo.
 
-        loop_dur ha priorita' su loop_end: se loop_dur e' presente, loop_end
-        viene ignorato dal motore e non ha senso segnalare la degenerazione
-        (gia' coperto dal warning di _check_loop_dur_overrides_loop_end).
+        Il motore valida l'ordine solo quando `loop_dur` non e' costruito
+        (`_validate_loop_bounds`). Scritto accanto a `loop_end`, `loop_dur`
+        esce dal gruppo esclusivo `loop_bounds` come perdente (oggi `loop_end`
+        ha `group_priority=1`) e la finestra si valida lo stesso (#55). Chi
+        perde non si decide qui: lo dicono le priorita' del bridge, come per
+        `_check_exclusive_groups`; un bridge che non conosce il gruppo non
+        scarta nessuno, e con `loop_dur` scritto la fase tace.
         """
         diagnostics = []
 
@@ -2635,11 +2559,11 @@ class DiagnosticProvider:
                     break
 
             # Raccoglie i valori scalari di loop_start/loop_end (a 6 spazi) e
-            # rileva la presenza di loop_dur.
+            # le chiavi scritte, per sapere se `loop_dur` viene costruito.
             loop_start_val: Optional[float] = None
             loop_end_val: Optional[float] = None
             loop_end_line: Optional[int] = None
-            has_loop_dur = False
+            scritti = set()
 
             for n in range(pointer_start + 1, pointer_end):
                 raw = lines[n]
@@ -2651,9 +2575,7 @@ class DiagnosticProvider:
                 if not m:
                     continue
                 key, val_str = m.group(1), m.group(2).strip()
-                if key == 'loop_dur':
-                    has_loop_dur = True
-                    continue
+                scritti.add(f'pointer.{key}')
                 if key not in ('loop_start', 'loop_end'):
                     continue
                 # Envelope o valore vuoto: endpoint dinamici, esenti dal check.
@@ -2670,20 +2592,34 @@ class DiagnosticProvider:
                     loop_end_val = val
                     loop_end_line = n
 
-            # loop_dur vince su loop_end: nessuna segnalazione di degenerazione.
-            if has_loop_dur:
+            # `loop_dur` costruito: il motore non valida l'ordine.
+            if ('pointer.loop_dur' in scritti and 'pointer.loop_dur'
+                    not in self._exclusive_losers_among(scritti)):
                 continue
 
             if (loop_start_val is not None and loop_end_val is not None
                     and loop_end_val <= loop_start_val):
+                # Arrivati qui un `loop_dur` scritto e' per forza scartato:
+                # consigliarlo sarebbe il rimedio gia' tentato, e sulla stessa
+                # riga il Warning del gruppo dice di rimuoverlo.
+                if 'pointer.loop_dur' in scritti:
+                    rimedio = (
+                        '`loop_dur` e\' scritto ma il motore lo scarta '
+                        '(gruppo esclusivo con `loop_end`): per un loop a '
+                        'cavallo della fine del file rimuovi `loop_end`.'
+                    )
+                else:
+                    rimedio = (
+                        'Per un loop a cavallo della fine del file usa '
+                        '`loop_dur` (`loop_end` resta confinato a '
+                        '[0, sample_dur]).'
+                    )
                 diagnostics.append(Diagnostic(
                     range=self._line_range(loop_end_line),
                     message=(
                         f'`loop_end` ({loop_end_val}) deve essere maggiore di '
                         f'`loop_start` ({loop_start_val}): finestra di loop '
-                        'degenere. Per un loop a cavallo della fine del file usa '
-                        '`loop_dur` (`loop_end` resta confinato a '
-                        '[0, sample_dur]).'
+                        f'degenere. {rimedio}'
                     ),
                     severity=DiagnosticSeverity.Error,
                     source=SOURCE,
@@ -3889,11 +3825,8 @@ class DiagnosticProvider:
 
     def _exclusive_losers(self, stream_node) -> frozenset:
         """
-        I membri di un gruppo esclusivo che il motore scarta in questo stream.
-
-        Mirror di `ExclusiveGroupSelector.select_parameters`: fra i membri
-        scritti vince quello con `group_priority` piu' bassa, e gli altri non
-        vengono costruiti — `density` accanto a `fill_factor`, `loop_dur`
+        I membri di un gruppo esclusivo che il motore scarta in questo stream
+        e non costruisce — `density` accanto a `fill_factor`, `loop_dur`
         accanto a `loop_end`. Scritto vuol dire presente, anche vuoto
         (`_is_specified`). Un ciclo sotto un perdente non si espande mai, e
         il render parte: basta il Warning di `_check_exclusive_groups`.
@@ -3904,6 +3837,16 @@ class DiagnosticProvider:
             for sub, _ in self._mapping_items(value_node):
                 presenti.add(f'{key}.{sub}')
 
+        return self._exclusive_losers_among(presenti)
+
+    def _exclusive_losers_among(self, presenti) -> frozenset:
+        """I membri di un gruppo esclusivo scartati fra i path `presenti`.
+
+        Mirror di `ExclusiveGroupSelector.select_parameters`: vince il
+        membro scritto con `group_priority` piu' bassa. Letto dal bridge,
+        cosi' ogni fase che chiede chi perde ha la risposta della fase che
+        lo dice all'utente (`_check_exclusive_groups`).
+        """
         perdenti = set()
         for members in self._bridge.get_exclusive_groups().values():
             scritti = sorted((m for m in members if m.yaml_path in presenti),
