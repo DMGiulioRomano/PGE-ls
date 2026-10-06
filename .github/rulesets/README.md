@@ -33,8 +33,11 @@ una PR qualunque (basta che il workflow giri una volta), poi importa.
 Uno status check richiesto non vale solo al merge: vale su **tutto** cio' che
 entra nel branch. Con questo ruleset attivo un `git push` diretto su `main`
 viene rifiutato, perche' il commit che arriva non ha check che siano passati.
-Il flusso di `~/.claude/rules/git-workflow.md` ammette il commit diretto su
-`main` per le modifiche banali (README, `.gitignore`, refusi): dopo l'import
+In questo repo il prezzo e' gia' pagato: il `CLAUDE.md` vieta il commit
+diretto su `main` per qualunque modifica, documentazione e refusi compresi,
+quindi il ruleset non toglie niente che il flusso ammetta. Altrove si paga:
+il flusso di `~/.claude/rules/git-workflow.md` ammette il commit diretto su
+`main` per le modifiche banali (README, `.gitignore`, refusi), e dopo l'import
 quelle passano da una PR come le altre.
 
 Se e' un prezzo troppo alto, le vie sono due e sono entrambe dichiarate:

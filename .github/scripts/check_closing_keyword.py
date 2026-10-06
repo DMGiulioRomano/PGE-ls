@@ -1,9 +1,9 @@
+#!/usr/bin/env python3
 # Copia. L'originale, con la suite intera che lo esercita, sta in
 # DMGiulioRomano/PythonGranularEngine, .github/scripts/check_closing_keyword.py:
 # se questo file va cambiato, si cambia la' e si ricopia. I sette repo tengono
 # lo stesso check perche' la regola che codifica e' una proprieta' di GitHub --
 # le nove parole chiave, la grammatica del riferimento -- e non di un repo.
-#!/usr/bin/env python3
 """Il corpo di una PR dichiara l'issue che chiude, oppure dichiara di non chiuderne.
 
 GitHub chiude un'issue al merge soltanto se un **closing keyword** compare nel
