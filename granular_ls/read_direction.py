@@ -51,11 +51,16 @@ from typing import Any, Optional, Tuple
 
 from granular_ls.envelope_shapes import (
     compact_blocks,
+    compact_end_time_ok,
+    compact_n_reps_ok,
     contains_math_expression,
     is_3tuple_breakpoint as _is_3tuple_breakpoint,
     is_bp_group as _is_bp_group,
     is_loop_block as _is_compact_format,
+    is_num as _is_num,
     normalize_engine_values,
+    pattern_x_goes_forward,
+    pattern_x_in_range,
 )
 from granular_ls.time_distributions import (
     TIME_DISTRIBUTION_NAMES as _TIME_DISTRIBUTION_NAMES,
@@ -135,7 +140,8 @@ REPS_ARITY_HINT = (
 END_TIME_HINT = (
     "il secondo elemento del formato compatto è l'istante assoluto in cui il "
     "ciclo finisce, e deve superare quello in cui comincia: dev'essere un "
-    "numero positivo (`true` non è `1`). Che superi davvero l'istante di "
+    "numero positivo e finito (`true` non è `1`, e con `.inf` o `.nan` non "
+    "c'è nessun istante in cui finire). Che superi davvero l'istante di "
     "partenza lo verifica il motore, l'unico a conoscere l'offset accumulato "
     "dagli elementi che precedono in una lista mista."
 )
@@ -269,11 +275,6 @@ REVERSE_VALUE_HINT = (
 # accetta per sottoclasse di `int`: quella divergenza è stata corretta alla
 # fonte, e la copia non serve più.
 
-def _is_num(value: Any) -> bool:
-    """Numero vero: `bool` è sottoclasse di `int`, ma `true` non è `+1`."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
 def _issue(value: Any, hint: str) -> ReadDirectionIssue:
     return ReadDirectionIssue(value=value, hint=hint)
 
@@ -377,14 +378,14 @@ def _check_compact(compact: list) -> Optional[ReadDirectionIssue]:
     if issue is not None:
         return issue
 
-    if not _is_num(end_time) or end_time <= 0:
+    # I due guard sono quelli universali di `envelope_shapes`, non una copia:
+    # dalla PGE #211 vivono in `EnvelopeBuilder` e valgono per ogni chiave.
+    # La finitezza arriva da lì, e qui mancava: `.inf` passava `end_time <= 0`
+    # ed era un silenzio su uno YAML che il motore rifiuta.
+    if not compact_end_time_ok(end_time):
         return _issue(end_time, END_TIME_HINT)
 
-    # Solo la natura di `n_reps`: che sia un `int` lo garantisce già
-    # `_is_compact_format`. Resta fuori il solo `bool`, che lì passa per
-    # sottoclasse e qui no: senza questo `True < 1` è falso, il guard non
-    # scatta e il motore renderebbe un ciclo in silenzio.
-    if not _is_num(n_reps) or n_reps < 1:
+    if not compact_n_reps_ok(n_reps):
         return _issue(n_reps, REPS_ARITY_HINT)
 
     if not pattern:
@@ -417,9 +418,9 @@ def _check_pattern_point(point: list,
     """
     if not _is_num(point[0]):
         return _issue(point, FORM_HINT)
-    if not 0 <= point[0] <= 100:
+    if not pattern_x_in_range(point[0]):
         return _issue(point[0], PATTERN_X_HINT)
-    if precedente is not None and point[0] < precedente:
+    if not pattern_x_goes_forward(point[0], precedente):
         return _issue(point[0], PATTERN_ORDER_HINT)
     if len(point) == 3:
         issue = _check_interp(point[2])

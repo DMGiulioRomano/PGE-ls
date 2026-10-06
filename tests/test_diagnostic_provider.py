@@ -3721,11 +3721,18 @@ class TestDeviationProbabilityEnvelopeBody:
         )
         assert self._errors(provider, yaml) == []
 
-    def test_guard_specifici_di_read_direction_non_replicati(self, bridge):
-        """Percentuali fuori scala e x decrescenti: il motore le accetta qui.
+    def test_i_guard_sulla_forma_del_ciclo_valgono_anche_qui(self, bridge):
+        """Percentuali fuori scala e x decrescenti: il motore le rifiuta.
 
-        Sono semantica di `grain.read_direction` (PGE #208), non del formato
-        envelope — replicarle qui segnalerebbe YAML che rende.
+        Questi tre test dicevano il contrario, e con una ragione che era vera:
+        erano «semantica di `grain.read_direction` (PGE #208), non del formato
+        envelope — replicarle qui segnalerebbe YAML che rende». La PGE #211 li
+        ha spostati in `EnvelopeBuilder` proprio perche' NON erano semantica
+        del verso, e da li' valgono per ogni chiave. Il mirror ha continuato a
+        tacere: quattro YAML che non rendono senza una riga rossa.
+
+        A dire quale sia la verita' di oggi non e' questo file ma
+        `tests/test_pge_parity.py`, che la chiede al motore a ogni run.
         """
         provider = DiagnosticProvider(bridge)
         for pattern in ("[[0, 50], [150, 100]]", "[[100, 50], [0, 100]]"):
@@ -3733,21 +3740,21 @@ class TestDeviationProbabilityEnvelopeBody:
                 "    deviation_probability:\n"
                 f"      volume: [{pattern}, 10.0, 4]\n"
             )
-            assert self._errors(provider, yaml) == [], pattern
+            assert len(self._errors(provider, yaml)) == 1, pattern
 
-    def test_n_reps_booleano_non_e_errore_qui(self, bridge):
+    def test_n_reps_booleano_e_un_errore(self, bridge):
+        """`true` non e' `1`: `is_loop_block` lo lascia passare per sottoclasse
+        di `int`, ed e' il guard a doverlo escludere -- come fa il motore."""
         provider = DiagnosticProvider(bridge)
         yaml = _stream_yaml(
             "    deviation_probability:\n"
             "      volume: [[[0, 50], [100, 100]], 10.0, true]\n"
         )
-        assert self._errors(provider, yaml) == []
-
-    # --- ma `false` vale `0` (review PR #48, rilievo 5) --------------------
+        assert len(self._errors(provider, yaml)) == 1
 
     def test_n_reps_false_e_un_errore(self, bridge):
-        """`true` vale `1` e passa; `false` vale `0`, che è esattamente il
-        caso che il guard sull'arità esiste per prendere."""
+        """`false` vale `0`, il caso che il guard sull'arita' esiste per
+        prendere. Rosso gia' prima della #211, per l'altra meta' del guard."""
         provider = DiagnosticProvider(bridge)
         yaml = _stream_yaml(
             "    deviation_probability:\n"
@@ -3763,15 +3770,28 @@ class TestDeviationProbabilityEnvelopeBody:
         )
         assert len(self._errors(provider, yaml)) == 1
 
-    def test_end_time_booleano_vero_resta_valido(self, bridge):
-        """La regressione dall'altro lato: `true` è `1`, un istante di fine
-        positivo, e il motore lo accetta."""
+    def test_end_time_booleano_vero_e_un_errore(self, bridge):
         provider = DiagnosticProvider(bridge)
         yaml = _stream_yaml(
             "    deviation_probability:\n"
             "      volume: [[[0, 50], [100, 100]], true, 4]\n"
         )
-        assert self._errors(provider, yaml) == []
+        assert len(self._errors(provider, yaml)) == 1
+
+    def test_end_time_non_finito_e_un_errore(self, bridge):
+        """`.inf` e `.nan` si scrivono nello YAML, e il motore li rifiuta.
+
+        Passavano il guard scritto `end_time <= 0` -- `nan` perche' ogni
+        confronto con lui e' falso, `.inf` perche' e' positivo davvero -- e il
+        ciclo si espandeva in breakpoint che nessuno aveva scritto.
+        """
+        provider = DiagnosticProvider(bridge)
+        for valore in (".inf", ".nan"):
+            yaml = _stream_yaml(
+                "    deviation_probability:\n"
+                f"      volume: [[[0, 50], [100, 100]], {valore}, 4]\n"
+            )
+            assert len(self._errors(provider, yaml)) == 1, valore
 
     def test_stringa_non_segnalata(self, bridge):
         """`(50/2)` e' una stringa che il Generator valuta a 25 prima del gate:

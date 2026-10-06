@@ -20,6 +20,7 @@ collisione con [t, v] (elem[0] numerico), 3-tuple e loop block (len != 2),
 o il legacy [[t, v], 'marker'] (elem[0] e' UN punto, non lista di punti).
 """
 
+import math
 import re
 
 # Tipi di interpolazione validi per il group interp (mirror di
@@ -215,6 +216,81 @@ def is_loop_block(item) -> bool:
     if len(item) == 6 and not isinstance(item[5], bool):
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# I guard UNIVERSALI del formato compatto (PGE #211)
+# ---------------------------------------------------------------------------
+# Fino a PGE #211 questi controlli vivevano dentro
+# `parameters/read_direction.py`, e solo li': lo stesso corpo sotto qualunque
+# altra chiave risaliva come `ValueError` nudo o si rendeva in silenzio. Il
+# motore li ha spostati in `EnvelopeBuilder._parse_compact_format`, che ogni
+# chiave attraversa.
+#
+# Qui stanno per la stessa ragione, ed e' la terza volta che la stessa regola
+# cambia casa: erano scritti due volte nel LS -- in `read_direction.py` e, a
+# meta', in `deviation_probability.py` -- e le due copie avevano gia'
+# divergiuto. Il mirror di `deviation_probability` non escludeva i bool, non
+# guardava le percentuali del pattern e accettava un `end_time` infinito,
+# perche' la sua prosa dichiarava quei guard «semantica del verso, non del
+# formato envelope»: vero fino alla #211, falso dopo. Erano sei silenzi su
+# YAML che il motore rifiuta -- e un silenzio e' peggio di un rosso sbagliato,
+# perche' nessuno lo vede.
+#
+# Le funzioni sono predicati e non un sequenziatore: ogni mirror conserva il
+# proprio ordine di controlli e i propri hint, scritti per la chiave che serve.
+# A stare qui e' la regola, non la diagnosi.
+
+
+def compact_end_time_ok(value) -> bool:
+    """`end_time` come lo accetta `EnvelopeBuilder._parse_compact_format`.
+
+    Numero vero (`true` non e' `1`), **finito** e positivo. La finitezza non e'
+    pedanteria, ed e' meta' di quel che questo guard aggiunge: ogni confronto
+    con `nan` e' falso, quindi `nan` passava il guard scritto `end_time <= 0`
+    e il ciclo si espandeva in breakpoint `nan`; scritto in positivo come qui,
+    `nan > 0` e' falso e cade da se', mentre `.inf` ha bisogno di
+    `math.isfinite`. Entrambi si scrivono nello YAML, quindi il caso si
+    raggiunge.
+
+    Il confronto con zero e' la meta' decidibile di quello del motore, che e'
+    `end_time > time_offset`: l'offset accumulato dagli elementi che precedono
+    il ciclo in una lista mista non e' mai negativo, ma per saperlo davvero
+    bisognerebbe rifare la passata di `EnvelopeBuilder.parse`.
+    """
+    return is_num(value) and math.isfinite(value) and value > 0
+
+
+def compact_n_reps_ok(value) -> bool:
+    """`n_reps`: numero vero >= 1.
+
+    I bool vanno esclusi a mano, qui come nel motore: `is_loop_block` li lascia
+    passare per sottoclasse di `int` (e deve farlo, vedi la sua docstring), e
+    `True < 1` e' falso -- senza l'esclusione `range(True)` rende un ciclo in
+    silenzio, mentre `false` vale `0` ed e' esattamente il caso che il guard
+    esiste per prendere.
+    """
+    return is_num(value) and value >= 1
+
+
+def pattern_x_in_range(x) -> bool:
+    """La prima coordinata di un punto del pattern e' una percentuale del
+    ciclo, e sta in `[0, 100]`: fuori di li' il ciclo sfonda i propri confini.
+    """
+    return is_num(x) and 0 <= x <= 100
+
+
+def pattern_x_goes_forward(x, precedente) -> bool:
+    """Le percentuali del pattern non tornano indietro: il ciclo si percorre
+    in avanti una volta sola. Una percentuale **ripetuta** va bene -- e' la
+    discontinuita' -- quindi il confronto e' `<`, non `<=`.
+
+    Su una x che non e' un numero risponde `True`: non e' il suo problema, e
+    chi chiama l'ha gia' respinta con `pattern_x_in_range` o con il guard di
+    forma del punto. Rispondere `False` qui darebbe all'utente il messaggio
+    sull'ordine delle percentuali davanti a una percentuale che non c'e'.
+    """
+    return precedente is None or not is_num(x) or x >= precedente
 
 
 def compact_block_positions(body) -> list:

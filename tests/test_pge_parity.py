@@ -799,6 +799,9 @@ READ_DIRECTION_CORPUS = [
     [[[0, 1], [50, -1]], 2.0, True],
     [[[0, 1], [50, -1]], True, 2],
     [[[0, 1], [50, -1]], 0, 2],
+    [[[0, 1], [50, -1]], float('inf'), 2],
+    [[[0, 1], [50, -1]], float('-inf'), 2],
+    [[[0, 1], [50, -1]], float('nan'), 2],
     [[[0, 1], [150, -1]], 2.0, 2],
     [[[0, 1], [-10, -1]], 2.0, 2],
     [[[100, 1], [0, -1]], 2.0, 2],
@@ -831,24 +834,46 @@ READ_DIRECTION_CORPUS = [
 
 @pytest.mark.parametrize('raw', READ_DIRECTION_CORPUS,
                          ids=lambda v: repr(v)[:60])
-def test_read_direction_mirror_matches_engine(pge, raw):
+def test_read_direction_mirror_matches_engine(pge, raw, tmp_path, monkeypatch):
+    """Il mirror rifiuta esattamente i corpi che il motore rifiuta.
+
+    **La strada e' quella del motore, non meta'.** Fino alla PGE #211 i guard
+    sulla forma — arita' del gruppo, cicli e percentuali del formato compatto,
+    distribuzione temporale — stavano dentro `normalize_read_direction`, e
+    chiedere solo a lei bastava. La #211 li ha spostati in `EnvelopeBuilder`,
+    perche' non erano semantica del verso ma del formato envelope, e li' li
+    attraversa ogni chiave: da allora `normalize` accetta quei corpi e a
+    rifiutarli e' il builder, piu' avanti. Questo patto chiedeva ancora alla
+    sola `normalize`, quindi misurava meta' del motore e accusava il mirror di
+    diciannove falsi rossi che falsi non erano.
+
+    Il discriminante fra le due strade e' del motore, non nostro: `normalize`
+    torna un **float** per uno scalare e un **dict** per ogni forma envelope
+    (vedi il suo docstring), e solo il dict arriva a `create_scaled_envelope`.
+    Uno scalare non passa mai dal builder, quindi mandarcelo qui direbbe che
+    il motore rifiuta `1`, che e' il verso in avanti.
+    """
     from granular_ls.read_direction import check_read_direction
     from granular_ls.schema_bridge import _import_pge_module
 
     try:
         normalize = _import_pge_module(
             'parameters.read_direction').normalize_read_direction
+        create_scaled_envelope = _import_pge_module(
+            'envelopes.envelope').create_scaled_envelope
     except Exception:
         pytest.skip("engine precede grain.read_direction (PGE #207 non ancora "
                     "in questo checkout)")
 
-    InvalidFieldValueError = _import_pge_module(
-        'shared.exceptions').InvalidFieldValueError
+    eccezioni = _import_pge_module('shared.exceptions')
+    monkeypatch.chdir(tmp_path)  # il logger del builder scrive in logs/
 
     try:
-        normalize(raw)
+        value = normalize(raw)
+        if isinstance(value, dict):
+            create_scaled_envelope(value, 10.0, 'absolute')
         motore_rifiuta = False
-    except InvalidFieldValueError:
+    except (eccezioni.InvalidFieldValueError, eccezioni.ParameterBoundError):
         motore_rifiuta = True
 
     ls_rifiuta = check_read_direction(raw) is not None
@@ -1298,17 +1323,27 @@ DEVIATION_PROBABILITY_CORPUS = [
     # scritte e le rifiuta, quindi la decisione torna al mirror.
     'abc', '', '1e3', 'true', '50%',
     [[0, 'abc'], [10, 100]], {'points': [[0, 'abc']]},
-    # i casi che questa chiave accetta e read_direction no: i guard di PGE #208
-    # sono semantica del verso, non del formato envelope
+    # I guard sulla forma del ciclo. Questi quattro casi stavano qui sotto il
+    # commento «li accetta questa chiave e read_direction no: i guard di PGE
+    # #208 sono semantica del verso, non del formato envelope». Era vero fino
+    # alla PGE #211, che li ha spostati in `EnvelopeBuilder` proprio perche'
+    # NON erano semantica del verso: da li' valgono per ogni chiave, e il
+    # motore li rifiuta anche qui.
     [[[0, 50], [150, 100]], 10.0, 4],
     [[[100, 50], [0, 100]], 10.0, 4],
     [[[0, 50], [100, 100]], 10.0, True],
     [[[0, 50], [100, 100]], True, 4],
-    # ...e i due che il motore RIFIUTA, perche' `false` vale `0`: sono
-    # esattamente i casi che i guard sul segno e sull'arita' esistono per
-    # prendere. Il sondaggio aveva misurato un bool e generalizzato a due.
+    # `false` vale `0`, quindi cade sul segno e sull'arita' come ogni altro
+    # zero: lo faceva anche prima della #211.
     [[[0, 50], [100, 100]], 10.0, False],
     [[[0, 50], [100, 100]], False, 4],
+    # Un `end_time` non finito. Ogni confronto con `nan` e' falso, quindi un
+    # guard scritto `end_time <= 0` lo lascia passare e il ciclo si espande in
+    # breakpoint `nan`; `.inf` e `.nan` si scrivono nello YAML, quindi il caso
+    # si raggiunge. Erano due silenzi su entrambe le chiavi.
+    [[[0, 50], [100, 100]], float('inf'), 4],
+    [[[0, 50], [100, 100]], float('-inf'), 4],
+    [[[0, 50], [100, 100]], float('nan'), 4],
     [[0, -50], [10, 500]],
     # distribuzione temporale del ciclo
     [[[0, 50], [100, 100]], 10.0, 4, 'linear', 'exp'],
