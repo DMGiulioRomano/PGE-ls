@@ -1,0 +1,46 @@
+# Il corpo della PR dichiara l'issue che chiude.
+#
+# Perche' un workflow e non una regola del ruleset: i ruleset di GitHub non
+# hanno nessuna regola che legga il corpo di una pull request. Le loro
+# metadata restrictions riguardano messaggio di commit, email di autore e
+# committer, nome di branch e di tag -- non la descrizione della PR. L'unico
+# modo per *impedire* il merge e' percio' uno status check richiesto, ed e'
+# questo: il ruleset in .github/rulesets/ lo pretende verde, con il contesto
+# `closes-issue`, che e' il nome del job qui sotto. Rinominare il job senza
+# aggiornare il ruleset non rende rossa la CI: la rende **muta**, perche' un
+# contesto richiesto che nessuno pubblica resta in attesa per sempre -- e
+# allora si noterebbe. Il verso silenzioso e' l'altro, ed e' coperto da
+# tests/test_pr_closing_keyword.py, che pretende che i due nomi coincidano.
+name: PR
+
+on:
+  pull_request:
+    # `opened` e `reopened`: la prima occasione.
+    # `edited`: il corpo si corregge dopo l'apertura, ed e' la via normale per
+    #   far tornare verde il check -- senza questo tipo di evento la PR
+    #   resterebbe rossa fino a un commit nuovo.
+    # `synchronize`: un push cambia la head, e uno status check richiesto si
+    #   valuta **per commit**. Senza questo, la head nuova non avrebbe il
+    #   check e il merge resterebbe bloccato in attesa di un contesto che
+    #   nessuno pubblichera' mai.
+    # `ready_for_review`: una bozza che diventa pronta.
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  closes-issue:
+    name: closes-issue
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: il corpo dichiara l'issue che chiude
+        # Il corpo passa per l'ambiente e non interpolato nel `run`: una
+        # descrizione che contiene un backtick o un `$(...)` sarebbe eseguita
+        # dalla shell del runner, e il corpo di una PR lo scrive chiunque apra
+        # una PR. E' la mitigazione che GitHub documenta per lo script
+        # injection, e qui il dato non fidato e' proprio quello che leggiamo.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 .github/scripts/check_closing_keyword.py
