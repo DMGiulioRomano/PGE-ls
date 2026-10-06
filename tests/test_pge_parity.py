@@ -2328,3 +2328,160 @@ def test_loop_bounds_mirror_matches_engine(pge, pointer, tmp_path,
         f"{'accetta' if motore_accetta else 'rifiuta'}, il LS "
         f"{'segnala' if ls_segnala else 'tace'} la finestra degenere"
     )
+
+
+# =============================================================================
+# Bounds degli envelope: ogni grafia che il builder costruisce (issue #58)
+# =============================================================================
+#
+# La stessa domanda al motore e al language server: quali Y di questo envelope
+# escono dai bound? Il motore risponde con la sua catena, dal Generator al
+# parser — `_eval_math_expressions` sulle stringhe, poi
+# `GranularParser.parse_parameter`, che costruisce l'`Envelope` da qualunque
+# grafia accetti e in `strict` alza `ParameterBoundError` con la lista dei
+# breakpoint violati. Il language server risponde con i suoi Error «fuori dai
+# bounds». Si confrontano gli **insiemi di Y**, non il si'/no: «segnala
+# esattamente quelle che il motore rifiuta» vuol dire anche non una di piu'.
+#
+# Il corpus e' quello della tabella della issue, riletto dalla suite del
+# provider perche' le due non divergano, piu' i quattro parametri che la
+# issue nomina scritti come dict e i bordi esatti del dominio.
+
+from tests.test_diagnostic_provider import GRAFIE_ISSUE_58  # noqa: E402
+
+ENVELOPE_BOUNDS_CORPUS = [
+    # (id, yaml_path, corpo con `{y}`, Y fuori, Y dentro)
+    *[(f'fill_factor, {caso}', 'fill_factor', corpo, 0, 1)
+      for caso, corpo, _riga in GRAFIE_ISSUE_58],
+    # sopra il tetto, e il tetto stesso che e' ancora dentro
+    ('fill_factor sopra il tetto, dict', 'fill_factor',
+     "    fill_factor: {{type: step, points: [[0, 1], [10, {y}]]}}\n",
+     999, 50.0),
+    # `density` ha il pavimento e nessun tetto (PGE #272)
+    ('density dict', 'density',
+     "    density: {{type: cubic, points: [[0, {y}], [10, 5]]}}\n", 0, 0.01),
+    ('density senza tetto', 'density',
+     "    density: [[0, 1], [10, {y}]]\n", -1, 50000),
+    ('volume dict', 'volume',
+     "    volume: {{points: [[0, {y}], [10, 0]]}}\n", -121, -120),
+    ('volume dict a blocchi', 'volume',
+     "    volume:\n      type: linear\n      points:\n"
+     "        - {{t: 0, v: 0}}\n        - {{t: 10, v: {y}}}\n", 13, 12),
+    ('grain.duration dict', 'grain.duration',
+     "    grain:\n"
+     "      duration: {{type: linear, points: [[0, 0.05], [10, {y}]]}}\n",
+     11, 10),
+    ('grain.duration ciclo nel dict', 'grain.duration',
+     "    grain:\n"
+     "      duration: {{type: step, points: [[[0, 0.05], [100, {y}]], 10, 3]}}\n",
+     11, 10),
+    # stringhe numeriche: il Generator le converte prima del parser
+    ('fill_factor, stringa numerica', 'fill_factor',
+     "    fill_factor: [[0, \"{y}\"], [10, 5]]\n", 0, 1),
+]
+
+# Corpi che il motore rifiuta prima di guardare un bound: non sono envelope
+# per il builder, quindi non hanno Y da confrontare. Il language server non
+# deve dire «fuori dai bounds» — manderebbe a correggere la cosa sbagliata.
+ENVELOPE_NON_ENVELOPE_CORPUS = [
+    ('breakpoint singolo', 'volume', "    volume: [0.0, -200.0]\n"),
+    ('dict senza points', 'volume', "    volume: {type: cubic}\n"),
+]
+
+
+def _envelope_stream(body: str) -> str:
+    return ("streams:\n  - stream_id: s1\n    onset: 0.0\n"
+            "    duration: 10.0\n    sample: f.wav\n" + body)
+
+
+def _engine_envelope_verdict(testo: str, yaml_path: str):
+    """Cosa fa il motore del valore a `yaml_path`.
+
+    Returns:
+        `('bound', {y violate})`, `('ok', set())`, o `('altro', eccezione)`
+        se il motore rifiuta il valore per una ragione che non e' un bound.
+    """
+    import yaml as pyyaml
+    from types import SimpleNamespace
+    from granular_ls.schema_bridge import _import_pge_module
+
+    evaluate, _ = _load_eval_math_expressions()
+    exc = _import_pge_module('shared.exceptions')
+    schema = _import_pge_module('parameters.parameter_schema')
+    GranularParser = _import_pge_module('parameters.parser').GranularParser
+    anchor = getattr(_import_pge_module('shared.distribution_strategy'),
+                     'ANCHOR_CENTER', 'center')
+    spec = next(s for specs in schema.ALL_SCHEMAS.values() for s in specs
+                if s.yaml_path == yaml_path)
+
+    context = SimpleNamespace(sample_dur_sec=10.0, output_sr=48000,
+                              stream_id='s1', rng_id='r1', duration=10.0)
+    config = SimpleNamespace(context=context, time_mode='absolute',
+                             distribution_mode='uniform', range_anchor=anchor,
+                             duration=10.0, seed=None)
+    stream = evaluate(pyyaml.safe_load(testo)['streams'][0])
+    value = schema.resolve_yaml_path(stream, spec.yaml_path, spec.default)
+    try:
+        GranularParser(config).parse_parameter(spec.name, value)
+    except exc.ParameterBoundError as err:
+        return 'bound', {float(y) for _t, y in err.violations}
+    except Exception as err:  # noqa: BLE001 — la forma, non il bound
+        return 'altro', err
+    return 'ok', set()
+
+
+def _ls_envelope_bounds(testo: str, yaml_path: str) -> set:
+    """Le Y che il language server dichiara fuori dai bound di `yaml_path`."""
+    import re
+    from lsprotocol.types import DiagnosticSeverity
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+    from granular_ls.schema_bridge import SchemaBridge
+
+    provider = DiagnosticProvider(SchemaBridge.from_python_path(PGE_SRC))
+    ys = set()
+    for d in provider.get_diagnostics(testo):
+        if d.severity != DiagnosticSeverity.Error:
+            continue
+        m = re.match(r"Valore envelope (\S+) fuori dai bounds "
+                     r"del parametro '([^']+)'", d.message)
+        if m and m.group(2) == yaml_path:
+            ys.add(float(m.group(1)))
+    return ys
+
+
+@pytest.mark.parametrize('dentro', [False, True], ids=['fuori', 'dentro'])
+@pytest.mark.parametrize('caso,path,corpo,y_fuori,y_dentro',
+                         ENVELOPE_BOUNDS_CORPUS,
+                         ids=[c[0] for c in ENVELOPE_BOUNDS_CORPUS])
+def test_envelope_bounds_mirror_matches_engine(pge, caso, path, corpo, y_fuori,
+                                               y_dentro, dentro, tmp_path,
+                                               monkeypatch):
+    # Il logger del motore apre un file relativo alla cwd al primo parse.
+    monkeypatch.chdir(tmp_path)
+    testo = _envelope_stream(corpo.format(y=y_dentro if dentro else y_fuori))
+
+    esito, dettaglio = _engine_envelope_verdict(testo, path)
+    # Il corpus e' grammatica del motore: se una grafia smette di esserlo, il
+    # confronto sui bound non direbbe piu' niente, e deve dirlo questo test.
+    assert esito != 'altro', (
+        f"{caso}: il motore non costruisce piu' questa grafia ({dettaglio!r})")
+
+    motore = dettaglio if esito == 'bound' else set()
+    ls = _ls_envelope_bounds(testo, path)
+    assert ls == motore, (
+        f"Drift su {caso}: il motore rifiuta le Y {sorted(motore)}, "
+        f"il LS segnala {sorted(ls)}")
+    # E il corpus fa la domanda che dice di fare: fuori e' fuori.
+    assert bool(motore) == (not dentro)
+
+
+@pytest.mark.parametrize('caso,path,corpo', ENVELOPE_NON_ENVELOPE_CORPUS,
+                         ids=[c[0] for c in ENVELOPE_NON_ENVELOPE_CORPUS])
+def test_envelope_bounds_tace_dove_il_motore_non_arriva_ai_bound(
+        pge, caso, path, corpo, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    testo = _envelope_stream(corpo)
+
+    esito, _ = _engine_envelope_verdict(testo, path)
+    assert esito == 'altro', f"{caso}: il motore ora lo costruisce ({esito})"
+    assert _ls_envelope_bounds(testo, path) == set()

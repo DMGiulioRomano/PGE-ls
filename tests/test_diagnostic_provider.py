@@ -875,9 +875,10 @@ class TestEnvelopeBoundsInline:
     Envelope inline sulla riga della chiave: key: [[t, v], ...]
 
     Prima di questo check venivano validati solo i breakpoint block-style
-    ('- [t, v]' su righe separate sotto una chiave nuda). L'estrazione dei
-    valori Y riusa _extract_envelope_y_values (stessi formati del check
-    pitch: breakpoints standard, breakpoint singolo [t, y], compact loop).
+    ('- [t, v]' su righe separate sotto una chiave nuda). Dalla issue #58 il
+    valore si legge come YAML e le Y le estrae `envelope_y_paths`, per ogni
+    grafia che il builder del motore costruisce: le altre sono in
+    `TestEnvelopeBoundsOgniGrafia`.
     """
 
     @staticmethod
@@ -928,14 +929,21 @@ class TestEnvelopeBoundsInline:
         assert len(errors) == 1
         assert '-5' in errors[0].message
 
-    def test_inline_breakpoint_singolo(self, bridge):
+    def test_inline_breakpoint_singolo_non_e_un_envelope(self, bridge):
+        """`[t, v]` senza parentesi esterne non e' un envelope per il motore.
+
+        `EnvelopeBuilder.parse` lo scorre elemento per elemento e alza
+        `ValueError` sul primo numero, prima che un bound venga guardato: il
+        render fallisce qualunque sia la Y. Dire «-80 fuori dai bounds»
+        mandava a correggere la Y, e con `-30` al posto di `-80` il render
+        sarebbe fallito lo stesso (issue #58).
+        """
         provider = DiagnosticProvider(bridge)
-        yaml = self._stream("    volume: [0.0, -80.0]\n")  # -80 < -60 (min)
+        yaml = self._stream("    volume: [0.0, -80.0]\n")
         result = provider.get_diagnostics(yaml)
         errors = [d for d in result if d.severity == DiagnosticSeverity.Error
                   and 'fuori dai bounds' in d.message]
-        assert len(errors) == 1
-        assert "'volume'" in errors[0].message
+        assert errors == []
 
     def test_inline_risoluzione_per_chiave_locale(self, bridge):
         provider = DiagnosticProvider(bridge)
@@ -964,6 +972,190 @@ class TestEnvelopeBoundsInline:
         errors = [d for d in result if d.severity == DiagnosticSeverity.Error
                   and 'fuori dai bounds' in d.message]
         assert errors == []
+
+
+# Le grafie della issue #58: ogni forma che il builder del motore costruisce,
+# inline e a blocchi. `{y}` e' la Y del breakpoint in esame; il test la riempie
+# con `0` (sotto il pavimento di fill_factor, 0.001) e con `1` (dentro).
+#
+#   (id, corpo sotto lo stream, riga 0-based dove sta la Y)
+#
+# Prima di #58 le righe da «bp group nudo» in giu' tacevano tutte: il valore
+# veniva letto riga per riga con `ast.literal_eval`, che non e' YAML — una
+# parola nuda (`cubic`) o una chiave senza virgolette (`{t: 0}`) non e' un
+# letterale Python, e un valore che comincia con `{` non entrava nemmeno.
+GRAFIE_ISSUE_58 = [
+    ('lista inline', "    fill_factor: [[0, {y}], [10, 5]]\n", 5),
+    ('lista a blocchi',
+     "    fill_factor:\n      - [0, {y}]\n      - [10, 5]\n", 6),
+    ('compact', "    fill_factor: [[[0, {y}], [100, 5]], 10, 4]\n", 5),
+    ('bp group quotato',
+     "    fill_factor: [[[0, {y}], [10, 5]], 'cubic']\n", 5),
+    ('bp group nudo', "    fill_factor: [[[0, {y}], [10, 5]], cubic]\n", 5),
+    ('bp group a blocchi',
+     "    fill_factor:\n      - [[0, {y}], [10, 5]]\n      - cubic\n", 6),
+    ('misto', "    fill_factor: [[0, 1], [[[5, {y}], [10, 5]], cubic]]\n", 5),
+    ('interp per punto', "    fill_factor: [[0, {y}, step], [10, 5]]\n", 5),
+    ('dict type/points',
+     "    fill_factor: {{type: cubic, points: [[0, {y}], [10, 5]]}}\n", 5),
+    ('dict a blocchi',
+     "    fill_factor:\n      type: cubic\n      points:\n"
+     "        - [0, {y}]\n        - [10, 5]\n", 8),
+    ('breakpoint dict', "    fill_factor: [{{t: 0, v: {y}}}, {{t: 10, v: 5}}]\n", 5),
+    ('breakpoint dict a blocchi',
+     "    fill_factor:\n      - {{t: 0, v: {y}}}\n      - {{t: 10, v: 5}}\n", 6),
+    # Il dict per punto scritto come mapping a blocchi: la Y sta sulla riga
+    # di `v`, non su quella del trattino.
+    ('breakpoint dict mapping a blocchi',
+     "    fill_factor:\n      - t: 0\n        v: {y}\n      - [10, 5]\n", 7),
+]
+
+
+def _stream_58(body: str) -> str:
+    return (
+        "streams:\n"
+        "  - stream_id: s1\n"
+        "    onset: 0.0\n"
+        "    duration: 10.0\n"
+        "    sample: f.wav\n"
+        + body
+    )
+
+
+def _envelope_bounds_errors(diags):
+    return [d for d in diags
+            if d.severity == DiagnosticSeverity.Error
+            and 'fuori dai bounds' in d.message]
+
+
+class TestEnvelopeBoundsOgniGrafia:
+    """I bound delle Y valgono per ogni grafia che il motore costruisce.
+
+    Il motore, in `strict`, costruisce l'`Envelope` da qualunque grafia
+    accetti e alza `ParameterBoundError` se anche un solo breakpoint esce dai
+    bound (`GranularParser._validate_and_clip`). Le grafie che il language
+    server non vedeva davano un render che falliva senza nessuna diagnostica
+    (issue #58). La parita' col motore sta in
+    `test_pge_parity.test_envelope_bounds_mirror_matches_engine`.
+    """
+
+    @pytest.mark.parametrize('caso,corpo,riga', GRAFIE_ISSUE_58,
+                             ids=[g[0] for g in GRAFIE_ISSUE_58])
+    def test_y_fuori_bounds_segnalata(self, bridge, caso, corpo, riga):
+        diags = DiagnosticProvider(bridge).get_diagnostics(
+            _stream_58(corpo.format(y=0)))
+        errs = _envelope_bounds_errors(diags)
+        assert len(errs) == 1, errs
+        assert "'fill_factor'" in errs[0].message
+        assert 'Valore envelope 0 ' in errs[0].message
+        assert '[0.001, 50.0]' in errs[0].message
+
+    @pytest.mark.parametrize('caso,corpo,riga', GRAFIE_ISSUE_58,
+                             ids=[g[0] for g in GRAFIE_ISSUE_58])
+    def test_ancorata_alla_riga_della_y(self, bridge, caso, corpo, riga):
+        diags = DiagnosticProvider(bridge).get_diagnostics(
+            _stream_58(corpo.format(y=0)))
+        errs = _envelope_bounds_errors(diags)
+        assert [d.range.start.line for d in errs] == [riga]
+
+    @pytest.mark.parametrize('caso,corpo,riga', GRAFIE_ISSUE_58,
+                             ids=[g[0] for g in GRAFIE_ISSUE_58])
+    def test_y_dentro_i_bounds_tace(self, bridge, caso, corpo, riga):
+        """Il gemello valido: la grafia da sola non e' un errore."""
+        diags = DiagnosticProvider(bridge).get_diagnostics(
+            _stream_58(corpo.format(y=1)))
+        assert _envelope_bounds_errors(diags) == []
+
+    def test_dict_sopra_il_tetto(self, bridge):
+        """Vale in entrambe le direzioni: il tetto come il pavimento."""
+        diags = DiagnosticProvider(bridge).get_diagnostics(_stream_58(
+            "    fill_factor: {type: step, points: [[0, 1], [10, 999]]}\n"))
+        errs = _envelope_bounds_errors(diags)
+        assert len(errs) == 1
+        assert 'Valore envelope 999 ' in errs[0].message
+
+    @pytest.mark.parametrize('corpo,path', [
+        ("    density: {type: cubic, points: [[0, 0], [10, 5]]}\n",
+         'density'),
+        ("    volume: {points: [[0, -80], [10, 0]]}\n", 'volume'),
+        ("    grain:\n"
+         "      duration: {type: linear, points: [[0, 0.05], [10, 99]]}\n",
+         'grain.duration'),
+    ], ids=['density', 'volume', 'grain.duration'])
+    def test_ogni_parametro_scritto_come_dict(self, bridge, corpo, path):
+        diags = DiagnosticProvider(bridge).get_diagnostics(_stream_58(corpo))
+        errs = _envelope_bounds_errors(diags)
+        assert len(errs) == 1
+        assert f"'{path}'" in errs[0].message
+
+    def test_ogni_y_fuori_ha_il_suo_errore_sulla_sua_riga(self, bridge):
+        diags = DiagnosticProvider(bridge).get_diagnostics(_stream_58(
+            "    fill_factor:\n"
+            "      type: cubic\n"
+            "      points:\n"
+            "        - [0, 0]\n"
+            "        - [5, 2]\n"
+            "        - {t: 10, v: 999}\n"))
+        errs = _envelope_bounds_errors(diags)
+        assert [d.range.start.line for d in errs] == [8, 10]
+
+    def test_l_espressione_salta_solo_il_suo_breakpoint(self, bridge):
+        """`(1/2)` non si prevede senza rifare l'`eval`; il resto si'."""
+        diags = DiagnosticProvider(bridge).get_diagnostics(_stream_58(
+            "    fill_factor: [[0, (1/2)], [10, 0]]\n"))
+        errs = _envelope_bounds_errors(diags)
+        assert len(errs) == 1
+        assert 'Valore envelope 0 ' in errs[0].message
+
+    def test_dict_in_millisecondi_non_misurato_in_secondi(self, bridge):
+        """La soppressione di `duration_unit` copre anche la grafia dict:
+        50 ms non sono cinquanta volte il tetto in secondi."""
+        diags = DiagnosticProvider(bridge).get_diagnostics(_stream_58(
+            "    grain:\n"
+            "      duration_unit: milliseconds\n"
+            "      duration:\n"
+            "        type: linear\n"
+            "        points: [[0, 50], [10, 80]]\n"))
+        errs = [d for d in _envelope_bounds_errors(diags)
+                if 'grain.duration' in d.message]
+        assert errs == []
+
+    def test_uno_stream_a_meta_scrittura_non_spegne_gli_altri(self, bridge):
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    fill_factor: [[0, 0], [10, 5]\n"      # flow non chiuso
+            "  - stream_id: s2\n"
+            "    duration: 10.0\n"
+            "    sample: f.wav\n"
+            "    fill_factor: {points: [[0, 0], [10, 5]]}\n"
+        )
+        errs = _envelope_bounds_errors(
+            DiagnosticProvider(bridge).get_diagnostics(yaml))
+        assert [d.range.start.line for d in errs] == [8]
+
+    def test_chiave_risolta_per_path_non_per_nome_locale(self, bridge):
+        """`duration` dello stream non e' `grain.duration`.
+
+        Il lettore riga per riga risolveva la chiave per nome locale, primo
+        match: `duration:` a livello di stream prendeva i bound della durata
+        del grano. La durata dello stream non e' un parametro envelope, e i
+        suoi bound non sono quelli.
+        """
+        yaml = (
+            "streams:\n"
+            "  - stream_id: s1\n"
+            "    onset: 0.0\n"
+            "    sample: f.wav\n"
+            "    duration:\n"
+            "      - [0, 0]\n"
+            "      - [10, 99]\n"
+        )
+        errs = _envelope_bounds_errors(
+            DiagnosticProvider(bridge).get_diagnostics(yaml))
+        assert errs == []
 
 
 # =============================================================================
