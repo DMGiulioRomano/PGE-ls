@@ -21,10 +21,12 @@ YAML con lo stesso PyYAML del motore, quindi la distinzione arriva intatta e
 il conto si fa con la stessa aritmetica — nessuna banda di tolleranza.
 """
 
+import math
 import time
 
 import pytest
 
+from granular_ls import time_distributions
 from granular_ls.time_distributions import (
     OVERFLOW_REMEDIES,
     check_time_distribution,
@@ -104,16 +106,27 @@ class TestBordiGeometric:
 
 class TestBordiExponential:
 
-    def test_rate_mezzo_trabocca_a_1025(self):
-        assert not _trabocca(_exp(0.5), 1024)
-        assert _trabocca(_exp(0.5), 1025)
+    def test_rate_mezzo_trabocca_a_1024_sulla_somma(self):
+        """A 1024 il peso massimo, `2 ** 1023`, sta in un float e la loro
+        somma no. Prima di PGE #219 il motore divideva per infinito e faceva
+        durare zero ogni ciclo senza alzare niente; ora lo rifiuta, con la
+        somma nella formula. Un ciclo dopo trabocca già il peso."""
+        assert not _trabocca(_exp(0.5), 1023)
+        assert _trabocca(_exp(0.5), 1024)
+        assert check_time_distribution(_exp(0.5), 1024).formula == \
+            'sum(rate ** -i)'
+        assert check_time_distribution(_exp(0.5), 1025).formula == \
+            'rate ** -i'
 
-    def test_a_1024_i_cicli_collassano_ma_il_motore_rende(self):
-        """A 1024 il peso massimo sta in un float e la loro somma no: il motore
-        divide per infinito, ogni ciclo dura zero, e non alza niente. È un
-        envelope collassato, non un errore — e un language server che lo
-        chiamasse errore sarebbe più severo del motore."""
-        assert check_time_distribution(_exp(0.5), 1024) is None
+    @pytest.mark.parametrize('rate, bordo', [(0.9, 6716), (0.99, 70166)])
+    def test_la_somma_trabocca_prima_dei_pesi(self, rate, bordo):
+        """Verso 1 la somma vale circa `max / (1 - rate)`, quindi il tratto fra
+        la soglia della somma e quella del peso si allarga: 22 cicli a 0.9,
+        458 a 0.99. Sono le soglie del motore, misurate per bisezione."""
+        assert not _trabocca(_exp(rate), bordo - 1)
+        assert _trabocca(_exp(rate), bordo)
+        assert check_time_distribution(_exp(rate), bordo).formula == \
+            'sum(rate ** -i)'
 
     def test_rate_maggiore_di_uno_non_trabocca(self):
         """`rate ** -i` decresce: con `rate >= 1` nessun peso supera 1."""
@@ -152,10 +165,24 @@ class TestBordiPower:
         """`true ** n` fa 1: il motore non ha mai alzato niente."""
         assert not _trabocca(_pow(True), 100_000)
 
-    def test_collasso_prima_della_soglia_non_e_errore(self):
-        """Stesso tratto di `exponential`: pesi in un float, somma no."""
-        assert check_time_distribution(_pow(100.5), 1140) is None
-        assert _trabocca(_pow(100.5), 1168)
+    @pytest.mark.parametrize('exponent, bordo', [(100.5, 1140), (60.5, 109992)])
+    def test_la_somma_trabocca_prima_dei_pesi(self, exponent, bordo):
+        """Stesso tratto di `exponential`: pesi in un float, somma no. Il
+        motore lo rifiuta da PGE #219; il peso trabocca solo più avanti."""
+        assert not _trabocca(_pow(exponent), bordo - 1)
+        assert _trabocca(_pow(exponent), bordo)
+        assert check_time_distribution(_pow(exponent), bordo).formula == \
+            'sum((i + 1) ** exponent)'
+
+    def test_dopo_la_somma_trabocca_il_peso(self):
+        issue = check_time_distribution(_pow(100.5), 1168)
+        assert issue.formula == '(i + 1) ** exponent'
+
+    def test_esponente_intero_non_ha_soglia_nemmeno_sulla_somma(self):
+        """Fra interi la somma è un `int` di centinaia di cifre, che è una
+        somma buona: il motore guarda solo le somme float."""
+        assert not _trabocca(_pow(101), 1140)
+        assert not _trabocca(_pow(101), 100_000)
 
 
 class TestSenzaPotenze:
@@ -165,6 +192,63 @@ class TestSenzaPotenze:
                                       'exponential', 'exp'])
     def test_non_traboccano(self, spec):
         assert check_time_distribution(spec, 10 ** 9) is None
+
+
+class TestParametriNonFiniti:
+    """`.nan` e `.inf` si scrivono nello YAML, e nessun bound dei costruttori
+    li ferma: i confronti con `nan` sono tutti falsi, e `inf` li passa per
+    definizione. Da PGE #219 il motore li prende sulla somma dei pesi, che
+    non è un numero finito — quindi dove la somma lo è, il valore passa:
+    `base: .inf` dà pesi tutti a 1 e cicli uniformi, e rende. Il criterio è
+    la somma, non il tipo del parametro, e qui lo stesso.
+
+    Il verdetto dipende da `n_reps` come nel motore: il primo peso di
+    `exponential` e di `power` è `x ** 0` o `1 ** x`, che vale 1 anche su
+    `nan`, quindi a un ciclo solo rendono."""
+
+    NAN = float('nan')
+    INF = float('inf')
+
+    @pytest.mark.parametrize('spec, formula', [
+        (_exp(NAN), 'sum(rate ** -i)'),
+        (_pow(NAN), 'sum((i + 1) ** exponent)'),
+        (_pow(INF), 'sum((i + 1) ** exponent)'),
+    ], ids=repr)
+    def test_rifiutati_da_due_cicli(self, spec, formula):
+        assert check_time_distribution(spec, 1) is None
+        for n_reps in (2, 3, 50):
+            issue = check_time_distribution(spec, n_reps)
+            assert issue is not None and issue.kind == 'overflow', n_reps
+            assert issue.formula == formula
+
+    @pytest.mark.parametrize('spec, formula', [
+        (_geo(NAN), 'sum(first_duration * ratio ** i)'),
+        (_geo(INF), 'sum(first_duration * ratio ** i)'),
+        ({'type': 'logarithmic', 'base': NAN}, 'sum(log(i + 1, base) + 1)'),
+    ], ids=repr)
+    def test_rifiutati_a_ogni_n_reps(self, spec, formula):
+        for n_reps in (1, 2, 50):
+            issue = check_time_distribution(spec, n_reps)
+            assert issue is not None and issue.kind == 'overflow', n_reps
+            assert issue.formula == formula
+
+    @pytest.mark.parametrize('spec', [
+        _exp(INF), {'type': 'logarithmic', 'base': INF}, _pow(-INF),
+    ], ids=repr)
+    def test_la_somma_finita_rende(self, spec):
+        for n_reps in (1, 2, 50, 10 ** 9):
+            assert check_time_distribution(spec, n_reps) is None, n_reps
+
+    @pytest.mark.parametrize('spec', [
+        _exp(-INF), _geo(-INF), {'type': 'logarithmic', 'base': -INF},
+    ], ids=repr)
+    def test_meno_infinito_cade_sui_bound(self, spec):
+        assert check_time_distribution(spec, 4).kind == 'params'
+
+    def test_il_valore_nominato_e_quello_scritto(self):
+        issue = check_time_distribution(_pow(self.NAN), 2)
+        assert issue.param == 'exponent'
+        assert math.isnan(issue.param_value)
 
 
 # =============================================================================
@@ -255,6 +339,36 @@ class TestCostoLimitato:
         assert check_time_distribution(_pow(10 ** 6), 10 ** 9) is None
         assert time.perf_counter() - inizio < 0.5
 
+    @pytest.mark.parametrize('spec, n_reps', [
+        # Bordo della somma a ~6.96e8 cicli: decide la forma chiusa, e la
+        # somma esatta costerebbe secondi.
+        (_exp(0.999999), 696_000_000),
+        (_exp(0.999999), 697_000_000),
+        (_exp(0.999999), 10 ** 12),
+        # Senza forma chiusa decidono i due integrali che la stringono.
+        (_pow(0.5), 10 ** 205),
+        (_pow(0.5), 10 ** 206),
+        # Sul bordo la somma esatta si fa: centomila pesi.
+        (_pow(60.5), 109_991),
+    ])
+    def test_la_somma_resta_economica(self, spec, n_reps):
+        inizio = time.perf_counter()
+        check_time_distribution(spec, n_reps)
+        assert time.perf_counter() - inizio < 0.5
+
+    @pytest.mark.parametrize('spec, bordo', [
+        (_exp(0.9), 6716),
+        (_exp(0.99), 70166),
+        (_pow(100.5), 1140),
+        (_pow(60.5), 109992),
+    ])
+    def test_oltre_il_tetto_decide_la_stima(self, monkeypatch, spec, bordo):
+        """Sopra `_EXACT_SUM_MAX_TERMS` pesi la somma esatta non si rifà, e
+        sul bordo decide la stima centrale. Col tetto a zero la si costringe a
+        decidere qui, dove il bordo del motore è noto: deve ritrovarlo."""
+        monkeypatch.setattr(time_distributions, '_EXACT_SUM_MAX_TERMS', 0)
+        assert not _trabocca(spec, bordo - 1)
+        assert _trabocca(spec, bordo)
 
 # =============================================================================
 # 4. Il messaggio
@@ -286,3 +400,28 @@ class TestOverflowHint:
 
     def test_tre_rimedi(self):
         assert set(OVERFLOW_REMEDIES) == {'ratio', 'rate', 'exponent'}
+
+    def test_il_risultato_non_e_un_numero_finito(self):
+        """La frase del motore da PGE #219: «non sta in un float» era falsa di
+        una somma `nan`, che in un float ci sta."""
+        h = overflow_hint(check_time_distribution(_exp(0.5), 1024))
+        assert 'sum(rate ** -i)' in h
+        assert 'il risultato non è un numero finito' in h
+        assert 'non sta in un float' not in h
+        assert 'coppia a esplodere' in h
+
+    @pytest.mark.parametrize('spec, n_reps, scritto', [
+        (_pow(float('nan')), 2, 'exponent=nan'),
+        (_geo(float('inf')), 4, 'ratio=inf'),
+    ])
+    def test_un_valore_non_finito_non_accusa_la_coppia(self, spec, n_reps,
+                                                       scritto):
+        """Su `nan` la coppia non c'entra: `exponent: .nan` è fuori posto da
+        solo, e invitare a ridurre i cicli manderebbe a cercare una soglia che
+        non esiste. Il motore dice che il parametro non è un numero."""
+        h = overflow_hint(check_time_distribution(spec, n_reps))
+        assert f'{scritto} non è un numero finito' in h
+        assert f'n_reps={n_reps} non c\'entra' in h
+        assert 'coppia a esplodere' not in h
+        assert 'Riduci n_reps' not in h
+        assert '.nan' in h and '.inf' in h

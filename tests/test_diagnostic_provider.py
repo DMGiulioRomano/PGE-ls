@@ -4723,14 +4723,36 @@ class TestDistribuzioneTemporaleDelCiclo:
             + _ciclo(dist="{type: geometric, ratio: (5*2)}") + "\n")
         assert self._dist_errors(provider, yaml) == []
 
-    def test_il_collasso_prima_della_soglia_non_e_errore(self, bridge):
-        """A 1024 cicli `rate: 0.5` fa durare zero ogni ciclo senza alzare
-        niente: il motore rende. Non e' un errore di scrittura."""
+    def test_la_somma_che_trabocca_e_errore(self, bridge):
+        """A 1024 cicli `rate: 0.5` il peso piu' grande sta in un float e la
+        somma dei pesi no. Prima di PGE #219 il motore faceva durare zero ogni
+        ciclo senza alzare niente; ora rifiuta, e la diagnostica con lui. Un
+        ciclo prima rende."""
         provider = DiagnosticProvider(bridge)
         yaml = _stream_yaml(
             "    density: "
             + _ciclo(n_reps=1024, dist="{type: exponential, rate: 0.5}") + "\n")
+        errs = self._overflow(provider, yaml)
+        assert len(errs) == 1
+        assert 'sum(rate ** -i)' in errs[0].message
+
+        yaml = _stream_yaml(
+            "    density: "
+            + _ciclo(n_reps=1023, dist="{type: exponential, rate: 0.5}") + "\n")
         assert self._dist_errors(provider, yaml) == []
+
+    def test_un_parametro_nan_e_errore(self, bridge):
+        """`.nan` passa i bound dei costruttori (ogni confronto e' falso), e
+        il motore lo prende sulla somma dei pesi: qui lo stesso, con la frase
+        che accusa il valore e non la coppia."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density: "
+            + _ciclo(n_reps=4, dist="{type: power, exponent: .nan}") + "\n")
+        errs = self._dist_errors(provider, yaml)
+        assert len(errs) == 1
+        assert 'exponent=nan non è un numero finito' in errs[0].message
+        assert self._overflow(provider, yaml) == []
 
     # --- le forme dell'envelope -------------------------------------------
 
