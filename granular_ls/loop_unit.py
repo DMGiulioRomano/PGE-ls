@@ -20,10 +20,19 @@ sulla durata del file. PGE #222 li ha separati:
 | unita' sconosciuta | silenzio, vale "assoluto" | `InvalidFieldValueError` |
 | `loop_unit:` vuoto | `None` e' falsy, eredita | errore |
 
-Mirror di `LOOP_UNITS` e `_LOOP_UNIT_SCOPE` in
-`src/pge/controllers/pointer_controller.py`, e della lettura che ne fa
+Mirror di `LOOP_UNITS` e `LOOP_UNIT_SCOPE` in
+`src/pge/parameters/loop_unit.py`, e della lettura che ne fa
 `PointerController._pre_normalize_loop_params`. `tests/test_pge_parity.py` li
-rilegge dal sorgente del motore (via AST: il modulo importa numpy).
+rilegge dal sorgente del motore (via AST: il bridge del LS non importa il
+motore, e `pointer_controller` tira dentro numpy).
+
+Stavano dentro `controllers/pointer_controller.py`, con lo scope privato
+(`_LOOP_UNIT_SCOPE`): PGE #246 ha registrato che tre repository li leggevano e
+li ha spostati in un modulo senza dipendenze, togliendo l'underscore a cio'
+che era privato di nome e non di fatto. I patti qui provano il path nuovo e poi
+quello storico, perche' il loro ripiego e' uno `skip` -- cioe' verde -- e letti
+dal path vecchio su un motore nuovo avrebbero detto che il motore precede PGE
+#222 proprio mentre lo segue.
 
 Il valore si legge **via YAML**: `loop_unit: "normalized"  # nota` e'
 `normalized`, `loop_unit: null` e' `None`. E' quel che il motore confronta col

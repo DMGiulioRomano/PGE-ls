@@ -363,17 +363,37 @@ def test_grain_duration_units_match(pge):
     assert set(_GRAIN_DURATION_UNITS) == set(engine_units)
 
 
-def _pointer_controller_literal(name: str):
-    """Un letterale di `controllers/pointer_controller.py`, via AST.
+def _loop_unit_literal(*names: str):
+    """Un letterale del vocabolario di `loop_unit`, via AST.
 
-    Il modulo importa `pge.envelopes.envelope`, cioe' numpy: stessa ragione
-    di `core/stream.py` per non importarlo nella CI del language server.
+    Si chiamava `_pointer_controller_literal` e guardava solo li'. Da PGE #246
+    `LOOP_UNITS` e le chiavi che interpreta stanno in
+    `pge/parameters/loop_unit.py`, un modulo che non importa niente, fatto
+    apposta perche' chi le legge possa farlo: il motore ha registrato in
+    quella issue che tre repository ne dipendevano, e due di questi patti sono
+    fra i suoi lettori. Qui si continua a leggere l'AST — la CI del language
+    server installa solo pygls, lsprotocol, PyYAML e pytest, e
+    `pointer_controller` tirava dentro numpy — ma il path da guardare e'
+    cambiato, e il vecchio resta per i motori anteriori.
+
+    **I nomi sono piu' di uno** perche' `_LOOP_UNIT_SCOPE` ha perso
+    l'underscore nello spostamento: era privato di nome e non di fatto, con
+    tre repository che lo mirroravano. Si prova il pubblico, poi lo storico.
+
+    Perche' conta leggere dal posto giusto: il ripiego di questi patti e'
+    `pytest.skip("engine precede ...")`, cioe' **verde**. Letto dal path
+    vecchio su un motore nuovo, il patto non avrebbe fallito — avrebbe detto
+    che il motore precede PGE #222 proprio mentre lo segue, che e' la stessa
+    bugia che `test_il_lettore_ast_vede_l_assegnazione_annotata` teme per
+    un'altra via.
     """
-    for relpath in ('pge/controllers/pointer_controller.py',
+    for relpath in ('pge/parameters/loop_unit.py',
+                    'pge/controllers/pointer_controller.py',
                     'controllers/pointer_controller.py'):
-        value = _literal_from_engine_source(relpath, name)
-        if value is not None:
-            return value
+        for name in names:
+            value = _literal_from_engine_source(relpath, name)
+            if value is not None:
+                return value
     return None
 
 
@@ -400,7 +420,7 @@ def _density_controller_literal(name: str):
     """Un letterale di `controllers/density_controller.py`, via AST.
 
     Il modulo importa lo schema e l'orchestratore, cioe' numpy: stessa
-    ragione di `_pointer_controller_literal`.
+    ragione di `_literal_from_engine_source`.
     """
     for relpath in ('pge/controllers/density_controller.py',
                     'controllers/density_controller.py'):
@@ -492,7 +512,7 @@ def test_loop_units_match(pge):
     completion propone per primo.
     """
     from granular_ls.loop_unit import LOOP_UNITS, LOOP_UNIT_DEFAULT
-    engine_units = _pointer_controller_literal('LOOP_UNITS')
+    engine_units = _loop_unit_literal('LOOP_UNITS')
     if engine_units is None:
         pytest.skip("engine precede LOOP_UNITS (PGE #222)")
     assert tuple(LOOP_UNITS) == tuple(engine_units)
@@ -508,9 +528,10 @@ def test_loop_unit_scope_match(pge):
     `start`), il LS la misurerebbe nella scala sbagliata.
     """
     from granular_ls.loop_unit import LOOP_UNIT_SCOPE
-    engine_scope = _pointer_controller_literal('_LOOP_UNIT_SCOPE')
+    # Pubblico da PGE #246, privato prima: si prova in quest'ordine.
+    engine_scope = _loop_unit_literal('LOOP_UNIT_SCOPE', '_LOOP_UNIT_SCOPE')
     if engine_scope is None:
-        pytest.skip("engine precede _LOOP_UNIT_SCOPE (PGE #222)")
+        pytest.skip("engine precede LOOP_UNIT_SCOPE (PGE #222)")
     assert tuple(LOOP_UNIT_SCOPE) == tuple(engine_scope)
 
 
