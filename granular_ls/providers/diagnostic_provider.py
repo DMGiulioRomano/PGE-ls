@@ -3650,8 +3650,9 @@ class DiagnosticProvider:
         sono gli stessi ovunque: un nome fuori registro, parametri fuori dai
         bound del costruttore, e la coppia `(parametro, n_reps)` che non sta in
         un float (PGE #212) — `ratio: 10` e `n_reps: 400` legittimi da soli,
-        e insieme un render che non parte. La regola è in
-        `time_distributions.py`, con l'aritmetica del motore.
+        e insieme un render che non parte — o la cui somma dei pesi non è un
+        numero finito (PGE #219). La regola è in `time_distributions.py`, con
+        l'aritmetica del motore.
 
         Restano fuori le due chiavi che il formato compatto lo validano già
         per intero, `grain.read_direction` e `deviation_probability`: lì la

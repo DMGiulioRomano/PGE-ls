@@ -900,6 +900,8 @@ READ_DIRECTION_OVERFLOW_CORPUS = [
      'overflow'),
     ([[0, 1], [_CICLO_RD, 20.0, 400, 'step', {'type': 'power', 'exponent': 150.0}]],
      'overflow'),
+    ([_CICLO_RD, 10.0, 4, 'step', {'type': 'power', 'exponent': float('nan')}],
+     'overflow'),
     ([[_CICLO_RD, 10.0, 400, 'step', {'type': 'geometric', 'ratio': 10}], [20, 0.5]],
      'valore'),
 ]
@@ -935,7 +937,10 @@ def test_read_direction_overflow_come_il_motore(pge, raw, atteso, tmp_path,
     if issue is None:
         ls = None
     else:
-        ls = 'overflow' if 'coppia a esplodere' in issue.hint else 'valore'
+        # La frase dell'errore della distribuzione, con o senza la diagnosi
+        # della coppia: un parametro `.nan` non la porta (PGE #219).
+        ls = ('overflow' if 'il risultato non è un numero finito' in issue.hint
+              else 'valore')
 
     assert motore == atteso, f"il motore non da' piu' {atteso!r} su {raw!r}"
     assert ls == motore
@@ -1138,9 +1143,10 @@ def test_time_distribution_names_match(pge):
 # esattamente gli stessi `n_reps` — senza la banda di tolleranza che un mirror
 # in un altro linguaggio deve accettare. Il bordo si cerca sul motore per
 # bisezione e si confronta su una finestra attorno: abbastanza larga da
-# contenere i due tratti che precedono il rifiuto pulito, il `ZeroDivisionError`
-# di `geometric` (errore anche lui) e il collasso muto di `exponential` e
-# `power` (che errore non è).
+# contenere i due tratti che precedono il trabocco del peso, il
+# `ZeroDivisionError` di `geometric` e la somma dei pesi di `exponential` e
+# `power` che esce dai float (PGE #219). Errori tutti e due: il secondo era un
+# collasso muto fino a #219, e lo specchio lo dichiarava non-errore.
 
 # (spec, n_reps oltre il bordo). Le grafie int e float dello stesso numero
 # stanno entrambe: e' l'unico punto dove il motore le distingue.
@@ -1153,6 +1159,8 @@ OVERFLOW_PROBES = [
     ({'type': 'geometric', 'ratio': 1.1}, 8000),
     ({'type': 'exponential', 'rate': 0.5}, 1100),
     ({'type': 'exp', 'rate': 0.9}, 7000),
+    # verso 1 la somma trabocca molto prima del peso: 458 cicli a 0.99
+    ({'type': 'exponential', 'rate': 0.99}, 80000),
     ({'type': 'power', 'exponent': 150.0}, 200),
     ({'type': 'power', 'exponent': 100.5}, 1200),
     # un `rate` intero fuori dai float: il motore trabocca da `n_reps: 2`
@@ -1251,6 +1259,69 @@ def test_overflow_la_coppia_e_quella_che_nomina_il_motore(pge, spec, n_reps):
     assert issue.param == errore.param_name
     assert issue.param_value == errore.value
     assert issue.formula in errore.hint
+
+
+# `.nan` e `.inf` passano i bound dei costruttori — i confronti con `nan` sono
+# tutti falsi, `inf` li passa per definizione — e da PGE #219 il motore li
+# prende sulla somma dei pesi. Il criterio e' la somma, non il parametro:
+# `base: .inf` e `rate: .inf` danno una somma finita e rendono. E a un ciclo
+# solo il primo peso di `exponential` e `power` vale 1 anche su `nan`.
+_NAN, _INF = float('nan'), float('inf')
+
+NON_FINITE_PROBES = [
+    {'type': 'exponential', 'rate': _NAN},
+    {'type': 'exponential', 'rate': _INF},
+    {'type': 'exponential', 'rate': -_INF},
+    {'type': 'geometric', 'ratio': _NAN},
+    {'type': 'geometric', 'ratio': _INF},
+    {'type': 'geometric', 'ratio': -_INF},
+    {'type': 'logarithmic', 'base': _NAN},
+    {'type': 'logarithmic', 'base': _INF},
+    {'type': 'logarithmic', 'base': -_INF},
+    {'type': 'power', 'exponent': _NAN},
+    {'type': 'power', 'exponent': _INF},
+    {'type': 'power', 'exponent': -_INF},
+]
+
+
+@pytest.mark.parametrize('spec', NON_FINITE_PROBES, ids=repr)
+def test_parametri_non_finiti_come_il_motore(pge, spec):
+    """Stesso verdetto, e dove il motore alza l'errore della somma la stessa
+    diagnosi: la coppia (parametro, n_reps) solo se il valore e' finito."""
+    from granular_ls.schema_bridge import _import_pge_module
+    from granular_ls.time_distributions import (
+        check_time_distribution, describe_issue,
+    )
+
+    factory = _import_pge_module(
+        'envelopes.time_distribution').TimeDistributionFactory
+    bound_error = _import_pge_module('shared.exceptions').ParameterBoundError
+
+    for n_reps in (1, 2, 3, 50):
+        try:
+            factory.create(spec).calculate_distribution(10.0, n_reps)
+            errore = None
+        except Exception as e:
+            errore = e
+        issue = check_time_distribution(spec, n_reps)
+
+        assert (issue is not None) == (errore is not None), (
+            f"{spec!r} a n_reps={n_reps}: il motore "
+            f"{'rifiuta' if errore else 'accetta'}, il language server no")
+        # L'errore della somma si riconosce dalla forma, non dalla frase: un
+        # hint e nessun bound, perche' la coppia non si stampa come [min, max].
+        # `-inf` cade prima, sui bound del costruttore, ed e' anch'esso un
+        # `ParameterBoundError`, ma col suo `min_bound`.
+        somma = (isinstance(errore, bound_error) and errore.hint is not None
+                 and errore.min_bound is None and errore.max_bound is None)
+        assert (issue is not None and issue.kind == 'overflow') == somma, (
+            spec, n_reps)
+        if not somma:
+            continue
+        assert issue.param == errore.param_name
+        assert issue.formula in errore.hint
+        assert (('coppia a esplodere' in describe_issue(issue))
+                == ('coppia a esplodere' in errore.hint)), (spec, n_reps)
 
 
 def test_overflow_rimedi_come_il_motore(pge):
@@ -1357,14 +1428,20 @@ DEVIATION_PROBABILITY_CORPUS = [
     [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'ratio': 1.5}],
     [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 5}],
     # la coppia (parametro, n_reps) che trabocca (PGE #212): il bordo dipende
-    # dalla grafia, il collasso muto di `exponential` non e' un rifiuto, e il
-    # `ZeroDivisionError` di `geometric` si'
+    # dalla grafia, la somma dei pesi di `exponential` che esce dai float e' un
+    # rifiuto da PGE #219, e il `ZeroDivisionError` di `geometric` lo era gia'
     [[[0, 50], [100, 100]], 10.0, 400, 'linear', {'type': 'geometric', 'ratio': 10}],
     [[[0, 50], [100, 100]], 10.0, 309, 'linear', {'type': 'geometric', 'ratio': 10}],
     [[[0, 50], [100, 100]], 10.0, 309, 'linear', {'type': 'geometric', 'ratio': 10.0}],
+    [[[0, 50], [100, 100]], 10.0, 1023, 'linear', {'type': 'exponential', 'rate': 0.5}],
     [[[0, 50], [100, 100]], 10.0, 1024, 'linear', {'type': 'exponential', 'rate': 0.5}],
     [[[0, 50], [100, 100]], 10.0, 1025, 'linear', {'type': 'exponential', 'rate': 0.5}],
     [[[0, 50], [100, 100]], 10.0, 1749, 'linear', 'geometric'],
+    # parametri non finiti (PGE #219): li prende la somma dei pesi, non i bound
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'power', 'exponent': float('nan')}],
+    [[[0, 50], [100, 100]], 10.0, 1, 'linear', {'type': 'power', 'exponent': float('nan')}],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'exponential', 'rate': float('inf')}],
+    [[[0, 50], [100, 100]], 10.0, 4, 'linear', {'type': 'geometric', 'ratio': float('nan')}],
     [[0, 50], [[[0, 50], [100, 100]], 20.0, 400, 'linear', {'type': 'geometric', 'ratio': 10}]],
 ]
 
