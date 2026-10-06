@@ -48,6 +48,8 @@ from typing import Any, Iterable, Optional
 
 from granular_ls.envelope_shapes import (
     VALID_INTERP_TYPES,
+    compact_end_time_ok,
+    compact_n_reps_ok,
     contains_math_expression,
     is_bp_group,
     is_breakpoint,
@@ -56,6 +58,8 @@ from granular_ls.envelope_shapes import (
     is_num,
     is_valid_point,
     normalize_engine_values,
+    pattern_x_goes_forward,
+    pattern_x_in_range,
 )
 from granular_ls.time_distributions import (
     check_time_distribution,
@@ -104,12 +108,28 @@ PATTERN_HINT = (
 )
 
 END_TIME_HINT = (
-    "l'istante di fine del ciclo è un numero positivo: è il tempo entro cui "
-    "le ripetizioni si distribuiscono."
+    "l'istante di fine del ciclo è un numero positivo e finito: è il tempo "
+    "entro cui le ripetizioni si distribuiscono. `true` non è `1`, e con "
+    "`.inf` o `.nan` non c'è nessun istante in cui finire."
+)
+
+PATTERN_X_HINT = (
+    "la prima coordinata di un punto del pattern è una percentuale del ciclo "
+    "e sta in [0, 100]. Fuori da lì il ciclo sfonda i propri confini: sopra "
+    "100 il ciclo successivo comincia prima che questo sia finito, sotto 0 "
+    "esce un breakpoint a tempo negativo."
+)
+
+PATTERN_ORDER_HINT = (
+    "le percentuali del pattern non possono tornare indietro: il ciclo si "
+    "percorre in avanti una volta sola. Una percentuale ripetuta invece va "
+    "bene, è la discontinuità."
 )
 
 N_REPS_HINT = (
-    "il numero di ripetizioni del formato compatto è un intero >= 1."
+    "il numero di ripetizioni del formato compatto è un intero >= 1 "
+    "(`true` non è `1`): con zero o meno cicli non c'è nessun breakpoint da "
+    "generare."
 )
 
 @dataclass(frozen=True)
@@ -200,22 +220,23 @@ def _check_bp_group(group: list) -> Optional[DeviationProbabilityIssue]:
 def _check_compact(compact: list) -> Optional[DeviationProbabilityIssue]:
     """Formato compatto `[pattern, end_time, n_reps, interp?, dist?, wrap?]`.
 
-    Di `end_time` e `n_reps` si verifica quanto `is_loop_block` non garantisce
-    già: il segno e l'arità. La forma garantisce solo che siano
-    `isinstance(..., (int, float))` e `isinstance(..., int)` — che è quel che
-    fa il motore, e i bool lo soddisfano per sottoclasse. Il confronto va
-    quindi fatto **sul valore**, senza escluderli: `true` vale `1` e passa
-    entrambi i guard, `false` vale `0` ed è esattamente il caso che i guard
-    esistono per prendere.
+    I guard su `end_time`, su `n_reps` e sulle percentuali del pattern sono
+    quelli **universali** di `envelope_shapes`, non una copia: dalla PGE #211
+    vivono in `EnvelopeBuilder._parse_compact_format`, che ogni chiave
+    attraversa, e questo modulo e' una delle chiavi.
 
-    Da qui la differenza col fratello `read_direction._check_compact`, che i
-    bool li rifiuta: là sono guard sul verso (PGE #208), non sul formato
-    envelope, e il motore li rifiuta davvero.
+    Fino a quella issue stavano solo in `parameters/read_direction.py`, e la
+    prosa di questa funzione li dichiarava «guard sul verso (PGE #208), non sul
+    formato envelope». Era vero, e ha smesso di esserlo: il motore rifiuta
+    anche qui un `end_time` booleano o infinito, un `n_reps` booleano e un
+    pattern con percentuali fuori da [0, 100] o che tornano indietro. Il mirror
+    taceva su tutti e sei — un silenzio su YAML che non rende, cioe' il verso
+    peggiore in cui sbagliare, perche' nessuno lo vede.
 
     Resta fuori `end_time <= time_offset`, che dipende dall'offset accumulato
     dagli elementi che precedono il ciclo in una lista mista: verificarlo
     vorrebbe dire rifare la passata di `EnvelopeBuilder.parse`. Il segno
-    invece è decidibile, perché quell'offset non è mai negativo.
+    invece e' decidibile, perche' quell'offset non e' mai negativo.
     """
     pattern, end_time, n_reps = compact[0], compact[1], compact[2]
 
@@ -223,10 +244,18 @@ def _check_compact(compact: list) -> Optional[DeviationProbabilityIssue]:
     if issue is not None:
         return issue
 
-    if end_time <= 0:
+    precedente = None
+    for point in pattern:
+        if not pattern_x_in_range(point[0]):
+            return _issue(point[0], PATTERN_X_HINT)
+        if not pattern_x_goes_forward(point[0], precedente):
+            return _issue(point[0], PATTERN_ORDER_HINT)
+        precedente = point[0]
+
+    if not compact_end_time_ok(end_time):
         return _issue(end_time, END_TIME_HINT)
 
-    if n_reps < 1:
+    if not compact_n_reps_ok(n_reps):
         return _issue(n_reps, N_REPS_HINT)
 
     if len(compact) >= 4:
