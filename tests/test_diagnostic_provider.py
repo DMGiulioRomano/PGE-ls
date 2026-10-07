@@ -5216,3 +5216,233 @@ class TestVoicesRawBoundsSenzaTetto:
             "      num_voices: 500\n"))
         assert [d for d in diags if d.severity == DiagnosticSeverity.Error
                 and 'num_voices' in d.message] == []
+
+
+# =============================================================================
+# voices.num_voices / voices.scatter come envelope (issue #59)
+# =============================================================================
+#
+# Le due chiavi hanno i bound in `GRANULAR_PARAMETERS` e nessuno
+# `ParameterSpec`, quindi non diventano un `ParameterInfo`: prima di #59 il
+# loro dominio lo leggeva solo un ramo di `_check_voice_strategies` che faceva
+# `float(val_str)` e su un envelope passava oltre in silenzio. `Stream` le
+# passa a `parse_parameter` come ogni altro parametro, e in `strict` un
+# breakpoint fuori bound alza `ParameterBoundError`: lo stesso valore dava un
+# Error da scalare, niente da envelope, e un render che non partiva.
+#
+# Il corpus e' la tabella della issue piu' le grafie che il builder costruisce
+# (`GRAFIE_ISSUE_58`, un livello piu' in dentro). La parita' col motore sta in
+# `test_pge_parity.test_voices_envelope_bounds_mirror_matches_engine`, che lo
+# rilegge da qui perche' le due non divergano.
+#
+#   (id, yaml_path, corpo sotto lo stream con `{y}`, Y fuori, Y dentro,
+#    riga 0-based dove sta la Y)
+
+GRAFIE_ISSUE_59 = [
+    # la tabella della issue
+    ('num_voices lista inline, sotto il pavimento', 'voices.num_voices',
+     "    voices:\n      num_voices: [[0, {y}], [10, 4]]\n", 0, 1, 6),
+    ('num_voices lista inline, sopra il tetto', 'voices.num_voices',
+     "    voices:\n      num_voices: [[0, 1], [10, {y}]]\n", 999, 256, 6),
+    ('num_voices a blocchi', 'voices.num_voices',
+     "    voices:\n      num_voices:\n"
+     "        - [0, {y}]\n        - [10, 4]\n", 0, 1, 7),
+    ('scatter lista inline, sopra il tetto', 'voices.scatter',
+     "    voices:\n      scatter: [[0, 0], [10, {y}]]\n", 5, 1, 6),
+    ('scatter lista inline, sotto il pavimento', 'voices.scatter',
+     "    voices:\n      scatter: [[0, {y}], [10, 0.5]]\n", -1, 0, 6),
+    # le altre grafie del builder, un livello piu' in dentro di #58
+    ('num_voices dict type/points', 'voices.num_voices',
+     "    voices:\n"
+     "      num_voices: {{type: linear, points: [[0, {y}], [10, 4]]}}\n",
+     0, 1, 6),
+    ('num_voices ciclo compatto', 'voices.num_voices',
+     "    voices:\n      num_voices: [[[0, 1], [100, {y}]], 10, 3]\n",
+     999, 4, 6),
+    ('num_voices breakpoint dict', 'voices.num_voices',
+     "    voices:\n      num_voices: [{{t: 0, v: {y}}}, {{t: 10, v: 4}}]\n",
+     0, 1, 6),
+    ('num_voices interp per punto', 'voices.num_voices',
+     "    voices:\n      num_voices: [[0, {y}, step], [10, 4]]\n", 0, 1, 6),
+    ('scatter a blocchi', 'voices.scatter',
+     "    voices:\n      scatter:\n"
+     "        - [0, {y}]\n        - [10, 0.5]\n", 5, 1, 7),
+    ('scatter bp group nudo', 'voices.scatter',
+     "    voices:\n      scatter: [[[0, 0], [10, {y}]], cubic]\n", 9, 1, 6),
+    ('scatter dict a blocchi', 'voices.scatter',
+     "    voices:\n      scatter:\n        type: step\n        points:\n"
+     "          - [0, 0]\n          - [10, {y}]\n", 7, 1, 10),
+    # le stringhe numeriche le converte il Generator, prima del parser
+    ('scatter stringa numerica', 'voices.scatter',
+     "    voices:\n      scatter: [[0, \"{y}\"], [10, 0.5]]\n", 5, 1, 6),
+]
+
+# Gli scalari della tabella: la meta' che parlava gia', e che deve continuare
+# a parlare una volta sola.
+#   (id, yaml_path, corpo con `{y}`, Y fuori, Y dentro)
+SCALARI_ISSUE_59 = [
+    ('num_voices: 0', 'voices.num_voices',
+     "    voices:\n      num_voices: {y}\n", 0, 4),
+    ('num_voices sopra il tetto', 'voices.num_voices',
+     "    voices:\n      num_voices: {y}\n", 300, 256),
+    ('scatter: 5', 'voices.scatter',
+     "    voices:\n      scatter: {y}\n", 5, 1),
+    ('scatter negativo', 'voices.scatter',
+     "    voices:\n      scatter: {y}\n", -1, 0),
+]
+
+
+@pytest.fixture
+def voices_env_bridge():
+    """I bound veri delle due chiavi, che nel motore stanno in
+    `GRANULAR_PARAMETERS` e in nessuno spec. La parita' li rilegge dal vivo."""
+    return SchemaBridge({
+        'specs': [make_raw_spec('density', 'density', default=None)],
+        'bounds': {
+            'density':    make_raw_bounds(0.01, None),
+            'num_voices': make_raw_bounds(1.0, 256.0,
+                                          variation_mode='quantized'),
+            'scatter':    make_raw_bounds(0.0, 1.0),
+        },
+    })
+
+
+def _voices_stream(body: str) -> str:
+    return ("streams:\n  - stream_id: s1\n    onset: 0.0\n"
+            "    duration: 10.0\n    sample: f.wav\n" + body)
+
+
+class TestVoicesEnvelopeBounds:
+    """Le Y degli envelope di `num_voices` e `scatter`, in ogni grafia."""
+
+    @pytest.mark.parametrize('caso,path,corpo,y_fuori,y_dentro,riga',
+                             GRAFIE_ISSUE_59,
+                             ids=[g[0] for g in GRAFIE_ISSUE_59])
+    def test_y_fuori_bounds_segnalata(self, voices_env_bridge, caso, path,
+                                      corpo, y_fuori, y_dentro, riga):
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream(corpo.format(y=y_fuori)))
+        errs = _envelope_bounds_errors(diags)
+        assert len(errs) == 1, errs
+        assert f"'{path}'" in errs[0].message
+
+    @pytest.mark.parametrize('caso,path,corpo,y_fuori,y_dentro,riga',
+                             GRAFIE_ISSUE_59,
+                             ids=[g[0] for g in GRAFIE_ISSUE_59])
+    def test_ancorata_alla_riga_della_y(self, voices_env_bridge, caso, path,
+                                        corpo, y_fuori, y_dentro, riga):
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream(corpo.format(y=y_fuori)))
+        errs = _envelope_bounds_errors(diags)
+        assert [d.range.start.line for d in errs] == [riga]
+
+    @pytest.mark.parametrize('caso,path,corpo,y_fuori,y_dentro,riga',
+                             GRAFIE_ISSUE_59,
+                             ids=[g[0] for g in GRAFIE_ISSUE_59])
+    def test_y_dentro_i_bounds_tace(self, voices_env_bridge, caso, path,
+                                    corpo, y_fuori, y_dentro, riga):
+        """Il gemello valido: la grafia da sola non e' un errore, e il bordo
+        del dominio (256 voci, scatter 1) sta dentro."""
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream(corpo.format(y=y_dentro)))
+        assert _envelope_bounds_errors(diags) == []
+
+    def test_il_messaggio_e_quello_degli_altri_envelope(self,
+                                                        voices_env_bridge):
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream("    voices:\n      scatter: [[0, 0], [10, 5]]\n"))
+        errs = _envelope_bounds_errors(diags)
+        assert len(errs) == 1
+        assert errs[0].message == (
+            "Valore envelope 5 fuori dai bounds del parametro "
+            "'voices.scatter': [0.0, 1.0].")
+
+    def test_ogni_y_fuori_ha_il_suo_errore_sulla_sua_riga(self,
+                                                          voices_env_bridge):
+        """La grafia a blocchi della tabella, con tutte e due le Y fuori."""
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream("    voices:\n      num_voices:\n"
+                           "        - [0, 0]\n        - [10, 999]\n"))
+        errs = _envelope_bounds_errors(diags)
+        assert [d.range.start.line for d in errs] == [7, 8]
+
+    def test_i_kwarg_della_strategy_non_si_spengono(self, voices_env_bridge):
+        """Le due chiavi convivono con il resto del blocco voices."""
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream("    voices:\n"
+                           "      num_voices: [[0, 0], [10, 4]]\n"
+                           "      pan:\n"
+                           "        strategy: range\n"
+                           "        spread: 0.5\n"))
+        errs = _envelope_bounds_errors(diags)
+        assert [d.range.start.line for d in errs] == [6]
+
+    def test_anche_in_modalita_snapshot(self, voices_env_bridge, tmp_path):
+        """I bound delle due chiavi viaggiano in `extra_bounds`: senza quel
+        giro l'envelope tornerebbe muto solo nell'estensione pacchettizzata,
+        che e' la modalita' in cui il language server gira davvero."""
+        path = tmp_path / 'snap.json'
+        path.write_text(voices_env_bridge.generate_snapshot())
+        diags = DiagnosticProvider(
+            SchemaBridge.from_snapshot(str(path))).get_diagnostics(
+            _voices_stream("    voices:\n      scatter: [[0, 0], [10, 5]]\n"))
+        errs = _envelope_bounds_errors(diags)
+        assert len(errs) == 1
+        assert "'voices.scatter'" in errs[0].message
+
+
+class TestVoicesScalariUnaVoltaSola:
+    """Lo scalare passa dalla stessa mappa, quindi parla ancora — e una volta.
+
+    Il ramo dedicato in `_check_voice_strategies` leggeva il registro una
+    terza volta: lasciato dov'era, l'aggiunta delle due chiavi a
+    `self._value_domains` avrebbe messo due Error sulla stessa riga per lo
+    stesso sbaglio.
+    """
+
+    @pytest.mark.parametrize('caso,path,corpo,y_fuori,y_dentro',
+                             SCALARI_ISSUE_59,
+                             ids=[s[0] for s in SCALARI_ISSUE_59])
+    def test_un_errore_solo(self, voices_env_bridge, caso, path, corpo,
+                            y_fuori, y_dentro):
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream(corpo.format(y=y_fuori)))
+        errs = [d for d in diags if d.severity == DiagnosticSeverity.Error
+                and path in d.message]
+        assert len(errs) == 1, [d.message for d in errs]
+        assert errs[0].range.start.line == 6
+        assert 'fuori range' in errs[0].message
+
+    @pytest.mark.parametrize('caso,path,corpo,y_fuori,y_dentro',
+                             SCALARI_ISSUE_59,
+                             ids=[s[0] for s in SCALARI_ISSUE_59])
+    def test_dentro_tace(self, voices_env_bridge, caso, path, corpo, y_fuori,
+                         y_dentro):
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream(corpo.format(y=y_dentro)))
+        assert [d for d in diags if d.severity == DiagnosticSeverity.Error
+                and path in d.message] == []
+
+    @pytest.mark.parametrize('scritto', [
+        "      scatter: 5\n",
+        "      scatter: [[0, 0], [10, 5]]\n",
+        "      scatter: {type: step, points: [[0, 0], [10, 5]]}\n",
+    ], ids=['scalare', 'envelope', 'dict'])
+    def test_lo_stesso_valore_parla_in_ogni_grafia(self, voices_env_bridge,
+                                                   scritto):
+        """Il cuore della issue: `5` non e' uno scatter, come lo si scriva."""
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream("    voices:\n" + scritto))
+        errs = [d for d in diags if d.severity == DiagnosticSeverity.Error
+                and 'voices.scatter' in d.message]
+        assert len(errs) == 1, [d.message for d in errs]
+        assert '[0.0, 1.0]' in errs[0].message
+
+    def test_una_stringa_non_e_un_valore_fuori_bounds(self,
+                                                      voices_env_bridge):
+        """Il motore la rifiuta per la forma (`InvalidParameterError`), non
+        per un bound: dire «fuori range» manderebbe a correggere l'altra
+        cosa."""
+        diags = DiagnosticProvider(voices_env_bridge).get_diagnostics(
+            _voices_stream("    voices:\n      num_voices: quattro\n"))
+        assert [d for d in diags if 'fuori' in d.message] == []

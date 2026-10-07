@@ -2562,3 +2562,187 @@ def test_envelope_bounds_tace_dove_il_motore_non_arriva_ai_bound(
     esito, _ = _engine_envelope_verdict(testo, path)
     assert esito == 'altro', f"{caso}: il motore ora lo costruisce ({esito})"
     assert _ls_envelope_bounds(testo, path) == set()
+
+
+# =============================================================================
+# voices.num_voices / voices.scatter come envelope (issue #59)
+# =============================================================================
+#
+# Le due chiavi hanno i bound in `GRANULAR_PARAMETERS` e nessuno
+# `ParameterSpec`, quindi `ALL_SCHEMAS` non le nomina e la domanda non si puo'
+# fare attraverso uno spec come per gli altri envelope: `Stream` le passa a
+# `parse_parameter` per nome, e la parita' fa la stessa cosa. Si confrontano
+# gli insiemi di Y, come per #58: «segnala esattamente quelle che il motore
+# rifiuta» vuol dire anche non una di piu'.
+#
+# Il corpus e' quello della suite del provider, riletto da qui perche' le due
+# non divergano.
+
+from tests.test_diagnostic_provider import (  # noqa: E402
+    GRAFIE_ISSUE_59, SCALARI_ISSUE_59,
+)
+
+
+def _engine_voices_verdict(testo: str, yaml_path: str):
+    """Cosa fa il motore del valore scritto a `voices.<key>`.
+
+    Returns:
+        `('bound', {y violate})`, `('ok', set())`, o `('altro', eccezione)`
+        se il motore lo rifiuta per una ragione che non e' un bound.
+    """
+    import yaml as pyyaml
+    from types import SimpleNamespace
+    from granular_ls.schema_bridge import _import_pge_module
+
+    evaluate, _ = _load_eval_math_expressions()
+    exc = _import_pge_module('shared.exceptions')
+    GranularParser = _import_pge_module('parameters.parser').GranularParser
+    anchor = getattr(_import_pge_module('shared.distribution_strategy'),
+                     'ANCHOR_CENTER', 'center')
+    nome = yaml_path.split('.')[-1]
+
+    context = SimpleNamespace(sample_dur_sec=10.0, output_sr=48000,
+                              stream_id='s1', rng_id='r1', duration=10.0)
+    config = SimpleNamespace(context=context, time_mode='absolute',
+                             distribution_mode='uniform', range_anchor=anchor,
+                             duration=10.0, seed=None)
+    stream = evaluate(pyyaml.safe_load(testo)['streams'][0])
+    value = (stream.get('voices') or {})[nome]
+    try:
+        GranularParser(config).parse_parameter(nome, value,
+                                               value_field=yaml_path)
+    except exc.ParameterBoundError as err:
+        return 'bound', {float(y) for _t, y in err.violations}
+    except Exception as err:  # noqa: BLE001 — la forma, non il bound
+        return 'altro', err
+    return 'ok', set()
+
+
+def _ls_voices_out_of_bounds(testo: str, yaml_path: str) -> set:
+    """Le Y che il language server dichiara fuori dai bound di `yaml_path`.
+
+    Scalare ed envelope hanno due messaggi — «valore X fuori range» e «Valore
+    envelope X fuori dai bounds» — perche' sono quelli di ogni altro
+    parametro: la domanda qui e' il numero, non la frase.
+    """
+    import re
+    from lsprotocol.types import DiagnosticSeverity
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+    from granular_ls.schema_bridge import SchemaBridge
+
+    provider = DiagnosticProvider(SchemaBridge.from_python_path(PGE_SRC))
+    ys = set()
+    for d in provider.get_diagnostics(testo):
+        if d.severity != DiagnosticSeverity.Error:
+            continue
+        env = re.match(r"Valore envelope (\S+) fuori dai bounds "
+                       r"del parametro '([^']+)'", d.message)
+        scalare = re.match(r"'([^']+)': valore (\S+) fuori range", d.message)
+        if env and env.group(2) == yaml_path:
+            ys.add(float(env.group(1)))
+        elif scalare and scalare.group(1) == yaml_path:
+            ys.add(float(scalare.group(2)))
+    return ys
+
+
+_VOICES_BOUNDS_CORPUS = [
+    (caso, path, corpo, y_fuori, y_dentro)
+    for caso, path, corpo, y_fuori, y_dentro, _riga in GRAFIE_ISSUE_59
+] + list(SCALARI_ISSUE_59)
+
+
+@pytest.mark.parametrize('dentro', [False, True], ids=['fuori', 'dentro'])
+@pytest.mark.parametrize('caso,path,corpo,y_fuori,y_dentro',
+                         _VOICES_BOUNDS_CORPUS,
+                         ids=[c[0] for c in _VOICES_BOUNDS_CORPUS])
+def test_voices_envelope_bounds_mirror_matches_engine(
+        pge, caso, path, corpo, y_fuori, y_dentro, dentro, tmp_path,
+        monkeypatch):
+    # Il logger del motore apre un file relativo alla cwd al primo parse.
+    monkeypatch.chdir(tmp_path)
+    testo = _envelope_stream(corpo.format(y=y_dentro if dentro else y_fuori))
+
+    esito, dettaglio = _engine_voices_verdict(testo, path)
+    # Il corpus e' grammatica del motore: se una grafia smette di esserlo, il
+    # confronto sui bound non direbbe piu' niente, e deve dirlo questo test.
+    assert esito != 'altro', (
+        f"{caso}: il motore non costruisce piu' questa grafia ({dettaglio!r})")
+
+    motore = dettaglio if esito == 'bound' else set()
+    ls = _ls_voices_out_of_bounds(testo, path)
+    # Lo scalare non e' un envelope: il motore non ha breakpoint da elencare
+    # e alza `ParameterBoundError` con `violations` vuota. Li' la domanda che
+    # ha risposta e' il si'/no.
+    if esito == 'bound' and not motore:
+        assert ls, f"{caso}: il motore lo rifiuta, il LS tace"
+    else:
+        assert ls == motore, (
+            f"Drift su {caso}: il motore rifiuta le Y {sorted(motore)}, "
+            f"il LS segnala {sorted(ls)}")
+    # E il corpus fa la domanda che dice di fare: fuori e' fuori.
+    assert (esito == 'bound') == (not dentro)
+
+
+def test_il_motore_passa_ancora_le_due_chiavi_al_parser(pge):
+    """La premessa del controllo: `Stream` le parsa come ogni altro parametro.
+
+    Senza quella chiamata i bound non li applicherebbe nessuno al parse, e
+    l'Error del language server diventerebbe un falso positivo su YAML che
+    rende. Si legge il sorgente, non si importa: `pge.core.stream` tira
+    dentro numpy, che la CI del language server non installa.
+    """
+    import ast
+
+    from granular_ls.voice_strategies import VOICE_ENVELOPE_KEYS
+
+    root = Path(PGE_SRC)
+    for cand in (root / 'pge' / 'core' / 'stream.py',
+                 root / 'core' / 'stream.py'):
+        if cand.exists():
+            sorgente = cand
+            break
+    else:
+        pytest.skip("stream.py non trovato in questo checkout del motore")
+
+    chiamate = set()
+    for node in ast.walk(ast.parse(sorgente.read_text(encoding='utf-8'))):
+        if (not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Attribute)
+                or node.func.attr != 'parse_parameter'
+                or not node.args
+                or not isinstance(node.args[0], ast.Constant)):
+            continue
+        campo = next((kw.value.value for kw in node.keywords
+                      if kw.arg == 'value_field'
+                      and isinstance(kw.value, ast.Constant)), None)
+        chiamate.add((node.args[0].value, campo))
+
+    for key in VOICE_ENVELOPE_KEYS:
+        assert (key, f'voices.{key}') in chiamate, (
+            f"'{key}' non arriva piu' a parse_parameter come "
+            f"'voices.{key}': {sorted(chiamate)}")
+
+
+def test_i_bound_delle_due_chiavi_si_leggono_senza_spec(pge):
+    """`get_raw_value_domain` risponde dove `get_value_domain` non ha nulla.
+
+    Il dominio e' quello del registro, e nessuna delle due chiavi ha uno spec
+    in `ALL_SCHEMAS`: se un giorno ce l'avessero, il ramo dedicato nel
+    provider diventerebbe un doppione del generico, e lo dice questo test.
+    """
+    from granular_ls.schema_bridge import SchemaBridge, _import_pge_module
+    from granular_ls.voice_strategies import VOICE_ENVELOPE_KEYS
+
+    schema = _import_pge_module('parameters.parameter_schema')
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    con_spec = {s.yaml_path for specs in schema.ALL_SCHEMAS.values()
+                for s in specs}
+
+    for key in VOICE_ENVELOPE_KEYS:
+        assert f'voices.{key}' not in con_spec, (
+            f"'voices.{key}' ora ha uno spec: il dominio lo da' "
+            f"get_value_domain, e il ramo dedicato e' un doppione")
+        assert bridge.get_parameter(key) is None
+        bounds = pge.GRANULAR_PARAMETERS[key]
+        assert bridge.get_raw_value_domain(key) == (bounds.min_val,
+                                                    bounds.max_val)
