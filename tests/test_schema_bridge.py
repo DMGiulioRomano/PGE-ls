@@ -1244,6 +1244,51 @@ class TestGetValueDomain:
             bridge.get_parameter('loop_start')) is None
 
 
+class TestGetRawValueDomain:
+    """Il dominio di chi ha i bound e nessuno `ParameterSpec` (issue #59).
+
+    `num_voices` e `scatter` stanno in `GRANULAR_PARAMETERS` e fuori da
+    `ALL_SCHEMAS`: non diventano un `ParameterInfo`, quindi
+    `get_value_domain` non ha niente da leggere. La risposta deve avere la
+    stessa forma, perche' chi misura un valore faccia una domanda sola.
+    """
+
+    def _bridge(self):
+        dati = _open_ceiling_raw_data()
+        dati['bounds'] = dict(dati['bounds'])
+        dati['bounds']['num_voices'] = make_raw_bounds(1.0, 256.0)
+        dati['bounds']['scatter'] = make_raw_bounds(0.0, 1.0)
+        dati['bounds']['senza_estremi'] = make_raw_bounds(None, None)
+        return SchemaBridge(dati)
+
+    def test_chiuso(self):
+        assert self._bridge().get_raw_value_domain('scatter') == (0.0, 1.0)
+        assert self._bridge().get_raw_value_domain(
+            'num_voices') == (1.0, 256.0)
+
+    def test_senza_bounds_registrati_e_ignoto(self):
+        assert self._bridge().get_raw_value_domain('mai_visto') is None
+
+    def test_senza_nessuno_dei_due_estremi_e_ignoto(self):
+        """«Nessun bound» e «nessun tetto» non sono la stessa risposta."""
+        assert self._bridge().get_raw_value_domain('senza_estremi') is None
+
+    def test_risponde_anche_su_chi_ha_uno_spec(self):
+        """Legge il registro, non la mappa degli spec: `density` ci sta."""
+        assert self._bridge().get_raw_value_domain('density') == (0.01, None)
+
+    def test_lo_snapshot_conserva_il_dominio(self, tmp_path):
+        """La modalita' di distribuzione (il `.vsix`) legge da `extra_bounds`:
+        se non ci arrivasse, l'envelope di `scatter` tornerebbe muto solo
+        nell'estensione pacchettizzata."""
+        path = tmp_path / 'snap.json'
+        path.write_text(self._bridge().generate_snapshot())
+        bridge = SchemaBridge.from_snapshot(str(path))
+        assert bridge.get_parameter('scatter') is None
+        assert bridge.get_raw_value_domain('scatter') == (0.0, 1.0)
+        assert bridge.get_raw_value_domain('num_voices') == (1.0, 256.0)
+
+
 class TestGetDocumentationSenzaTetto:
 
     def test_dichiara_il_pavimento(self):

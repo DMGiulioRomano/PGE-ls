@@ -53,6 +53,22 @@ def outside_domain(value: float, min_val: Optional[float],
             or (max_val is not None and value > max_val))
 
 
+def _domain_or_none(
+    min_val: Optional[float], max_val: Optional[float],
+) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    """La coppia, o None se il registro non dichiara nessuno dei due estremi.
+
+    Il «nessun bound» e il «nessun tetto» non sono la stessa risposta, e
+    distinguerli e' il mestiere di questa riga: `(0.01, None)` e' un dominio
+    (il pavimento di `density`, PGE #272), `(None, None)` e' il silenzio.
+    Sta qui perche' i due lettori del registro — lo spec e i soli bound — la
+    diano uguale.
+    """
+    if min_val is None and max_val is None:
+        return None
+    return (min_val, max_val)
+
+
 def unit_scaled_paths() -> 'frozenset[str]':
     """Le posizioni nel sample che `loop_unit` interpreta (PGE #222).
 
@@ -515,6 +531,30 @@ class SchemaBridge:
         """
         return self._raw_bounds.get(param_name)
 
+    def get_raw_value_domain(
+        self, param_name: str,
+    ) -> Optional[Tuple[Optional[float], Optional[float]]]:
+        """Il dominio di un parametro che ha i bound e nessuno `ParameterSpec`.
+
+        `num_voices` e `scatter` vivono in `GRANULAR_PARAMETERS` e `Stream` li
+        passa a `parse_parameter` come tutti gli altri — in `strict` un
+        breakpoint fuori bound alza `ParameterBoundError` — ma fuori da
+        `ALL_SCHEMAS` non diventano un `ParameterInfo`, quindi
+        `get_value_domain` non ha niente da leggere: si vedevano solo da
+        scalari, e scritti come envelope non li misurava nessuno (issue #59).
+
+        Stessa risposta nella stessa forma di `get_value_domain` — `(min,
+        max)` con un estremo None che non limita da quel lato, None se il
+        registro non ne sa niente — perche' chi misura un valore faccia una
+        domanda sola, scalare o envelope. Nessuna riscalatura da dichiarare
+        qui: `unit_scaled_paths` sono posizioni del pointer, non chiavi del
+        blocco voices.
+        """
+        bounds = self._raw_bounds.get(param_name)
+        if bounds is None:
+            return None
+        return _domain_or_none(bounds.get('min_val'), bounds.get('max_val'))
+
     def get_value_domain(
         self, param: ParameterInfo,
     ) -> Optional[Tuple[Optional[float], Optional[float]]]:
@@ -528,11 +568,9 @@ class SchemaBridge:
         generici del dominio — hover, detail della completion, bound della
         diagnostica — cosi' non possono rispondere in modi diversi.
         """
-        if param.min_val is None and param.max_val is None:
-            return None
         if param.yaml_path in unit_scaled_paths():
             return None
-        return (param.min_val, param.max_val)
+        return _domain_or_none(param.min_val, param.max_val)
 
     def get_documentation(self, param: ParameterInfo) -> str:
         """

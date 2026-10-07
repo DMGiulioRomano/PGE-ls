@@ -295,6 +295,19 @@ class DiagnosticProvider:
             if domain is not None:
                 self._value_domains[path] = domain
 
+        # `voices.num_voices` e `voices.scatter`, che hanno i bound in
+        # `GRANULAR_PARAMETERS` e nessuno spec: il motore li passa a
+        # `parse_parameter` come gli altri, quindi un breakpoint fuori bound
+        # ferma il render allo stesso modo. Nella stessa mappa, non in un
+        # terzo controllo: il loro dominio era letto solo da un ramo che
+        # faceva `float(val_str)` e su un envelope passava oltre in silenzio
+        # (issue #59). Qui lo leggono insieme la fase 4 sugli scalari e la
+        # fase 5 sulle Y.
+        for param_name in VOICE_ENVELOPE_KEYS:
+            domain = bridge.get_raw_value_domain(param_name)
+            if domain is not None:
+                self._value_domains['voices.' + param_name] = domain
+
         # Le chiavi `<param>_range_unit` (PGE #267), dal campo dello schema.
         # La chiave scritta e lasciata vuota la segnala `_check_missing_values`
         # come ogni altra chiave stringa: il motore non la legge come assente.
@@ -878,11 +891,14 @@ class DiagnosticProvider:
         `outside_domain`, quindi gli override dinamici del motore (il minimo
         di `grain.duration` è un campione, non lo `0.001` del registro), il
         pavimento senza tetto di `density` (#51) e l'esclusione delle
-        posizioni che `loop_unit` riscala restano come sono. La chiave si risolve per path, non per nome locale: `duration`
+        posizioni che `loop_unit` riscala restano come sono — e dentro ci sono
+        anche `voices.num_voices` e `voices.scatter`, che nella mappa entrano
+        dai soli bound perche' uno spec non l'hanno (issue #59). La chiave si
+        risolve per path, non per nome locale: `duration`
         dello stream non prende i bound di `grain.duration`. Chi non ha un
-        dominio generico non si misura qui — il blocco pitch, i `loop_*`, le
-        voices, la `curve` della finestra — e `deviation_probability` non ci
-        arriva affatto: le sue Y sono probabilita' in scala 0-100, non valori
+        dominio generico non si misura qui — il blocco pitch, i `loop_*`, i
+        kwarg delle strategy, la `curve` della finestra — e
+        `deviation_probability` non ci arriva affatto: le sue Y sono probabilita' in scala 0-100, non valori
         del parametro omonimo, e il suo corpo lo giudica la fase 15.
 
         Ancoraggio: la riga della Y, una diagnostica per ogni Y fuori. Uno
@@ -1878,41 +1894,13 @@ class DiagnosticProvider:
                 if m:
                     voices_keys[m.group(1)] = n
 
-            # Valida num_voices e scatter (scalari con bounds dal bridge)
-            for param_name in VOICE_ENVELOPE_KEYS:
-                if param_name not in voices_keys:
-                    continue
-                raw_bounds = self._bridge.get_raw_bounds(param_name)
-                if not raw_bounds:
-                    continue
-                param_line = voices_keys[param_name]
-                raw = lines[param_line]
-                stripped = raw.strip()
-                m = re.match(r'^[a-zA-Z_]\w*\s*:\s*(.+)', stripped)
-                if not m:
-                    continue
-                val_str = m.group(1).strip()
-                # Salta envelope (iniziano con '[') — non validiamo i breakpoints qui
-                if val_str.startswith('['):
-                    continue
-                try:
-                    val = float(val_str)
-                except ValueError:
-                    continue
-                # Un estremo None non limita: `val > None` era un TypeError
-                # che spegneva l'intera diagnostica del documento.
-                min_v = raw_bounds.get('min_val')
-                max_v = raw_bounds.get('max_val')
-                if outside_domain(val, min_v, max_v):
-                    diagnostics.append(Diagnostic(
-                        range=self._line_range(param_line),
-                        message=(
-                            f"`voices.{param_name}` = {val} fuori range "
-                            f"{domain_label(min_v, max_v)}."
-                        ),
-                        severity=DiagnosticSeverity.Error,
-                        source=SOURCE,
-                    ))
+            # `num_voices` e `scatter` non si misurano qui: i loro bound
+            # stanno in `self._value_domains` come quelli di ogni altro
+            # parametro (issue #59), quindi li confrontano la fase 4 sullo
+            # scalare e la fase 5 sulle Y dell'envelope. Il ramo che stava
+            # qui leggeva il registro una terza volta, con un `float()` che
+            # su un envelope alzava `ValueError` e passava oltre: lo stesso
+            # valore dava un Error da scalare e niente da envelope.
 
             # Valida ogni dimensione presente
             for dim in VOICE_DIMENSIONS:
