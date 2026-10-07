@@ -603,7 +603,12 @@ VOICE_DIMENSIONS: List[str] = ['pitch', 'onset_offset', 'pointer', 'pan']
 # Chiavi envelope-capable di primo livello dentro voices:.
 # Hanno bounds in GRANULAR_PARAMETERS del motore ma nessun ParameterSpec in
 # ALL_SCHEMAS (vengono parsati direttamente in _init_voice_manager di stream.py).
-# I bounds vengono letti dinamicamente dal bridge via get_raw_bounds().
+# Il loro dominio lo legge il bridge per nome, via get_raw_value_domain():
+# la diagnostica ci misura lo scalare E le Y dell'envelope, perche' il
+# motore le passa a parse_parameter come ogni altro parametro (issue #59).
+# La finestra di disegno degli snippet e della GUI resta get_raw_bounds()
+# attraverso draw_bounds(), che e' un'altra domanda: fin dove disegnare
+# dove il registro tace, non se il numero scritto e' ammesso.
 VOICE_ENVELOPE_KEYS: List[str] = ['num_voices', 'scatter']
 
 # Chiavi di primo livello dentro il blocco voices:
