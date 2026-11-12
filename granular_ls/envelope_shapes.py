@@ -31,8 +31,10 @@ VALID_INTERP_TYPES = ('linear', 'cubic', 'step')
 # Il pattern con cui il Generator riconosce un'espressione da valutare (mirror
 # di `Generator._eval_math_expressions` in PGE, src/pge/engine/generator.py).
 # La classe di caratteri e' la sua: se il motore allarga o restringe cio' che
-# valuta, questa riga e' il posto che deve seguirlo.
-_MATH_EXPRESSION_RE = re.compile(r'\(([a-zA-Z0-9+\-*/.() ]+)\)')
+# valuta, questa riga e' il posto che deve seguirlo. La virgola separa gli
+# argomenti di `max`, `min`, `pow` (PGE #309): senza, `(max(3, 7))` restava
+# una stringa qui mentre il motore la valuta a 7.
+_MATH_EXPRESSION_RE = re.compile(r'\(([a-zA-Z0-9+\-*/.(), ]+)\)')
 
 
 def is_math_expression(value) -> bool:
