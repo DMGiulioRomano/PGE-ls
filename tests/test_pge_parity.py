@@ -2562,3 +2562,517 @@ def test_envelope_bounds_tace_dove_il_motore_non_arriva_ai_bound(
     esito, _ = _engine_envelope_verdict(testo, path)
     assert esito == 'altro', f"{caso}: il motore ora lo costruisce ({esito})"
     assert _ls_envelope_bounds(testo, path) == set()
+
+
+# =============================================================================
+# Lo specchio unico dei guard di forma (PGE #211, #288; PGE-ls #62)
+# =============================================================================
+#
+# `envelope_guards.check_envelope_shape` e' il mirror della strada che ogni
+# chiave percorre verso un envelope: `create_scaled_envelope` → `Envelope`
+# (forma dict, slot interp, corpo vuoto) → `EnvelopeBuilder.parse` →
+# `_parse_segments` (tipo per punto). Il patto confronta la **sotto-posizione**,
+# non il solo verdetto: e' il campo di ripiego che il motore nomina quando non
+# conosce la chiave (`envelope.<where>`), e dice quale guard ha parlato per
+# primo. La coppia che trabocca e' un `ParameterBoundError`, non un
+# `InvalidFieldValueError`: e' lo stesso slot, la distribuzione.
+
+def _engine_shape_where(body, time_mode, tmp_path, monkeypatch):
+    """La sotto-posizione che il motore rifiuta costruendo `body`, o None."""
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        create_scaled_envelope = _import_pge_module(
+            'envelopes.envelope').create_scaled_envelope
+    except Exception:
+        pytest.skip("engine senza Envelope importabile in questo checkout")
+    eccezioni = _import_pge_module('shared.exceptions')
+    monkeypatch.chdir(tmp_path)  # il logger del builder scrive in logs/
+
+    try:
+        create_scaled_envelope(body, 10.0, time_mode)
+    except eccezioni.InvalidFieldValueError as exc:
+        if not str(exc.field).startswith('envelope.'):
+            pytest.fail(f"campo inatteso senza chiave: {exc.field!r}")
+        return exc.field[len('envelope.'):]
+    except eccezioni.ParameterBoundError:
+        return 'compact.time_dist'
+    return None
+
+
+_PAT = [[0, 1], [100, 2]]
+
+ENVELOPE_SHAPE_CORPUS = [
+    # validi
+    [[0, 1], [1, 2]],
+    [[0, 1, 'cubic'], [1, 2]],
+    [{'t': 0, 'v': 1}, {'t': 1, 'v': 2, 'type': 'step'}],
+    [[[0, 1], [1, 2]], 'cubic'],
+    [_PAT, 1.0, 2],
+    [_PAT, 1.0, 2, 'Step'],
+    [_PAT, 1.0, 2, ''],
+    [_PAT, 1.0, 2, None, 'exponential', True],
+    [_PAT, 1.0, 2, None, None, None],
+    {'points': [[0, 1], [1, 2]]},
+    {'type': 'Cubic', 'points': [[0, 1], [1, 2]]},
+    {'type': ' linear ', 'points': [_PAT, 1.0, 2]},
+    {'points': [_PAT, 1.0, 2, 'banana']},
+    [[_PAT, 1.0, 2, 'linear'], [_PAT, 2.0, 2, 'banana']],
+    [[[0, 1], [50, 1], [50, 2], [100, 2]], 1.0, 2],
+    [[_PAT, 1.0, 4], [_PAT, 1.1, 2]],
+    [[[[0, 1], [50, 2]], 1.0, 4], [_PAT, 0.9, 2]],
+    # forma dict (PGE #288)
+    {}, {'type': 'linear'}, {'points': None}, {'points': 3},
+    {'type': 'banana', 'points': [[0, 1]]},
+    {'type': '', 'points': [[0, 1]]},
+    {'type': '   ', 'points': [[0, 1]]},
+    {'type': None, 'points': [[0, 1]]},
+    {'type': 'banana', 'points': []},
+    {'points': []},
+    {'points': 'ab'},
+    {'points': {'k': 1}},
+    # forma lista: slot interp, corpo vuoto (PGE #288)
+    [],
+    [_PAT, 1.0, 2, 'cubicc'],
+    [_PAT, 1.0, 2, '   '],
+    [_PAT, 1, True, 'cubicc'],
+    [[0, 0], [_PAT, 1.0, 2, None], [_PAT, 2.0, 2, 'cubicc'],
+     [_PAT, 3.0, 2, 'banana']],
+    # il builder (PGE #211)
+    [[[0, 1]], 'linear'],
+    [[], 'cubic'],
+    [[[0, 1], [1, 2]], 'Step'],
+    [[[[0, 1]], 'linear'], [1.0, 1]],
+    [[[0.0, 10], [1.0]], 'cubic'],
+    [_PAT, 1.0, 0],
+    [_PAT, 1.0, True],
+    [_PAT, 1.0, 2.0],
+    [_PAT, True, 2],
+    [_PAT, 0, 2],
+    [_PAT, float('inf'), 2],
+    [_PAT, float('nan'), 2],
+    [[], 1.0, 2],
+    [[[0, 1], [150, 2]], 1.0, 2],
+    [[[-10, 1], [100, 2]], 1.0, 2],
+    [[[100, 1], [0, 2]], 1.0, 2],
+    [[[0, 'a'], [100, 2]], 1.0, 2],
+    [[[0, True], [100, 2]], 1.0, 2],
+    [[[0, 1, 5], [100, 2]], 1.0, 2],
+    [[[[[0, 1], [1, 2]], 'linear'], [100, 2]], 1.0, 2],
+    [_PAT, 1.0, 2, None, 'banana'],
+    [_PAT, 1.0, 2, None, {'type': None}],
+    [_PAT, 1.0, 2, None, {'type': 5}],
+    [_PAT, 1.0, 2, None, {'ratio': 1.5}],
+    [_PAT, 10.0, 400, 'linear', {'type': 'geometric', 'ratio': 10}],
+    [[0, 0], [1, 10], 'cycle'],
+    [[0, 0], {'t': 0, 'v': 'a'}],
+    [[0, 0], [1]],
+    # l'istante da cui comincia un compatto
+    [[0, 1], [0.5, 2], [_PAT, 0.5, 2]],
+    [[0, 1], [0.5, 2], [_PAT, 0.6, 2]],
+    [[[[0, 1], [2, 2]], 'linear'], [_PAT, 1.0, 2]],
+    [[_PAT, 1.0, 4], [_PAT, 1.0, 2]],
+    [[[[0, 1], [50, 2]], 1.0, 4], [_PAT, 0.875, 2]],
+    [[_PAT, 1.0, 4, None, 'exponential'], [_PAT, 0.5, 2]],
+    [[_PAT, 1.0, 4, None, 'exponential'], [_PAT, 1.5, 2]],
+    [[[[0, 1], [50, 2]], 1.0, 4, None, None, True], [_PAT, 0.99, 2]],
+    # il tipo per punto (Envelope._parse_segments), alla lettera
+    [[0, 1, 'banana'], [1, 2]],
+    [[0, 1, 'Step'], [1, 2]],
+    [[0, 1], {'t': 1, 'v': 2, 'type': 'cubicc'}],
+    [[[0, 1, 'x'], [1, 2]], 'linear'],
+    [[[0, 1, 'x'], [100, 2]], 1.0, 2],
+    [[0, 1, 'banana'], [1, 2], [1]],
+]
+
+
+@pytest.mark.parametrize('time_mode', ['absolute', 'normalized'])
+@pytest.mark.parametrize('body', ENVELOPE_SHAPE_CORPUS,
+                         ids=lambda v: repr(v)[:60])
+def test_envelope_shape_mirror_matches_engine(pge, body, time_mode, tmp_path,
+                                              monkeypatch):
+    """Stesso corpo, stesso primo guard: la sotto-posizione coincide.
+
+    Sotto `normalized` i corpi del bordo (due compatti che finiscono allo
+    stesso istante) il mirror li tace per scelta: la scala cambia gli
+    arrotondamenti. Li' il patto chiede solo di non dire il falso.
+    """
+    from granular_ls.envelope_guards import check_envelope_shape
+
+    motore = _engine_shape_where(body, time_mode, tmp_path, monkeypatch)
+    issue = check_envelope_shape(body, time_mode)
+    ls = None if issue is None else issue.where
+
+    if ls is None and motore is not None and time_mode == 'normalized':
+        return  # silenzio dichiarato, mai il contrario
+    assert ls == motore, (
+        f"Drift su {body!r} ({time_mode}): motore {motore!r}, LS {ls!r}")
+
+
+def _random_envelope_bodies(seed: int, n: int):
+    """Corpi casuali che mescolano ogni forma, validi e malformati, scritti
+    come li scrive uno YAML (bool, null, stringhe, infiniti)."""
+    import random
+
+    R = random.Random(seed)
+    nums = [0, 1, 0.5, 2, 5, 10, 100, 150, -10, True, False, 'a', None,
+            float('inf'), [1, 2]]
+    interps = ['linear', 'cubic', 'step', 'Step', ' linear ', '', '   ',
+               'banana', None, 5]
+    dists = [None, 'linear', 'exponential', 'logarithmic', 'banana',
+             {'type': 'geometric', 'ratio': 1.5}, {'type': None},
+             {'type': 5}, {'ratio': 1.5}, {},
+             {'type': 'power', 'exponent': 2}]
+
+    def num():
+        if R.random() < 0.3:
+            return R.choice(nums)
+        return R.choice([0, 0.1, 0.3, 0.5, 1, 2])
+
+    def punto():
+        r = R.random()
+        if r < 0.6:
+            return [num(), num()]
+        if r < 0.8:
+            return [num(), num(), R.choice(interps)]
+        if r < 0.9:
+            if R.random() < 0.5:
+                return {'t': num(), 'v': num()}
+            return {'t': num(), 'v': num(), 'type': R.choice(interps)}
+        return R.choice([[num()], 'x', 3, [num(), num(), num(), num()]])
+
+    def punto_pattern():
+        x = (R.choice([0, 25, 50, 75, 100, 150, -10, True, 'a'])
+             if R.random() < 0.2 else R.choice([0, 25, 50, 75, 100]))
+        r = R.random()
+        if r < 0.7:
+            return [x, num() if R.random() < 0.3 else 1]
+        if r < 0.9:
+            return [x, 1, R.choice(interps)]
+        return R.choice([[[0, 1], [1, 2]], [x], 'q'])
+
+    def x_di(p):
+        if isinstance(p, list) and p and isinstance(p[0], (int, float)):
+            return p[0]
+        return 0
+
+    def compatto():
+        n_reps = (R.choice([1, 2, 4, 0, True, 2.0]) if R.random() < 0.3
+                  else R.choice([1, 2, 4]))
+        pattern = [punto_pattern() for _ in range(R.randint(0, 4))]
+        if R.random() < 0.8:
+            pattern.sort(key=x_di)
+        fine = num() if R.random() < 0.3 else R.choice([0.5, 1, 2, 3, 5])
+        c = [pattern, fine, n_reps]
+        lunghezza = R.randint(3, 6)
+        if lunghezza >= 4:
+            c.append(R.choice(interps) if R.random() < 0.5 else None)
+        if lunghezza >= 5:
+            c.append(R.choice(dists))
+        if lunghezza >= 6:
+            c.append(R.choice([True, False, None]))
+        return c
+
+    def gruppo():
+        return [[punto() for _ in range(R.randint(0, 3))], R.choice(interps)]
+
+    def elemento():
+        r = R.random()
+        if r < 0.5:
+            return punto()
+        return compatto() if r < 0.75 else gruppo()
+
+    def corpo():
+        r = R.random()
+        if r < 0.2:
+            b = compatto()
+        elif r < 0.3:
+            b = gruppo()
+        elif r < 0.35:
+            b = []
+        else:
+            b = [elemento() for _ in range(R.randint(1, 4))]
+        if R.random() < 0.25:
+            d = {'points': b}
+            if R.random() < 0.5:
+                d['type'] = R.choice(interps)
+            if R.random() < 0.15:
+                d['time_unit'] = 'normalized'
+            return d
+        return b
+
+    return [(corpo(), R.choice(['absolute', 'normalized']))
+            for _ in range(n)]
+
+
+def test_envelope_shape_mirror_fuzz_matches_engine(pge, tmp_path,
+                                                   monkeypatch):
+    """Duemila corpi seminati: dove il mirror parla, dice il guard del motore.
+
+    Il contratto ha un verso: un rosso del mirror su un corpo che il motore
+    costruisce, o un rosso su un guard diverso dal suo, e' un errore; un
+    silenzio del mirror dove il motore rifiuta e' ammesso — e' la direzione
+    sicura, e succede dove l'istante di partenza di un compatto non si decide
+    (vedi `envelope_guards`) — ma resta raro: se cresce, il mirror ha perso
+    un guard. Un rifiuto del motore che non e' un errore di forma (una
+    divisione per zero nelle tangenti della cubica con una y infinita) non
+    e' affare del mirror e non conta.
+    """
+    from granular_ls.envelope_guards import check_envelope_shape
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        create_scaled_envelope = _import_pge_module(
+            'envelopes.envelope').create_scaled_envelope
+    except Exception:
+        pytest.skip("engine senza Envelope importabile in questo checkout")
+    eccezioni = _import_pge_module('shared.exceptions')
+    monkeypatch.chdir(tmp_path)
+
+    corpi = _random_envelope_bodies(seed=62, n=2000)
+    silenzi, falsi = 0, []
+    for body, time_mode in corpi:
+        try:
+            create_scaled_envelope(body, 10.0, time_mode)
+            motore = None
+        except eccezioni.InvalidFieldValueError as exc:
+            motore = str(exc.field)[len('envelope.'):]
+        except eccezioni.ParameterBoundError:
+            motore = 'compact.time_dist'
+        except (ValueError, TypeError, ZeroDivisionError, OverflowError):
+            continue
+        issue = check_envelope_shape(body, time_mode)
+        ls = None if issue is None else issue.where
+        if ls == motore:
+            continue
+        if ls is None:
+            silenzi += 1
+        else:
+            falsi.append((body, time_mode, motore, ls))
+
+    assert falsi == [], "\n".join(
+        f"{b!r} ({tm}): motore {m!r}, LS {l!r}" for b, tm, m, l in falsi[:10])
+    assert silenzi <= len(corpi) // 100, (
+        f"{silenzi} silenzi su {len(corpi)}: il mirror tace dove il motore "
+        f"rifiuta piu' di quanto l'istante indecidibile giustifichi")
+
+
+def _load_parse_strategy_kwarg():
+    """`_parse_strategy_kwarg`, la funzione vera, senza voices_controller.py.
+
+    Il modulo importa il `VoiceManager` e con lui numpy; la funzione usa solo
+    `Envelope`, le eccezioni e il riconoscimento delle espressioni, che si
+    importano senza. Stessa estrazione di `_load_init_grain_reverse`.
+    """
+    import ast
+    from granular_ls.schema_bridge import _import_pge_module
+
+    sorgente = Path(PGE_SRC) / 'pge' / 'controllers' / 'voices_controller.py'
+    if not sorgente.exists():
+        pytest.skip("controllers/voices_controller.py non in questo checkout")
+    tree = ast.parse(sorgente.read_text(encoding='utf-8'))
+    nodi = [n for n in tree.body
+            if (isinstance(n, ast.FunctionDef)
+                and n.name == '_parse_strategy_kwarg')
+            or (isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == '_STRATEGY_KWARG_HINT'
+                for t in n.targets))]
+    if not any(isinstance(n, ast.FunctionDef) for n in nodi):
+        pytest.skip("engine senza _parse_strategy_kwarg (PGE #288)")
+    try:
+        envelope = _import_pge_module('envelopes.envelope')
+        espressioni = _import_pge_module('expressions.expression')
+        campi = _import_pge_module('expressions.fields')
+    except Exception:
+        pytest.skip("engine senza i moduli di _parse_strategy_kwarg")
+    eccezioni = _import_pge_module('shared.exceptions')
+    namespace = {
+        'Envelope': envelope.Envelope,
+        'create_scaled_envelope': envelope.create_scaled_envelope,
+        'outer_parenthesized': espressioni.outer_parenthesized,
+        'EXPRESSION_FIELDS': campi.EXPRESSION_FIELDS,
+        'InvalidFieldValueError': eccezioni.InvalidFieldValueError,
+        'ExpressionError': getattr(eccezioni, 'ExpressionError', Exception),
+    }
+    import __future__
+    modulo = ast.Module(body=nodi, type_ignores=[])
+    ast.fix_missing_locations(modulo)
+    # Il modulo del motore ha `from __future__ import annotations`: le
+    # annotazioni della firma restano stringhe, come la' dentro.
+    exec(compile(modulo, str(sorgente), 'exec',
+                 flags=__future__.annotations.compiler_flag,
+                 dont_inherit=True), namespace)
+    return namespace['_parse_strategy_kwarg']
+
+
+VOICE_KWARG_CORPUS = [
+    3, 0.5, 'major', [[0, 1], [1, 2]], {'points': [[0, 1], [1, 2]]},
+    [_PAT, 1.0, 2], [[[0, 1], [1, 2]], 'step'],
+    [1, 2, 3], [], {'a': 1}, [[1, 2, 3]], {'type': 'linear'},
+    [_PAT, 1.0, 0], [[[0, 1]], 'linear'], {'points': None},
+    {'time_mode': 'normalized', 'points': [_PAT, 1.0, True]},
+]
+
+
+@pytest.mark.parametrize('value', VOICE_KWARG_CORPUS,
+                         ids=lambda v: repr(v)[:50])
+def test_voice_kwarg_mirror_matches_engine(pge, value, tmp_path,
+                                           monkeypatch):
+    """Un kwarg che non e' un envelope si ferma al parse (PGE #288); uno che
+    lo e' passa dai guard di forma. Il campo e' quello del kwarg."""
+    from granular_ls.envelope_guards import check_voice_kwarg
+    from granular_ls.schema_bridge import _import_pge_module
+
+    parse = _load_parse_strategy_kwarg()
+    eccezioni = _import_pge_module('shared.exceptions')
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        parse(value, 10.0, 'absolute', field='voices.pan.step')
+        motore = None
+    except eccezioni.InvalidFieldValueError as exc:
+        assert exc.field == 'voices.pan.step'
+        motore = 'rifiuta'
+    issue = check_voice_kwarg(value, 'absolute')
+    ls = None if issue is None else 'rifiuta'
+    assert ls == motore, f"Drift su {value!r}: motore {motore}, LS {ls}"
+
+
+# La tabella per chiave del motore (tests/core/test_stream_guard_di_forma.py),
+# attraverso il provider con lo schema vero: ogni chiave che il motore
+# costruisce come envelope deve arrivare alla fase 20 con il suo nome. Una
+# chiave che lo schema rinominasse, o che `_envelope_value_nodes` smettesse di
+# elencare, cadrebbe qui invece di tornare un falso verde.
+_STREAM_FORMA = (
+    "streams:\n"
+    "  - stream_id: s1\n"
+    "    onset: 0.0\n"
+    "    duration: 2.0\n"
+    "    sample: tone.wav\n"
+)
+
+CHIAVI_FORMA_MOTORE = {
+    'density': "    density: {c}\n",
+    'volume': "    volume: {c}\n",
+    'grain.duration': "    grain:\n      duration: {c}\n",
+    'grain.duration_range': "    grain:\n      duration_range: {c}\n",
+    'pointer.speed_ratio': "    pointer:\n      speed_ratio: {c}\n",
+    'pitch.semitones': "    pitch:\n      semitones: {c}\n",
+    'voices.num_voices': "    voices:\n      num_voices: {c}\n",
+    'voices.scatter': "    voices:\n      num_voices: 2\n      scatter: {c}\n",
+    'voices.pan.step': ("    voices:\n      num_voices: 2\n      pan:\n"
+                        "        strategy: step\n        step: {c}\n"),
+    'grain.envelope.curve': ("    grain:\n      envelope:\n"
+                             "        from: hanning\n        to: bartlett\n"
+                             "        curve: {c}\n"),
+}
+
+CORPI_FORMA_MOTORE = {
+    'bp_group_un_punto': [[[[0, 0]], 'linear'], [1.0, 0]],
+    'n_reps_zero': [[[0, 0], [100, 0]], 1.0, 0],
+    'n_reps_booleano': [[[0, 0], [100, 0]], 1.0, True],
+    'end_time_booleano': [[[0, 0], [100, 0]], True, 2],
+    'x_oltre_cento': [[[0, 0], [150, 0]], 1.0, 2],
+    'x_indietro': [[[100, 0], [0, 0]], 1.0, 2],
+    'y_non_numerica': [[[0, 'a'], [100, 0]], 1.0, 2],
+    'y_booleana': [[[0, True], [100, 0]], 1.0, 2],
+    'distribuzione_ignota': [[[0, 0], [100, 0]], 1.0, 2, 'linear', 'banana'],
+    'interp_per_punto_ignoto': [[0, 0, 'banana'], [1.0, 0]],
+}
+
+
+@pytest.mark.parametrize('difetto', list(CORPI_FORMA_MOTORE))
+@pytest.mark.parametrize('campo', list(CHIAVI_FORMA_MOTORE))
+def test_forma_envelope_sotto_ogni_chiave_dello_schema(pge, campo, difetto):
+    import json
+    from granular_ls.providers.diagnostic_provider import DiagnosticProvider
+    from granular_ls.schema_bridge import SchemaBridge
+
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    corpo = json.dumps(CORPI_FORMA_MOTORE[difetto])
+    yaml_text = _STREAM_FORMA + CHIAVI_FORMA_MOTORE[campo].format(c=corpo)
+    errs = [d for d in DiagnosticProvider(bridge).get_diagnostics(yaml_text)
+            if d.message.startswith(f"'{campo}':")
+            and 'non è ammesso' in d.message]
+    assert len(errs) == 1, (campo, difetto,
+                            [d.message for d in errs])
+
+
+# Le due chiavi con un mirror proprio passano dallo stesso specchio dopo la
+# loro semantica: il corpus della forma, sotto ciascuna, deve dare lo stesso
+# verdetto del motore. Sotto `deviation_probability` le y del corpus (1, 2)
+# sono probabilita' lecite; sotto `grain.read_direction` il 2 diventa -1.
+
+def _verso(obj):
+    """Il corpo con le y del corpus portate nel dominio del verso."""
+    if isinstance(obj, list):
+        if (len(obj) >= 2 and isinstance(obj[0], (int, float))
+                and not isinstance(obj[0], bool)
+                and obj[1] == 2 and not isinstance(obj[1], bool)):
+            obj = [obj[0], -1] + obj[2:]
+        return [_verso(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _verso(v) for k, v in obj.items()}
+    return obj
+
+
+@pytest.mark.parametrize('body', ENVELOPE_SHAPE_CORPUS,
+                         ids=lambda v: repr(v)[:60])
+def test_deviation_probability_passa_dallo_specchio_unico(pge, body,
+                                                         tmp_path,
+                                                         monkeypatch):
+    import copy
+    from granular_ls.deviation_probability import check_envelope_body
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        GateFactory = _import_pge_module('parameters.gate_factory').GateFactory
+    except Exception:
+        pytest.skip("engine senza GateFactory importabile in questo checkout")
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        GateFactory.create_gate(
+            deviation_probability={'volume': copy.deepcopy(body)},
+            param_key='volume', duration=10.0)
+        motore_rifiuta = False
+    except Exception:
+        motore_rifiuta = True
+    ls_rifiuta = check_envelope_body(copy.deepcopy(body),
+                                     param_key='volume') is not None
+    assert ls_rifiuta == motore_rifiuta, (
+        f"Drift su {body!r}: motore "
+        f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
+        f"LS {'rifiuta' if ls_rifiuta else 'accetta'}")
+
+
+@pytest.mark.parametrize('body', [_verso(b) for b in ENVELOPE_SHAPE_CORPUS],
+                         ids=lambda v: repr(v)[:60])
+def test_read_direction_passa_dallo_specchio_unico(pge, body, tmp_path,
+                                                   monkeypatch):
+    import copy
+    from granular_ls.read_direction import check_read_direction
+    from granular_ls.schema_bridge import _import_pge_module
+
+    try:
+        normalize = _import_pge_module(
+            'parameters.read_direction').normalize_read_direction
+        create_scaled_envelope = _import_pge_module(
+            'envelopes.envelope').create_scaled_envelope
+    except Exception:
+        pytest.skip("engine senza read_direction o Envelope importabili")
+    eccezioni = _import_pge_module('shared.exceptions')
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        value = normalize(copy.deepcopy(body))
+        if isinstance(value, dict):
+            create_scaled_envelope(value, 10.0, 'absolute')
+        motore_rifiuta = False
+    except (eccezioni.InvalidFieldValueError, eccezioni.ParameterBoundError):
+        motore_rifiuta = True
+    ls_rifiuta = check_read_direction(copy.deepcopy(body)) is not None
+    assert ls_rifiuta == motore_rifiuta, (
+        f"Drift su {body!r}: motore "
+        f"{'rifiuta' if motore_rifiuta else 'accetta'}, "
+        f"LS {'rifiuta' if ls_rifiuta else 'accetta'}")

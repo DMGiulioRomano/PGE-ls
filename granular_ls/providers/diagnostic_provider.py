@@ -38,14 +38,10 @@ from lsprotocol.types import (
 )
 
 from granular_ls.envelope_shapes import (
-    VALID_INTERP_TYPES,
-    compact_block_positions,
     contains_math_expression,
     envelope_y_paths,
     is_bp_group,
-    is_bp_group_candidate,
     is_loop_block,
-    is_valid_point,
     normalize_engine_values,
 )
 from granular_ls.schema_bridge import (
@@ -58,9 +54,9 @@ from granular_ls.voice_strategies import (
     CHORD_INTERVALS,
     get_strategy_spec,
 )
-from granular_ls.time_distributions import (
-    check_time_distribution,
-    describe_issue,
+from granular_ls.envelope_guards import (
+    check_envelope_shape,
+    check_voice_kwarg,
 )
 from granular_ls.read_direction import (
     EXCLUSIVE_HINT,
@@ -391,16 +387,6 @@ class DiagnosticProvider:
             if d.range.start.line not in scaled_lines
         )
 
-        # Fase 5d: validazione BP group [points, interp] (PGE #64). Non sul
-        # valore di grain.reverse: il motore lo rifiuta prima di costruirne
-        # l'envelope, e dire che l'interp non va manderebbe a correggere la
-        # cosa sbagliata. Lo dice la fase 14.
-        reverse_lines = self._grain_reverse_lines(lines, grain_blocks)
-        diagnostics.extend(
-            d for d in self._check_bp_groups(lines)
-            if d.range.start.line not in reverse_lines
-        )
-
         # Fase 5b: validazione grain.envelope (finestratura del grano).
         diagnostics.extend(self._check_grain_envelope(document_text))
 
@@ -461,10 +447,13 @@ class DiagnosticProvider:
         # PGE #242: se ne va con l'avviso [LOOP_UNIT] del motore).
         diagnostics.extend(self._check_loop_unit_migration(lines, streams))
 
-        # Fase 20: il quinto elemento del formato compatto sotto le chiavi
-        # senza un controllo dedicato — nome, parametri, e la coppia
-        # (parametro, n_reps) che trabocca (PGE #212).
-        diagnostics.extend(self._check_time_distributions(lines, streams))
+        # Fase 20: la forma dell'envelope sotto ogni chiave che il motore
+        # costruisce come envelope e che non ha un controllo dedicato (PGE
+        # #211, #288) — dict, slot interp, corpo vuoto, BP group (PGE #64),
+        # formato compatto con la sua distribuzione temporale (PGE #212),
+        # elemento sconosciuto, interp per punto, kwarg di voices che non e'
+        # un envelope. Il primo problema per chiave, come il motore.
+        diagnostics.extend(self._check_envelope_shapes(lines, streams))
 
         return diagnostics
 
@@ -1687,87 +1676,6 @@ class DiagnosticProvider:
                 severity=DiagnosticSeverity.Error,
                 source=SOURCE,
             ))
-        return diagnostics
-
-    def _check_bp_groups(self, lines: List[str]) -> List[Diagnostic]:
-        """
-        Valida i BP group [points, interp] (PGE issue #64).
-
-        Un BP group avvolge un run di breakpoint dichiarando l'interpolazione
-        dell'intera macrozona: [[[t, v], ...], 'interp']. Regole (identiche
-        a EnvelopeBuilder._expand_bp_group in PGE):
-
-          - interp deve essere in VALID_INTERP_TYPES (linear/cubic/step),
-            altrimenti il motore solleva InvalidFieldValueError;
-          - la zona deve avere almeno 2 punti (n punti -> n-1 segmenti
-            interni), altrimenti ValueError;
-          - i punti devono essere [t, v] o [t, v, type].
-
-        Cerca i gruppi sia nella forma diretta 'key: [points, interp]' sia
-        come item di envelope misti (inline o block-style '- [...]').
-        Parsing tollerante via yaml.safe_load: righe non parseabili
-        (es. flow spezzato su piu' righe) vengono ignorate.
-        """
-        diagnostics: List[Diagnostic] = []
-
-        for n, line in enumerate(lines):
-            stripped = line.strip()
-            if not stripped or stripped.startswith('#'):
-                continue
-            if stripped.startswith('- '):
-                stripped = stripped[2:].strip()
-
-            # Estrae il valore lista: 'key: [...]' oppure item '- [...]'.
-            if stripped.startswith('['):
-                value_str = stripped
-            else:
-                m = re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*:\s*(\[.*)$',
-                             stripped)
-                if not m:
-                    continue
-                value_str = m.group(1)
-
-            try:
-                parsed = yaml.safe_load(value_str)
-            except Exception:
-                continue
-            if not isinstance(parsed, list):
-                continue
-
-            # Candidati: forma diretta o item di una lista mista.
-            if is_bp_group_candidate(parsed):
-                candidates = [parsed]
-            else:
-                candidates = [item for item in parsed
-                              if is_bp_group_candidate(item)]
-
-            for group in candidates:
-                points, interp = group
-                if not all(is_valid_point(p) for p in points):
-                    message = (
-                        "BP group con punti malformati: ogni punto deve "
-                        "essere [t, v] o [t, v, type] con t, v numerici."
-                    )
-                elif interp not in VALID_INTERP_TYPES:
-                    message = (
-                        f"BP group: interp '{interp}' non valido. "
-                        f"Tipi validi: {', '.join(VALID_INTERP_TYPES)}."
-                    )
-                elif len(points) < 2:
-                    message = (
-                        f"BP group richiede almeno 2 punti, trovati: "
-                        f"{len(points)}. Una zona con meno di 2 punti "
-                        "non ha segmenti interni."
-                    )
-                else:
-                    continue
-                diagnostics.append(Diagnostic(
-                    range=self._line_range(n),
-                    message=message,
-                    severity=DiagnosticSeverity.Error,
-                    source=SOURCE,
-                ))
-
         return diagnostics
 
     @staticmethod
@@ -3038,6 +2946,7 @@ class DiagnosticProvider:
 
             info = {
                 'start': grain_start, 'end': grain_end,
+                'stream_start': stream_start, 'stream_end': stream_end,
                 'unit': None, 'unit_present': False, 'unit_line': None,
                 'has_duration': False, 'duration_scalar': None,
                 'duration_line': None, 'range_line': None,
@@ -3177,7 +3086,9 @@ class DiagnosticProvider:
                 # scrivendo. Tolleranza, come altrove nel provider.
                 continue
 
-            issue = check_read_direction(raw)
+            issue = check_read_direction(
+                raw, self._time_mode_at(lines, block['stream_start'],
+                                        block['stream_end']))
             if issue is None:
                 continue
 
@@ -3192,22 +3103,6 @@ class DiagnosticProvider:
             ))
 
         return diagnostics
-
-    def _grain_reverse_lines(self, lines: List[str],
-                             grain_blocks: List[dict]) -> set:
-        """Le righe che portano il valore di `grain.reverse`: la chiave e,
-        sotto di lei, il valore block-style.
-
-        Servono a chi controlla la forma di un envelope riga per riga senza
-        sapere di che chiave è: su queste righe il motore non costruisce mai
-        niente, perché rifiuta la chiave prima (fase 14).
-        """
-        righe: set = set()
-        for block in grain_blocks:
-            n = block['reverse_line']
-            if n is not None:
-                righe.update(range(n, self._block_end(lines, n, block['end'], 6)))
-        return righe
 
     def _check_deviation_probability(
         self, lines: List[str],
@@ -3244,6 +3139,7 @@ class DiagnosticProvider:
             issue = check_global_value(
                 raw_value,
                 known_keys=self._bridge.get_deviation_probability_keys(),
+                time_mode=self._time_mode_at(lines, stream_start, stream_end),
             )
             if issue is None:
                 continue
@@ -3635,37 +3531,44 @@ class DiagnosticProvider:
         return True, data[key]
 
     # -------------------------------------------------------------------------
-    # FASE 20: DISTRIBUZIONE TEMPORALE DEL CICLO (PGE #212)
+    # FASE 20: LA FORMA DELL'ENVELOPE (PGE #211, #288)
     # -------------------------------------------------------------------------
 
-    def _check_time_distributions(
+    def _check_envelope_shapes(
         self, lines: List[str],
         streams: List[Tuple[int, int, dict]],
     ) -> List[Diagnostic]:
         """
-        Il quinto elemento del formato compatto, sotto ogni chiave che il
-        motore costruisce come envelope e che non ha un controllo suo.
+        La forma di ogni envelope, sotto ogni chiave che il motore costruisce
+        come envelope e che non ha un controllo suo.
 
-        La distribuzione non sa sotto quale parametro sta, quindi i suoi errori
-        sono gli stessi ovunque: un nome fuori registro, parametri fuori dai
-        bound del costruttore, e la coppia `(parametro, n_reps)` che non sta in
-        un float (PGE #212) — `ratio: 10` e `n_reps: 400` legittimi da soli,
-        e insieme un render che non parte — o la cui somma dei pesi non è un
-        numero finito (PGE #219). La regola è in `time_distributions.py`, con
-        l'aritmetica del motore.
+        Da PGE #211 i guard di forma stanno in `EnvelopeBuilder` e valgono per
+        ogni chiave: un BP group con meno di due punti, un `n_reps` booleano,
+        un pattern che torna indietro, una distribuzione temporale fuori
+        registro sono lo stesso errore sotto `density` come sotto
+        `voices.pan.step`. PGE #288 ha aggiunto quelli che vengono prima del
+        builder — la forma dict, lo slot interp del compatto, il corpo vuoto —
+        e il kwarg di una voice strategy che non e' un envelope. La regola, e
+        l'ordine in cui il motore la percorre, e' in `envelope_guards.py`;
+        qui si decide solo dove, e con quale modo temporale.
 
-        Restano fuori le due chiavi che il formato compatto lo validano già
-        per intero, `grain.read_direction` e `deviation_probability`: lì la
-        coppia la guardano i loro moduli, nell'ordine in cui il motore la
-        incontra.
+        Il quinto elemento del formato compatto e' uno di quei guard: la sua
+        diagnostica ha la forma che aveva quando era una fase a se' (la coppia
+        `(parametro, n_reps)` che trabocca, PGE #212, ancorata alla riga del
+        ciclo), ma ora arriva nell'ordine del motore — un `n_reps` sbagliato
+        si dice prima della distribuzione dello stesso ciclo.
 
-        Lo stream si legge come struttura, non riga per riga: le chiavi sono
-        annidate fino a tre livelli (`voices.pan.step`) e un ciclo può stare
-        a metà di una lista block-style, dove la sua riga è l'unica ancora
-        utile. `yaml.compose` dà l'una e l'altra. Uno stream a metà scrittura
-        non si legge e tace, senza spegnere gli altri.
+        Restano fuori le due chiavi che hanno un mirror proprio con la loro
+        semantica davanti, `grain.read_direction` e `deviation_probability`, e
+        i perdenti di un gruppo esclusivo, che il motore non costruisce.
 
-        Ancoraggio: la riga del ciclo. Il valore incriminato è nel messaggio.
+        Lo stream si legge come struttura (`_compose_stream`): le chiavi sono
+        annidate fino a tre livelli e un elemento sta a meta' di una lista
+        block-style, dove la sua riga e' l'unica ancora utile. Uno stream a
+        meta' scrittura non si legge e tace, senza spegnere gli altri.
+
+        Ancoraggio: la riga del nodo che il motore riporta — lo slot, il
+        punto, l'elemento — o del valore intero quando e' lui il problema.
         """
         diagnostics: List[Diagnostic] = []
 
@@ -3675,31 +3578,62 @@ class DiagnosticProvider:
                 continue
             stream_node, costruisci = letto
             scartati = self._exclusive_losers(stream_node)
+            time_mode = self._stream_time_mode(stream_node, costruisci)
 
             for path, value_node in self._envelope_value_nodes(stream_node,
                                                                costruisci):
                 if path in scartati:
                     continue  # mai costruito: basta il Warning del gruppo
-                for ciclo, node in self._compact_block_nodes(value_node,
-                                                             costruisci):
-                    if len(ciclo) < 5:
-                        continue  # distribuzione omessa: `linear`, sempre valida
-                    issue = check_time_distribution(ciclo[4], ciclo[2])
-                    if issue is None:
-                        continue
-                    valore = ciclo if issue.kind == 'overflow' else ciclo[4]
-                    diagnostics.append(Diagnostic(
-                        range=self._line_range(
-                            stream_start + node.start_mark.line),
-                        message=(
-                            f"'{path}': {valore!r} non è ammesso. "
-                            f"{describe_issue(issue)}"
-                        ),
-                        severity=DiagnosticSeverity.Error,
-                        source=SOURCE,
-                    ))
+                valore = costruisci(value_node)
+                if self._is_voice_kwarg_path(path):
+                    issue = check_voice_kwarg(valore, time_mode)
+                elif path == 'grain.envelope.curve':
+                    # `_curve_envelope` costruisce la curva senza scala.
+                    issue = check_envelope_shape(valore, 'absolute')
+                else:
+                    issue = check_envelope_shape(valore, time_mode)
+                if issue is None:
+                    continue
+                node = self._node_at(value_node, issue.path) or value_node
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(
+                        stream_start + node.start_mark.line),
+                    message=(
+                        f"'{path}': {issue.value!r} non è ammesso. "
+                        f"{issue.hint}"
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
 
         return diagnostics
+
+    def _time_mode_at(self, lines: List[str], start: int, end: int) -> str:
+        """Il `time_mode` dello stream fra `start` e `end`, letto dal testo
+        (per le fasi che non compongono lo stream); `absolute` se manca."""
+        riga = self._find_key_line_at_indent(lines, start, end, 'time_mode', 4)
+        if riga is None:
+            return 'absolute'
+        found, valore = self._read_key_value(lines, riga, end)
+        if not found:
+            return 'normalized'  # non si legge: il verso in cui si tace
+        return valore if isinstance(valore, str) else 'absolute'
+
+    @staticmethod
+    def _is_voice_kwarg_path(path: str) -> bool:
+        """`voices.<asse>.<kwarg>`: il kwarg di una strategy, che il motore
+        legge con `_parse_strategy_kwarg` invece che con il parser."""
+        parti = path.split('.')
+        return (len(parti) == 3 and parti[0] == 'voices'
+                and parti[1] in VOICE_DIMENSIONS)
+
+    def _stream_time_mode(self, stream_node, costruisci) -> str:
+        """Il `time_mode` dello stream, `absolute` se non e' scritto."""
+        for key, value_node in self._mapping_items(stream_node):
+            if key == 'time_mode':
+                valore = costruisci(value_node)
+                return valore if isinstance(valore, str) else 'absolute'
+        return 'absolute'
 
     @staticmethod
     def _compose_stream(lines: List[str], start: int, end_incl: int):
@@ -3853,40 +3787,6 @@ class DiagnosticProvider:
         if 'states' in chiavi or ('from' in chiavi and 'to' in chiavi):
             if 'curve' in chiavi:
                 yield 'grain.envelope.curve', chiavi['curve']
-
-    @staticmethod
-    def _compact_block_nodes(value_node, costruisci):
-        """
-        `(ciclo, nodo)` per ogni ciclo compatto che il builder espande in
-        questo valore, con il ciclo come lo vede il motore.
-
-        Il valore si guarda dopo la conversione delle stringhe numeriche, come
-        lo consegna il `Generator`: `"10"` arriva `int` e `"10.0"` `float`, e
-        qui la grafia decide dove sta il bordo. Un ciclo con dentro
-        un'espressione fra parentesi invece si salta intero: il suo esito non
-        si prevede, e un `ratio: (5*2)` letto come stringa sarebbe un
-        «parametro non valido» su YAML che rende.
-        """
-        valore = normalize_engine_values(costruisci(value_node))
-        posizioni = compact_block_positions(valore)
-        if not posizioni:
-            return
-
-        lista, lista_node = valore, value_node
-        if isinstance(valore, dict):
-            lista = valore['points']
-            lista_node = next(
-                (n for k, n in DiagnosticProvider._mapping_items(value_node)
-                 if k == 'points'), None)
-        if not isinstance(lista_node, yaml.SequenceNode):
-            return
-
-        for pos in posizioni:
-            ciclo = lista if pos is None else lista[pos]
-            node = lista_node if pos is None else lista_node.value[pos]
-            if contains_math_expression(ciclo):
-                continue
-            yield ciclo, node
 
     def _scaled_unit_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
         """Righe di duration/duration_range dentro un blocco grain in un'unità
