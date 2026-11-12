@@ -65,6 +65,7 @@ TRIGGER_SUGGEST = Command(
 from granular_ls.stream_files import (
     FILE_KEY, FILE_KEY_DETAIL, FILE_KEY_DOC, PLACEMENT_KEYS,
 )
+from granular_ls import maps as maps_rules
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo, domain_label
 from granular_ls.envelope_snippets import EnvelopeSnippetProvider, draw_bounds
 from granular_ls.loop_unit import LOOP_UNITS, LOOP_UNIT_VALUE_DOCS
@@ -389,6 +390,13 @@ class CompletionProvider:
             if enum_items is not None:
                 return enum_items
 
+        # Dentro una mappa (PGE #308): `type` ha il vocabolario del catalogo.
+        if (context.context_type == 'value'
+                and context.current_key == 'type'
+                and len(context.parent_path) == 2
+                and context.parent_path[0] == 'maps'):
+            return self._get_map_type_completions(context.current_text)
+
         # Contesto 'value' su 'envelope' dentro grain: -> finestrature del grano
         if (context.context_type == 'value'
                 and context.current_key == 'envelope'
@@ -429,6 +437,13 @@ class CompletionProvider:
         # DENTRO DEVIATION_PROBABILITY
         if context.parent_path == ['deviation_probability']:
             return self._get_deviation_probability_completions(context.current_text, context, document_text)
+
+        # DENTRO `maps:` (PGE #308): sotto `maps` i nomi sono liberi; dentro
+        # una mappa il vocabolario e' chiuso (`MAP_KEYS`).
+        if context.parent_path and context.parent_path[0] == 'maps':
+            if len(context.parent_path) == 2:
+                return self._get_map_key_completions(context, document_text)
+            return []
 
         # DENTRO IL BLOCCO VOICES (parent_path inizia con 'voices')
         if context.parent_path and context.parent_path[0] == 'voices':
@@ -594,6 +609,22 @@ class CompletionProvider:
                 [], already_present, prefix)
             if item.label not in inserted_labels
         )
+
+        # 2-ter. `maps:` (PGE #308): un blocco a nomi liberi, quindi nessun
+        # ParameterSpec da cui derivarlo. Lo snippet apre la prima mappa.
+        if ('maps' not in already_present and 'maps' not in inserted_labels
+                and (not prefix or 'maps'.startswith(prefix))):
+            items.append(CompletionItem(
+                label='maps',
+                insert_text='maps:\n  ${1:m1}: {type: ${2|'
+                            + ','.join(maps_rules.MAP_TYPE_VALUES)
+                            + '|}, r: ${3:3.5}}',
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.Module,
+                detail='block',
+                documentation=MarkupContent(kind=MarkupKind.Markdown,
+                                            value=maps_rules.MAPS_DOC),
+            ))
 
         # 3. Block keys (grain, pointer, pitch, deviation_probability, voices)
         block_keys = list(self._bridge.get_block_keys())
@@ -1653,6 +1684,56 @@ class CompletionProvider:
             )
             for i, unit in enumerate(self._bridge.get_range_units())
             if not prefix or unit.lower().startswith(prefix)
+        ]
+
+    def _get_map_type_completions(self, current_text: str) -> List[CompletionItem]:
+        prefix = (current_text or '').strip().lower()
+        return [
+            CompletionItem(
+                label=name, insert_text=name, kind=CompletionItemKind.EnumMember,
+                detail='map type',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=maps_rules.map_kind_doc(name) or ''),
+            )
+            for name in maps_rules.MAP_TYPE_VALUES
+            if not prefix or name.startswith(prefix)
+        ]
+
+    def _get_map_key_completions(self, context: YamlContext,
+                                 document_text: str) -> List[CompletionItem]:
+        """Le chiavi di una mappa che la riga non ha gia'."""
+        present = set()
+        lines = document_text.split('\n') if document_text else []
+        indent = context.leading_spaces
+        # le righe vicine allo stesso indent appartengono alla stessa mappa
+        for step in (-1, 1):
+            n = context.cursor_line + step
+            while 0 <= n < len(lines):
+                riga = lines[n]
+                if not riga.strip():
+                    n += step
+                    continue
+                lead = len(riga) - len(riga.lstrip())
+                if lead < indent:
+                    break
+                if lead == indent:
+                    m = re.match(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:', riga)
+                    if m:
+                        present.add(m.group(1))
+                n += step
+        prefix = (context.current_text or '').lower()
+        return [
+            CompletionItem(
+                label=key, insert_text=key + ': ', kind=CompletionItemKind.Field,
+                detail='map',
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=f"**{key}**\n\n{maps_rules.MAP_KEY_DOCS[key]}"),
+                command=TRIGGER_SUGGEST if key == 'type' else None,
+            )
+            for key in maps_rules.MAP_KEYS
+            if key not in present and (not prefix or key.startswith(prefix))
         ]
 
     def _get_block_static_extras(

@@ -28,6 +28,7 @@ from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 
 import yaml
+from granular_ls import maps as maps_rules
 
 from lsprotocol.types import (
     Diagnostic,
@@ -492,6 +493,13 @@ class DiagnosticProvider:
         # elemento sconosciuto, interp per punto, kwarg di voices che non e'
         # un envelope. Il primo problema per chiave, come il motore.
         diagnostics.extend(self._check_envelope_shapes(lines, streams))
+
+        # Fase 22: le mappe caotiche (PGE #307) — `maps:` e le sue regole,
+        # le espressioni del motore dove valgono e dove si rifiutano, i modi
+        # esclusivi di `grain.iot` e `pointer.position`, e la regola delle
+        # parentesi esterne (#309).
+        diagnostics.extend(self._check_maps_and_expressions(
+            document_text, lines, streams, file_starts))
 
         return diagnostics
 
@@ -1138,6 +1146,11 @@ class DiagnosticProvider:
             ]
 
             if len(present_members) <= 1:
+                continue
+            # `grain.iot` accanto agli altri modi della densita' non e' una
+            # priorita' ma un errore del motore (PGE #311): lo dice la fase
+            # 22, e qui un Warning direbbe il contrario.
+            if any(m.yaml_path == 'grain.iot' for m in present_members):
                 continue
 
             # Il membro con group_priority piu' basso ha priorita' maggiore.
@@ -3130,6 +3143,7 @@ class DiagnosticProvider:
                 'duration_line': None, 'range_line': None,
                 'value_lines': set(),
                 'read_direction_line': None, 'reverse_line': None,
+                'iot_line': None,
             }
 
             n = grain_start + 1
@@ -3159,10 +3173,12 @@ class DiagnosticProvider:
                     info['unit_present'] = True
                     info['unit_line'] = n
                     info['unit'] = val.strip('"\'') if val else None
-                elif key in ('duration', 'duration_range'):
+                elif key in ('duration', 'duration_range', 'iot'):
                     info['value_lines'].add(n)
                     if key == 'duration_range':
                         info['range_line'] = n
+                    if key == 'iot':
+                        info['iot_line'] = n
                     if key == 'duration':
                         info['duration_line'] = n
                         # Valore presente: inline (scalare/lista) o envelope
@@ -3786,6 +3802,50 @@ class DiagnosticProvider:
 
         return diagnostics
 
+    def _check_maps_and_expressions(
+        self, document_text: str, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+        file_starts: 'frozenset[int]' = frozenset(),
+    ) -> List[Diagnostic]:
+        """
+        Le mappe caotiche di PGE (#307), stream per stream: le regole di
+        `maps:` (`MapConfigError`), le espressioni del motore — compilate coi
+        nomi dello stream dove valgono, rifiutate col suggerimento del motore
+        altrove —, `grain.iot` e `pointer.position` coi modi che escludono,
+        e un'espressione scritta per meta' fuori dalle parentesi (#309). Le
+        regole sono in `granular_ls/maps.py`; qui solo l'ancoraggio, sulla
+        riga del nodo che il motore nomina.
+        """
+        diagnostics: List[Diagnostic] = []
+        for stream_start, stream_end_incl, _keys in streams:
+            if stream_start in file_starts:
+                continue  # una voce `file:`: lo stream sta nel file
+            letto = self._compose_stream(lines, stream_start, stream_end_incl)
+            if letto is None:
+                continue
+            stream_node, costruisci = letto
+            for issue in maps_rules.check_stream(costruisci(stream_node)):
+                node = self._node_at(stream_node, issue.path) or stream_node
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(stream_start + node.start_mark.line),
+                    message=issue.message,
+                    severity=(DiagnosticSeverity.Error if issue.error
+                              else DiagnosticSeverity.Warning),
+                    source=SOURCE,
+                ))
+        try:
+            documento = yaml.safe_load(document_text)
+        except Exception:
+            documento = None
+        for issue in maps_rules.check_top_level(documento):
+            for n, riga in enumerate(lines):
+                if re.match(rf'^{re.escape(str(issue.path[0]))}\s*:', riga):
+                    diagnostics.append(Diagnostic(
+                        range=self._line_range(n), message=issue.message,
+                        severity=DiagnosticSeverity.Error, source=SOURCE))
+                    break
+        return diagnostics
+
     def _time_mode_at(self, lines: List[str], start: int, end: int) -> str:
         """Il `time_mode` dello stream fra `start` e `end`, letto dal testo
         (per le fasi che non compongono lo stream); `absolute` se manca."""
@@ -4219,6 +4279,18 @@ class DiagnosticProvider:
                     range_min, range_max, label,
                     grain_rng.max_val if grain_rng is not None else None,
                     salta_scalare=False,
+                ))
+
+            # `grain.iot` segue la stessa unita' (PGE #311): il motore la
+            # porta in secondi con un passo suo (`_pre_normalize_grain_iot`)
+            # e poi la valida, dal campione ai 100 s del registro.
+            grain_iot = self._params_by_yaml_path.get('grain.iot')
+            if grain_iot is not None and b['iot_line'] is not None:
+                iot_max = grain_iot.max_val
+                diagnostics.extend(self._unit_scaled_bound_diagnostics(
+                    lines, b, b['iot_line'], 'grain.iot', min_in_unit,
+                    iot_max / factor if iot_max is not None else None,
+                    label, iot_max, salta_scalare=False,
                 ))
 
             if scalar is None:

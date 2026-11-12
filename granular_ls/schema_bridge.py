@@ -239,6 +239,12 @@ class SchemaBridge:
             raw_data.get('grain_envelope_names') or _STATIC_GRAIN_ENVELOPE_NAMES
         )
 
+        # I parametri i cui bounds AVVOLGONO invece di tagliare
+        # (`WRAPPING_PARAMETERS`, PGE #312): un valore finito fuori rientra a
+        # capo ed e' valido. Senza un motore che lo dichiari, nessuno.
+        self._wrapping_parameters: frozenset = frozenset(
+            raw_data.get('wrapping_parameters') or ())
+
         # Conserviamo gli spec raw per get_deviation_probability_keys()
         self._raw_specs = specs
 
@@ -571,7 +577,20 @@ class SchemaBridge:
         """
         if param.yaml_path in unit_scaled_paths():
             return None
+        # Bounds che avvolgono (PGE #312): `[0, 1]` dice dove rientra il
+        # valore, non quale valore e' ammesso — `1.25` e' `0.25`. Il registro
+        # non descrive il numero scritto, e un dominio qui sarebbe un falso
+        # rosso in ogni lettore generico.
+        if self.wraps(param):
+            return None
         return _domain_or_none(param.min_val, param.max_val)
+
+    def wraps(self, param: ParameterInfo) -> bool:
+        """True se i bounds del parametro avvolgono (`WRAPPING_PARAMETERS`)."""
+        return param.name in self._wrapping_parameters
+
+    def get_wrapping_parameters(self) -> 'frozenset[str]':
+        return self._wrapping_parameters
 
     def get_documentation(self, param: ParameterInfo) -> str:
         """
@@ -585,6 +604,10 @@ class SchemaBridge:
         domain = self.get_value_domain(param)
         if domain is not None:
             lines.append(f"Range: {domain_label(*domain)}")
+        elif self.wraps(param):
+            lines.append(
+                f"Range: {domain_label(param.min_val, param.max_val)}, e fuori "
+                "rientra a capo (un valore finito non e' mai fuori range)")
 
         if param.variation_mode:
             lines.append(f"Variation mode: {param.variation_mode}")
@@ -631,6 +654,7 @@ class SchemaBridge:
             'grain_envelope_names': self._grain_envelope_names,
             'stream_context_keys': self._stream_context_keys,
             'deviation_probability_keys': self.get_deviation_probability_keys(),
+            'wrapping_parameters': sorted(self._wrapping_parameters),
             'extra_bounds': extra_bounds,
         }
         return json.dumps(data, indent=2)
@@ -831,6 +855,11 @@ class SchemaBridge:
             except AttributeError:
                 pass  # Usa il fallback statico nel costruttore
 
+            # Bounds che avvolgono (PGE #312). Un motore che lo precede non ha
+            # `pointer.position`, quindi niente da avvolgere.
+            raw_data['wrapping_parameters'] = list(
+                getattr(parameter_definitions, 'WRAPPING_PARAMETERS', ()))
+
             # Carica i nomi delle finestrature del grano da WindowRegistry
             try:
                 WindowRegistry = _import_pge_module(
@@ -916,4 +945,6 @@ class SchemaBridge:
             raw['stream_context_keys'] = data['stream_context_keys']
         if 'deviation_probability_keys' in data:
             raw['deviation_probability_keys'] = data['deviation_probability_keys']
+        if 'wrapping_parameters' in data:
+            raw['wrapping_parameters'] = data['wrapping_parameters']
         return cls(raw)
