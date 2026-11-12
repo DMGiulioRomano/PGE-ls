@@ -22,7 +22,7 @@ if str(_ROOT) not in sys.path:
 
 import pytest
 
-from granular_ls.envelope_shapes import envelope_y_paths
+from granular_ls.envelope_shapes import envelope_y_paths, is_math_expression
 
 
 class TestLeGrafieDelBuilder:
@@ -137,3 +137,18 @@ class TestEspressioni:
     def test_espressione_in_un_gruppo_dentro_una_lista(self):
         corpo = [[0, 1], [[['(5)', 0], [10, 5]], 'cubic']]
         assert envelope_y_paths(corpo) == [((0, 1), 1)]
+
+
+class TestFunzioniAPiuArgomenti:
+    """PGE #309: il regex di `_eval_math_expressions` ammette la virgola.
+
+    `(max(3, 7))` vale 7, `(pow(2, 3))` vale 8, `(min(1, 2, 3))` vale 1, anche
+    dentro un breakpoint. Prima restavano stringhe; ora il motore le valuta, e
+    un mirror che non le riconosce giudica un valore che il motore non vede.
+    """
+
+    @pytest.mark.parametrize('testo', [
+        '(max(3, 7))', '(pow(2, 3))', '(min(1, 2, 3))', '(max(-1,1))',
+    ])
+    def test_riconosciuta(self, testo):
+        assert is_math_expression(testo)
