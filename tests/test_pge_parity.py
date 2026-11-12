@@ -27,7 +27,6 @@ Drift storici che questo test avrebbe intercettato:
   - bound minimo pitch ratio 0.125 -> 0.001 (PGE 5219aa3)
   - alias finestra 'triangle' assente lato LS
 """
-import os
 import sys
 from pathlib import Path
 
