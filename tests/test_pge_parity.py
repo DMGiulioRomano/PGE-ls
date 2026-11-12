@@ -523,9 +523,8 @@ def test_loop_unit_scope_match(pge):
     """Le chiavi che `loop_unit` interpreta sono le posizioni dei bounds.
 
     `_check_pointer_param_bounds`, l'hover e i semantic token applicano la
-    stessa unita' a queste quattro chiavi, e l'avviso di migrazione le nomina
-    nell'ordine del motore. Se il motore ne aggiungesse una (o togliesse
-    `start`), il LS la misurerebbe nella scala sbagliata.
+    stessa unita' a queste quattro chiavi. Se il motore ne aggiungesse una (o
+    togliesse `start`), il LS la misurerebbe nella scala sbagliata.
     """
     from granular_ls.loop_unit import LOOP_UNIT_SCOPE
     # Pubblico da PGE #246, privato prima: si prova in quest'ordine.
