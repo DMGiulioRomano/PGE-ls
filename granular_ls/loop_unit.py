@@ -49,9 +49,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 import yaml
 
 from granular_ls.envelope_shapes import (
-    is_3tuple_breakpoint,
-    is_bp_group,
-    is_loop_block,
+    is_envelope_like,
     is_math_expression,
     normalize_engine_values,
 )
@@ -120,24 +118,9 @@ def loop_unit_mode(value: Any) -> str:
     return MODE_NORMALIZED if value == 'normalized' else MODE_ABSOLUTE
 
 
-def _is_envelope_like(value: Any) -> bool:
-    """Mirror di `Envelope.is_envelope_like`: le forme che il motore scala."""
-    if isinstance(value, dict):
-        return 'points' in value
-    if not isinstance(value, list) or not value:
-        return False
-    if is_loop_block(value) or is_bp_group(value):
-        return True
-    for item in value:
-        if isinstance(item, list) and len(item) == 2:
-            return True
-        if is_loop_block(item) or is_bp_group(item):
-            return True
-        if is_3tuple_breakpoint(item):
-            return True
-        if isinstance(item, dict) and 't' in item and 'v' in item:
-            return True
-    return False
+# Mirror di `Envelope.is_envelope_like`: vive in `envelope_shapes`, che lo
+# condivide con i kwarg delle voice strategy (PGE #288).
+_is_envelope_like = is_envelope_like
 
 
 # ponytail: va via con l'avviso di migrazione del motore
