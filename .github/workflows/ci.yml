@@ -26,14 +26,27 @@ jobs:
       # questo repo e NON può clonarlo (fallirebbe con "Not Found"). Serve un
       # secret ENGINE_REPO_TOKEN (PAT con accesso in lettura al motore). Se il
       # secret non è configurato lo step viene SALTATO — non fallito — così la
-      # suite del language server gira comunque verde e la parità skippa.
+      # suite del language server gira comunque, ma lo dice (step sotto).
+      #
+      # fetch-depth: la parità pretende che il commit del motore contro cui i
+      # patti sono scritti (ENGINE_BASELINE in tests/pge_engine.py) sia un
+      # antenato di quello clonato (#70). Con il clone di default (un commit)
+      # non lo sarebbe mai, e un clone corto non è una scusa: è la via da cui
+      # passerebbe uno SHA inventato.
       - name: checkout PythonGranularEngine
+        id: engine
         if: ${{ env.ENGINE_REPO_TOKEN != '' }}
         uses: actions/checkout@v4
         with:
           repository: DMGiulioRomano/PythonGranularEngine
           path: PythonGranularEngine
           token: ${{ env.ENGINE_REPO_TOKEN }}
+          fetch-depth: 300
+      # Un verde senza parità non si confonde con un verde con parità.
+      - name: parità con PGE non disponibile
+        if: ${{ steps.engine.outcome != 'success' }}
+        run: |
+          echo "::warning title=Parità con PGE saltata::checkout del motore non riuscito o saltato (secret ENGINE_REPO_TOKEN assente?): tests/test_pge_parity.py non gira e la suite resta verde senza averla fatta."
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -43,11 +56,16 @@ jobs:
       - name: install deps
         run: pip install "pygls==1.3.1" "lsprotocol==2023.0.1" "PyYAML==6.0.3" "pytest==8.4.2"
       # Se il motore non è stato clonato (secret assente), PGE_SRC punta a un
-      # path inesistente e test_pge_parity.py skippa da solo.
+      # path inesistente e test_pge_parity.py skippa da solo. Se è stato
+      # clonato, PGE_REQUIRE_PARITY=1 fa di ogni assenza un rosso: il motore
+      # che non si trova, e il commit registrato che non è suo antenato (#70).
+      # `outcome`, non `conclusion`: con `continue-on-error` la seconda vale
+      # `success` anche su uno step fallito, e il gate diventerebbe inerte.
       - name: run test suite (la parità con PGE skippa se il motore non è disponibile)
         working-directory: PGE-ls
         env:
           PGE_SRC: ${{ github.workspace }}/PythonGranularEngine/src
+          PGE_REQUIRE_PARITY: ${{ steps.engine.outcome == 'success' && '1' || '0' }}
         run: python -m pytest tests/ -q
 
   pulsar-e2e:

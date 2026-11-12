@@ -12,7 +12,14 @@ nelle fixture, non importandoli da PGE.
 Questo modulo importa il sorgente PGE reale e confronta. Salta in modo pulito
 se PGE non è disponibile (sviluppo locale senza checkout sibling); in CI il
 repo PythonGranularEngine viene clonato e il path passato via env PGE_SRC, così
-la parità gira davvero.
+la parità gira davvero, e PGE_REQUIRE_PARITY=1 fa dell'assenza un rosso.
+
+Quando al motore manca ciò che un patto legge, il patto chiama
+`engine_lacks(...)`, non `pytest.skip(...)`: salta contro un motore più vecchio
+del commit registrato in tests/pge_engine.py, fallisce contro uno che lo
+contiene — lì «manca X» vuol dire X spostato, non X ancora da scrivere. Gli
+unici `pytest.skip` rimasti sono quelli che non dipendono dall'età del motore
+(numpy assente, un input che il motore rifiuta), e test_pge_engine.py li conta.
 
 Drift storici che questo test avrebbe intercettato:
   - pan strategy rinominate linear/random/additive -> range/stochastic/step
@@ -27,25 +34,16 @@ from pathlib import Path
 import pytest
 
 
-def _resolve_pge_src():
-    """Path al 'src' di PythonGranularEngine: env PGE_SRC o checkout sibling."""
-    env = os.environ.get('PGE_SRC')
-    if env and Path(env).exists():
-        return str(Path(env).resolve())
-    sibling = (Path(__file__).resolve().parent.parent.parent
-               / 'PythonGranularEngine' / 'src')
-    if sibling.exists():
-        return str(sibling)
-    return None
-
-
-PGE_SRC = _resolve_pge_src()
-
-pytestmark = pytest.mark.skipif(
-    PGE_SRC is None,
-    reason="PGE src non trovato: imposta PGE_SRC o clona PythonGranularEngine "
-           "come sibling di PGE-ls.",
+# Dove sta il motore, e il ripiego dei patti quando gli manca cio' che
+# leggono: in tests/pge_engine.py, condivisi con test_stream_files.py e con la
+# riga di chiusura della run (#70). Senza motore il modulo salta; che quello
+# skip diventi un rosso quando la parita' e' pretesa (PGE_REQUIRE_PARITY=1)
+# lo dice test_pge_engine.py, una volta sola invece che per ogni patto.
+from tests.pge_engine import (  # noqa: E402
+    ABSENT_REASON, PGE_SRC, engine_lacks,
 )
+
+pytestmark = pytest.mark.skipif(PGE_SRC is None, reason=ABSENT_REASON)
 
 
 # Package top-level di PGE: importarli inquina sys.modules. Il teardown del
@@ -223,13 +221,41 @@ def test_parameter_bounds_match(pge):
 # =============================================================================
 
 def test_distribution_modes_match(pge):
+    """Le modalita' le chiede `DistributionFactory.modes()`, il punto pubblico.
+
+    Leggeva `_registry`: un nome privato pinnato da fuori, e rinominarlo nel
+    motore non faceva fallire niente — il bridge ripiegava sulla copia statica
+    senza una riga, e anche questo patto leggeva lo stesso nome (#70).
+    """
     from granular_ls.schema_bridge import SchemaBridge, _import_pge_module
     DistributionFactory = _import_pge_module(
         'shared.distribution_strategy').DistributionFactory
+    if not callable(getattr(DistributionFactory, 'modes', None)):
+        engine_lacks("engine precede DistributionFactory.modes()")
     bridge = SchemaBridge.from_python_path(PGE_SRC)
     ls_modes = set(bridge.get_distribution_modes())
-    pge_modes = set(DistributionFactory._registry.keys())
-    assert ls_modes == pge_modes
+    assert ls_modes == set(DistributionFactory.modes())
+
+
+def test_il_bridge_non_ripiega_sul_motore_vero(pge):
+    """Contro il motore vero nessuna lettura del bridge ripiega (#70).
+
+    Ogni ripiego di `from_python_path` scrive una riga su stderr e resta in
+    `read_fallbacks`; qui si pretende che la lista sia vuota. E' la domanda
+    che prima arrivava solo per via traversa — un enum statico che coincideva
+    o no con quello del motore — e per le letture senza patto dedicato non
+    arrivava affatto.
+
+    Contro un motore piu' vecchio di una lettura il ripiego e' legittimo, e
+    lo dice `engine_lacks`: salta li', fallisce contro un motore che contiene
+    il commit registrato.
+    """
+    from granular_ls.schema_bridge import SchemaBridge
+    bridge = SchemaBridge.from_python_path(PGE_SRC)
+    if bridge.read_fallbacks:
+        engine_lacks("il bridge ripiega: " + "; ".join(
+            f"{lettura} ({errore})"
+            for lettura, errore in bridge.read_fallbacks))
 
 
 def test_range_anchors_match(pge):
@@ -245,7 +271,7 @@ def test_range_anchors_match(pge):
         _import_pge_module('shared.distribution_strategy'),
         'RANGE_ANCHORS', None)
     if RANGE_ANCHORS is None:
-        pytest.skip("engine precede RANGE_ANCHORS (range-anchor-mode non ancora "
+        engine_lacks("engine precede RANGE_ANCHORS (range-anchor-mode non ancora "
                     "in questo checkout di PGE)")
     bridge = SchemaBridge.from_python_path(PGE_SRC)
     assert set(bridge.get_range_anchors()) == set(RANGE_ANCHORS)
@@ -256,7 +282,7 @@ def _range_unit_definitions():
     from granular_ls.schema_bridge import _import_pge_module
     defs = _import_pge_module('parameters.parameter_definitions')
     if not hasattr(defs, 'RANGE_UNITS'):
-        pytest.skip("engine precede RANGE_UNITS (PGE #267)")
+        engine_lacks("engine precede RANGE_UNITS (PGE #267)")
     return defs
 
 
@@ -359,7 +385,7 @@ def test_grain_duration_units_match(pge):
         engine_units = _literal_from_engine_source(
             'core/stream.py', 'GRAIN_DURATION_UNITS')
     if engine_units is None:
-        pytest.skip("engine precede GRAIN_DURATION_UNITS")
+        engine_lacks("engine precede GRAIN_DURATION_UNITS")
     assert set(_GRAIN_DURATION_UNITS) == set(engine_units)
 
 
@@ -444,7 +470,7 @@ def test_density_notice_threshold_match(pge):
     from granular_ls.envelope_snippets import DENSITY_NOTICE_THRESHOLD
     engine = _density_controller_literal('DENSITY_NOTICE_THRESHOLD')
     if engine is None:
-        pytest.skip("engine precede DENSITY_NOTICE_THRESHOLD (PGE #272)")
+        engine_lacks("engine precede DENSITY_NOTICE_THRESHOLD (PGE #272)")
     assert DENSITY_NOTICE_THRESHOLD == engine
 
 
@@ -477,7 +503,7 @@ def test_density_senza_tetto_dal_vivo(pge):
     bridge = SchemaBridge.from_python_path(PGE_SRC)
     density = bridge.get_parameter('density')
     if density.max_val is not None:
-        pytest.skip("engine precede PGE #272: density ha ancora un tetto")
+        engine_lacks("engine precede PGE #272: density ha ancora un tetto")
     assert density.min_val is not None
 
     provider = DiagnosticProvider(bridge)
@@ -514,7 +540,7 @@ def test_loop_units_match(pge):
     from granular_ls.loop_unit import LOOP_UNITS, LOOP_UNIT_DEFAULT
     engine_units = _loop_unit_literal('LOOP_UNITS')
     if engine_units is None:
-        pytest.skip("engine precede LOOP_UNITS (PGE #222)")
+        engine_lacks("engine precede LOOP_UNITS (PGE #222)")
     assert tuple(LOOP_UNITS) == tuple(engine_units)
     assert LOOP_UNIT_DEFAULT == engine_units[0]
 
@@ -530,7 +556,7 @@ def test_loop_unit_scope_match(pge):
     # Pubblico da PGE #246, privato prima: si prova in quest'ordine.
     engine_scope = _loop_unit_literal('LOOP_UNIT_SCOPE', '_LOOP_UNIT_SCOPE')
     if engine_scope is None:
-        pytest.skip("engine precede LOOP_UNIT_SCOPE (PGE #222)")
+        engine_lacks("engine precede LOOP_UNIT_SCOPE (PGE #222)")
     assert tuple(LOOP_UNIT_SCOPE) == tuple(engine_scope)
 
 
@@ -553,12 +579,12 @@ def test_loop_unit_non_eredita_piu_da_time_mode(pge):
             tree = ast.parse(path.read_text(encoding='utf-8'))
             break
     if tree is None:
-        pytest.skip("pointer_controller.py non trovato in questo checkout")
+        engine_lacks("pointer_controller.py non trovato in questo checkout")
     metodo = next((n for n in ast.walk(tree)
                    if isinstance(n, ast.FunctionDef)
                    and n.name == '_pre_normalize_loop_params'), None)
     if metodo is None:
-        pytest.skip("engine senza _pre_normalize_loop_params")
+        engine_lacks("engine senza _pre_normalize_loop_params")
     nomi = {n.attr for n in ast.walk(metodo) if isinstance(n, ast.Attribute)}
     nomi |= {n.id for n in ast.walk(metodo) if isinstance(n, ast.Name)}
     assert 'time_mode' not in nomi, (
@@ -576,7 +602,7 @@ def test_milliseconds_factor_matches(pge):
     factor = getattr(
         _import_pge_module('shared.constants'), 'SECONDS_PER_MILLISECOND', None)
     if factor is None:
-        pytest.skip("engine precede SECONDS_PER_MILLISECOND")
+        engine_lacks("engine precede SECONDS_PER_MILLISECOND")
     assert _GRAIN_DURATION_UNIT_SECONDS['milliseconds'] == factor
 
 
@@ -591,7 +617,7 @@ def test_output_sr_matches(pge):
     engine_sr = getattr(
         _import_pge_module('shared.constants'), 'DEFAULT_OUTPUT_SR', None)
     if engine_sr is None:
-        pytest.skip("engine precede DEFAULT_OUTPUT_SR")
+        engine_lacks("engine precede DEFAULT_OUTPUT_SR")
     assert _OUTPUT_SR == engine_sr
 
 
@@ -613,7 +639,7 @@ def test_grain_duration_min_e_un_campione(pge):
     definizioni = _import_pge_module('parameters.parameter_definitions')
     get_bounds = getattr(definizioni, 'get_parameter_definition', None)
     if get_bounds is None:
-        pytest.skip("engine senza get_parameter_definition")
+        engine_lacks("engine senza get_parameter_definition")
 
     dichiarato = get_bounds('grain_duration')
     applicato = get_bounds('grain_duration', output_sr=_OUTPUT_SR)
@@ -703,7 +729,7 @@ def test_bound_del_range_di_grain_duration(pge):
     base = per_path.get('grain.duration')
     rng = per_path.get('grain.duration_range')
     if base is None or rng is None:
-        pytest.skip("engine senza grain.duration/duration_range nello schema")
+        engine_lacks("engine senza grain.duration/duration_range nello schema")
     assert (rng.min_val, rng.max_val) == (base.min_range, base.max_range)
 
 
@@ -861,7 +887,7 @@ def test_read_direction_mirror_matches_engine(pge, raw, tmp_path, monkeypatch):
         create_scaled_envelope = _import_pge_module(
             'envelopes.envelope').create_scaled_envelope
     except Exception:
-        pytest.skip("engine precede grain.read_direction (PGE #207 non ancora "
+        engine_lacks("engine precede grain.read_direction (PGE #207 non ancora "
                     "in questo checkout)")
 
     eccezioni = _import_pge_module('shared.exceptions')
@@ -919,7 +945,7 @@ def test_read_direction_overflow_come_il_motore(pge, raw, atteso, tmp_path,
         create_scaled_envelope = _import_pge_module(
             'envelopes.envelope').create_scaled_envelope
     except Exception:
-        pytest.skip("engine senza read_direction o Envelope importabili")
+        engine_lacks("engine senza read_direction o Envelope importabili")
 
     eccezioni = _import_pge_module('shared.exceptions')
     monkeypatch.chdir(tmp_path)  # il logger del builder scrive in logs/
@@ -954,7 +980,7 @@ def test_read_direction_in_schema_bridge(pge):
     param = next((p for p in bridge.get_all_parameters()
                   if p.yaml_path == READ_DIRECTION_PATH), None)
     if param is None:
-        pytest.skip("engine precede grain.read_direction (PGE #207)")
+        engine_lacks("engine precede grain.read_direction (PGE #207)")
 
     assert param.exclusive_group == 'grain_direction'
     assert (param.min_val, param.max_val) == (-1, 1)
@@ -989,19 +1015,19 @@ def _load_init_grain_reverse():
     relpath = next((r for r in ('pge/core/stream.py', 'core/stream.py')
                     if (Path(PGE_SRC) / r).exists()), None)
     if relpath is None:
-        pytest.skip("core/stream.py non trovato in questo checkout")
+        engine_lacks("core/stream.py non trovato in questo checkout")
     sorgente = Path(PGE_SRC) / relpath
     tree = ast.parse(sorgente.read_text(encoding='utf-8'))
     fn = next((n for n in ast.walk(tree)
                if isinstance(n, ast.FunctionDef)
                and n.name == '_init_grain_reverse'), None)
     if fn is None:
-        pytest.skip("engine senza Stream._init_grain_reverse")
+        engine_lacks("engine senza Stream._init_grain_reverse")
     try:
         read_direction_field = _import_pge_module(
             'parameters.read_direction').READ_DIRECTION_FIELD
     except Exception:
-        pytest.skip("engine precede grain.read_direction (PGE #207)")
+        engine_lacks("engine precede grain.read_direction (PGE #207)")
 
     namespace = {
         'InvalidFieldValueError': _import_pge_module(
@@ -1331,7 +1357,7 @@ def test_overflow_rimedi_come_il_motore(pge):
     modulo = _import_pge_module('envelopes.time_distribution')
     rimedi = getattr(modulo, '_RIMEDI_OVERFLOW', None)
     if rimedi is None:
-        pytest.skip("engine precede i rimedi per parametro (PGE #216)")
+        engine_lacks("engine precede i rimedi per parametro (PGE #216)")
     assert OVERFLOW_REMEDIES == rimedi
 
 
@@ -1455,7 +1481,7 @@ def test_deviation_probability_mirror_matches_engine(pge, raw, tmp_path,
     try:
         GateFactory = _import_pge_module('parameters.gate_factory').GateFactory
     except Exception:
-        pytest.skip("engine senza GateFactory importabile in questo checkout")
+        engine_lacks("engine senza GateFactory importabile in questo checkout")
 
     # Il logger del motore apre un `logs/envelope_clips_*.log` relativo alla
     # cwd al primo gate costruito: senza questo chdir la parità lascerebbe
@@ -1517,7 +1543,7 @@ def test_deviation_probability_map_mirror_matches_engine(pge, mappa, tmp_path,
     try:
         GateFactory = _import_pge_module('parameters.gate_factory').GateFactory
     except Exception:
-        pytest.skip("engine senza GateFactory importabile in questo checkout")
+        engine_lacks("engine senza GateFactory importabile in questo checkout")
 
     monkeypatch.chdir(tmp_path)
     known = SchemaBridge.from_python_path(PGE_SRC).get_deviation_probability_keys()
@@ -1626,7 +1652,7 @@ def test_band_ceiling_mirror_matches_engine(pge, base, mod_range, tmp_path,
     ANCHOR_MIN = getattr(
         _import_pge_module('shared.distribution_strategy'), 'ANCHOR_MIN', None)
     if GranularParser is None or ANCHOR_MIN is None:
-        pytest.skip("engine precede range_anchor / GranularParser")
+        engine_lacks("engine precede range_anchor / GranularParser")
 
     ParameterBoundError = _import_pge_module(
         'shared.exceptions').ParameterBoundError
@@ -1806,13 +1832,13 @@ def _pre_normalize_grain_params_ast():
     relpath = next((r for r in ('pge/core/stream.py', 'core/stream.py')
                     if (Path(PGE_SRC) / r).exists()), None)
     if relpath is None:
-        pytest.skip("core/stream.py non trovato in questo checkout")
+        engine_lacks("core/stream.py non trovato in questo checkout")
     tree = ast.parse((Path(PGE_SRC) / relpath).read_text(encoding='utf-8'))
     fn = next((n for n in ast.walk(tree)
                if isinstance(n, ast.FunctionDef)
                and n.name == '_pre_normalize_grain_params'), None)
     if fn is None:
-        pytest.skip("engine senza _pre_normalize_grain_params")
+        engine_lacks("engine senza _pre_normalize_grain_params")
     return fn, relpath
 
 
@@ -1971,14 +1997,14 @@ def _load_eval_math_expressions():
             sorgente = cand
             break
     else:
-        pytest.skip("generator.py non trovato in questo checkout del motore")
+        engine_lacks("generator.py non trovato in questo checkout del motore")
 
     tree = ast.parse(sorgente.read_text(encoding='utf-8'))
     fn = next((n for n in ast.walk(tree)
                if isinstance(n, ast.FunctionDef)
                and n.name == '_eval_math_expressions'), None)
     if fn is None:
-        pytest.skip("il motore non valuta piu' le espressioni in questo punto")
+        engine_lacks("il motore non valuta piu' le espressioni in questo punto")
 
     modulo = ast.Module(body=[fn], type_ignores=[])
     ast.fix_missing_locations(modulo)
@@ -2015,7 +2041,7 @@ def test_math_expression_pattern_matches_engine(pge):
 
     _, pattern = _load_eval_math_expressions()
     if pattern is None:
-        pytest.skip("pattern non estraibile dal sorgente del motore")
+        engine_lacks("pattern non estraibile dal sorgente del motore")
     assert _MATH_EXPRESSION_RE.pattern == pattern
 
 
@@ -2095,7 +2121,7 @@ def test_deviation_probability_mirror_non_segnala_cio_che_il_motore_accetta(pge,
     try:
         GateFactory = _import_pge_module('parameters.gate_factory').GateFactory
     except Exception:
-        pytest.skip("engine senza GateFactory importabile in questo checkout")
+        engine_lacks("engine senza GateFactory importabile in questo checkout")
 
     evaluate, _ = _load_eval_math_expressions()
     monkeypatch.chdir(tmp_path)  # il logger del motore scrive relativo alla cwd
@@ -2145,7 +2171,7 @@ def test_read_direction_mirror_non_segnala_cio_che_il_motore_accetta(pge, raw):
         normalize = _import_pge_module(
             'parameters.read_direction').normalize_read_direction
     except Exception:
-        pytest.skip("engine precede grain.read_direction (PGE #207 non ancora "
+        engine_lacks("engine precede grain.read_direction (PGE #207 non ancora "
                     "in questo checkout)")
 
     InvalidFieldValueError = _import_pge_module(
@@ -2282,7 +2308,7 @@ def test_pointer_start_guard_del_motore_e_ancora_isinstance(pge):
             sorgente = percorso.read_text()
             break
     if sorgente is None:
-        pytest.skip("pointer_controller non trovato in questo checkout")
+        engine_lacks("pointer_controller non trovato in questo checkout")
 
     assert re.search(
         r'if not isinstance\(\s*self\.start\s*,\s*\(\s*int\s*,\s*float\s*\)\s*\)',
@@ -2775,7 +2801,7 @@ def _engine_shape_where(body, time_mode, tmp_path, monkeypatch):
         create_scaled_envelope = _import_pge_module(
             'envelopes.envelope').create_scaled_envelope
     except Exception:
-        pytest.skip("engine senza Envelope importabile in questo checkout")
+        engine_lacks("engine senza Envelope importabile in questo checkout")
     eccezioni = _import_pge_module('shared.exceptions')
     monkeypatch.chdir(tmp_path)  # il logger del builder scrive in logs/
 
@@ -3015,7 +3041,7 @@ def test_envelope_shape_mirror_fuzz_matches_engine(pge, tmp_path,
         create_scaled_envelope = _import_pge_module(
             'envelopes.envelope').create_scaled_envelope
     except Exception:
-        pytest.skip("engine senza Envelope importabile in questo checkout")
+        engine_lacks("engine senza Envelope importabile in questo checkout")
     eccezioni = _import_pge_module('shared.exceptions')
     monkeypatch.chdir(tmp_path)
 
@@ -3059,7 +3085,7 @@ def _load_parse_strategy_kwarg():
 
     sorgente = Path(PGE_SRC) / 'pge' / 'controllers' / 'voices_controller.py'
     if not sorgente.exists():
-        pytest.skip("controllers/voices_controller.py non in questo checkout")
+        engine_lacks("controllers/voices_controller.py non in questo checkout")
     tree = ast.parse(sorgente.read_text(encoding='utf-8'))
     nodi = [n for n in tree.body
             if (isinstance(n, ast.FunctionDef)
@@ -3068,13 +3094,13 @@ def _load_parse_strategy_kwarg():
                 isinstance(t, ast.Name) and t.id == '_STRATEGY_KWARG_HINT'
                 for t in n.targets))]
     if not any(isinstance(n, ast.FunctionDef) for n in nodi):
-        pytest.skip("engine senza _parse_strategy_kwarg (PGE #288)")
+        engine_lacks("engine senza _parse_strategy_kwarg (PGE #288)")
     try:
         envelope = _import_pge_module('envelopes.envelope')
         espressioni = _import_pge_module('expressions.expression')
         campi = _import_pge_module('expressions.fields')
     except Exception:
-        pytest.skip("engine senza i moduli di _parse_strategy_kwarg")
+        engine_lacks("engine senza i moduli di _parse_strategy_kwarg")
     eccezioni = _import_pge_module('shared.exceptions')
     namespace = {
         'Envelope': envelope.Envelope,
@@ -3218,7 +3244,7 @@ def test_deviation_probability_passa_dallo_specchio_unico(pge, body,
     try:
         GateFactory = _import_pge_module('parameters.gate_factory').GateFactory
     except Exception:
-        pytest.skip("engine senza GateFactory importabile in questo checkout")
+        engine_lacks("engine senza GateFactory importabile in questo checkout")
     monkeypatch.chdir(tmp_path)
 
     try:
@@ -3250,7 +3276,7 @@ def test_read_direction_passa_dallo_specchio_unico(pge, body, tmp_path,
         create_scaled_envelope = _import_pge_module(
             'envelopes.envelope').create_scaled_envelope
     except Exception:
-        pytest.skip("engine senza read_direction o Envelope importabili")
+        engine_lacks("engine senza read_direction o Envelope importabili")
     eccezioni = _import_pge_module('shared.exceptions')
     monkeypatch.chdir(tmp_path)
 

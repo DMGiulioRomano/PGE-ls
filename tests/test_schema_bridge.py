@@ -637,6 +637,109 @@ ALL_SCHEMAS = {
             SchemaBridge.from_python_path('/percorso/inesistente/assoluto')
 
 
+class TestRipieghiDichiarati:
+    """Ogni lettura del motore che ripiega lo dice (#70).
+
+    Prima `except Exception: pass`: con `DistributionFactory._registry`
+    rinominato nel motore il bridge si costruiva lo stesso, e l'enum di
+    `distribution_mode` tornava la copia statica senza una riga di log. Ora
+    ogni ripiego scrive su stderr (mai su stdout: e' il canale del protocollo
+    LSP) e resta in `read_fallbacks`, che la parita' pretende vuoto contro il
+    motore vero.
+    """
+
+    _TOP = ('pge', 'parameters', 'shared', 'core', 'controllers')
+
+    # Lo stesso progetto sintetico di TestFromPythonPath, senza ereditarne i
+    # test.
+    granular_project_path = TestFromPythonPath.granular_project_path
+
+    @pytest.fixture(autouse=True)
+    def _moduli_puliti(self):
+        """I moduli sintetici non devono sopravvivere al test (ne' precederlo)."""
+        def pulisci():
+            for nome in list(sys.modules):
+                if nome.split('.')[0] in self._TOP:
+                    sys.modules.pop(nome, None)
+        pulisci()
+        yield
+        pulisci()
+
+    def _distribution(self, src, corpo):
+        shared = Path(src) / 'shared'
+        shared.mkdir()
+        (shared / '__init__.py').write_text('')
+        (shared / 'distribution_strategy.py').write_text(corpo)
+
+    def test_ogni_lettura_mancante_e_dichiarata(self, granular_project_path,
+                                                capsys):
+        bridge = SchemaBridge.from_python_path(granular_project_path)
+        letture = [lettura for lettura, _ in bridge.read_fallbacks]
+        assert letture == [
+            'core.stream_config (chiavi di stream)',
+            'DistributionFactory.modes()',
+            'RANGE_ANCHORS',
+            'RANGE_UNITS / RELATIVE_RANGE_BOUNDS',
+            'WindowRegistry.all_names()',
+        ]
+        out, err = capsys.readouterr()
+        assert out == ''
+        righe = [r for r in err.splitlines() if r.startswith('[pge-ls]')]
+        assert len(righe) == len(letture)
+        for lettura, riga in zip(letture, righe):
+            assert lettura in riga
+        # L'eccezione e' nella riga, non solo il nome della lettura.
+        assert 'ModuleNotFoundError' in righe[1]
+        # Il ripiego resta quello di prima: la copia statica.
+        assert bridge.get_distribution_modes() == ['uniform', 'gaussian']
+
+    def test_le_modalita_le_chiede_modes(self, granular_project_path):
+        self._distribution(granular_project_path, (
+            "RANGE_ANCHORS = ('center', 'min')\n"
+            "class DistributionFactory:\n"
+            "    _rinominato = {'uniform': 1, 'laplace': 2}\n"
+            "    @classmethod\n"
+            "    def modes(cls):\n"
+            "        return list(cls._rinominato)\n"))
+        bridge = SchemaBridge.from_python_path(granular_project_path)
+        assert bridge.get_distribution_modes() == ['uniform', 'laplace']
+        letture = {lettura for lettura, _ in bridge.read_fallbacks}
+        assert 'DistributionFactory.modes()' not in letture
+        assert 'RANGE_ANCHORS' not in letture
+
+    def test_registry_e_il_ripiego_dei_motori_senza_modes(
+            self, granular_project_path, capsys):
+        self._distribution(granular_project_path, (
+            "class DistributionFactory:\n"
+            "    _registry = {'uniform': 1, 'laplace': 2}\n"))
+        bridge = SchemaBridge.from_python_path(granular_project_path)
+        assert bridge.get_distribution_modes() == ['uniform', 'laplace']
+        ripieghi = dict(bridge.read_fallbacks)
+        assert 'DistributionFactory.modes()' in ripieghi
+        _, err = capsys.readouterr()
+        assert 'uso DistributionFactory._registry' in err
+
+    def test_registry_rinominato_senza_modes_e_dichiarato(
+            self, granular_project_path, capsys):
+        """Il caso misurato in #70: `_registry` sparito, nessuna riga."""
+        self._distribution(granular_project_path, (
+            "class DistributionFactory:\n"
+            "    _modi = {'uniform': 1, 'laplace': 2}\n"))
+        bridge = SchemaBridge.from_python_path(granular_project_path)
+        assert bridge.get_distribution_modes() == ['uniform', 'gaussian']
+        ripieghi = dict(bridge.read_fallbacks)
+        assert 'AttributeError' in ripieghi['DistributionFactory.modes()']
+        _, err = capsys.readouterr()
+        assert '_registry' in err
+
+    def test_un_bridge_senza_motore_non_ha_ripieghi(self, tmp_path):
+        bridge = SchemaBridge({'specs': [], 'bounds': {}})
+        assert bridge.read_fallbacks == ()
+        path = tmp_path / 'snap.json'
+        path.write_text(bridge.generate_snapshot())
+        assert SchemaBridge.from_snapshot(str(path)).read_fallbacks == ()
+
+
 # =============================================================================
 # 9. from_snapshot() e generate_snapshot()
 # =============================================================================
