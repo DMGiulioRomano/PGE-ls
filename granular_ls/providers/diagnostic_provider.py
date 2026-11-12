@@ -88,6 +88,16 @@ from granular_ls.range_unit import (
     is_relative,
     value_label,
 )
+from granular_ls.stream_files import (
+    FILE_KEY,
+    PLACEMENT_KEYS,
+    default_stream_id,
+    extra_keys,
+    import_problem,
+    resolve_import_path,
+    scalar_text,
+    value_span,
+)
 from granular_ls.pitch_units import (
     PITCH_UNIT_KEYS,
     PITCH_UNIT_PRESETS,
@@ -327,19 +337,27 @@ class DiagnosticProvider:
             if p.is_smart and path not in contesto
         )
 
-    def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
+    def get_diagnostics(self, document_text: str,
+                        document_path: Optional[str] = None) -> List[Diagnostic]:
         """
         Analizza il documento e ritorna tutti i diagnostici trovati.
+
+        Args:
+            document_path: il path del documento su disco, se c'e'. Serve
+                solo alle voci `file:` (PGE #290), il cui path e' relativo
+                alla cartella del master: senza, la fase 21 controlla la
+                voce ma non il file che importa.
 
         Returns:
             Lista di Diagnostic LSP. Mai None. Mai eccezioni.
         """
         try:
-            return self._analyze(document_text)
+            return self._analyze(document_text, document_path)
         except Exception:
             return []
 
-    def _analyze(self, document_text: str) -> List[Diagnostic]:
+    def _analyze(self, document_text: str,
+                 document_path: Optional[str] = None) -> List[Diagnostic]:
         if not document_text:
             return []
 
@@ -355,14 +373,27 @@ class DiagnosticProvider:
 
         diagnostics = []
 
+        # Le voci `- file: <path>` (PGE #290): scansione unica riusata dalla
+        # fase 3, dalla 3b e dalla 21. Una voce `file:` non e' uno stream
+        # scritto: `stream_id` ha un default e `sample` sta nel file.
+        file_entries = self._scan_file_entries(lines, streams)
+        file_starts = frozenset(e['start'] for e in file_entries)
+
         # Fase 2: controllo chiavi duplicate nello stesso stream.
         diagnostics.extend(self._check_duplicate_keys(lines, streams))
 
         # Fase 3: controllo campi obbligatori per ogni stream.
-        diagnostics.extend(self._check_mandatory_stream_fields(lines, streams))
+        diagnostics.extend(self._check_mandatory_stream_fields(
+            lines, [s for s in streams if s[0] not in file_starts]))
 
         # Fase 3b: parametri numerici senza valore.
-        diagnostics.extend(self._check_missing_values(document_text))
+        diagnostics.extend(self._check_missing_values(
+            document_text, file_starts))
+
+        # Fase 21: le voci `file:` — piazzamento soltanto, il file importato
+        # che esiste e porta uno stream, gli id effettivi duplicati.
+        diagnostics.extend(self._check_file_entries(
+            lines, streams, file_entries, document_path))
 
         # Fase 3c: sbiadisce stream muted e stream non-solo.
         diagnostics.extend(self._check_muted_streams(lines, streams))
@@ -680,7 +711,9 @@ class DiagnosticProvider:
                     paths.add(f'voices.{dim}.{kwarg_name}')
         return frozenset(paths)
 
-    def _check_missing_values(self, document_text: str) -> List[Diagnostic]:
+    def _check_missing_values(self, document_text: str,
+                              file_starts: 'frozenset[int]' = frozenset(),
+                              ) -> List[Diagnostic]:
         """
         Segnala chiavi scritte senza valore quando un valore e' obbligatorio.
 
@@ -726,6 +759,10 @@ class DiagnosticProvider:
         # Stack di (yaml_path_prefix, indent_del_blocco)
         block_stack: List[Tuple[str, int]] = []
         in_stream: bool = False
+        # Riga del marcatore dello stream corrente: in una voce `file:`
+        # (PGE #290) `stream_id: null` vale come assente, quindi la chiave
+        # vuota non e' un valore mancante.
+        stream_start: int = -1
 
         i = 0
         while i < len(lines):
@@ -741,6 +778,7 @@ class DiagnosticProvider:
             if leading == 2 and (stripped.startswith('- ') or stripped == '-'):
                 block_stack.clear()
                 in_stream = True
+                stream_start = i
                 if stripped.startswith('- '):
                     stripped = stripped[2:].strip()
                     leading = 4  # contenuto inline trattato come indent 4
@@ -787,6 +825,12 @@ class DiagnosticProvider:
                         severity=DiagnosticSeverity.Error,
                         source=SOURCE,
                     ))
+
+            elif (current_prefix is None and key == 'stream_id'
+                  and stream_start in file_starts):
+                # Voce `file:`: `stream_id:` vuoto e' il default, il nome
+                # del file (PGE #290, regola 4).
+                pass
 
             elif current_prefix is None and key in self._STREAM_VALUE_REQUIRED:
                 # Campo obbligatorio stream senza valore
@@ -1215,6 +1259,225 @@ class DiagnosticProvider:
                         keys[key] = value
             streams.append((start, end, keys))
         return streams
+
+    # -------------------------------------------------------------------------
+    # LO STREAM COME FILE (PGE #290)
+    # -------------------------------------------------------------------------
+
+    _KEY_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:(.*)$')
+
+    def _scan_file_entries(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[dict]:
+        """Le voci della lista `streams:` che importano con `file:`.
+
+        Per ogni voce le chiavi *dirette* — quella sulla riga del trattino e
+        quelle all'indentazione del suo contenuto — con la loro riga, perche'
+        `_find_stream_blocks` raccoglie anche le chiavi annidate, e qui una
+        `duration` dentro `grain:` non e' una chiave della voce.
+
+        Ritorna dict con: start, end, keys ([(chiave, riga, raw)] nell'ordine
+        scritto), file_line, file_raw.
+        """
+        entries = []
+        for start, end, _keys in streams:
+            dash = lines[start]
+            leading = len(dash) - len(dash.lstrip())
+            content_indent = leading + 2
+            direct = []
+            for n in range(start, end + 1):
+                raw = lines[n]
+                stripped = raw.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                indent = len(raw) - len(raw.lstrip())
+                if n == start:
+                    if not stripped.startswith('- '):
+                        continue
+                    stripped = stripped[2:].lstrip()
+                elif indent != content_indent:
+                    continue
+                m = self._KEY_RE.match(stripped)
+                if m:
+                    direct.append((m.group(1), n, m.group(2)))
+            file_keys = [(k, n, raw) for k, n, raw in direct if k == FILE_KEY]
+            if not file_keys:
+                continue
+            _, file_line, file_raw = file_keys[0]
+            entries.append({
+                'start': start, 'end': end, 'keys': direct,
+                'file_line': file_line, 'file_raw': file_raw,
+            })
+        return entries
+
+    def _check_file_entries(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+        entries: List[dict],
+        document_path: Optional[str],
+    ) -> List[Diagnostic]:
+        """Le regole delle voci `file:` (mirror di `resolve_stream_files`).
+
+        - Regola 4: accanto a `file:` solo il piazzamento; ogni altra chiave
+          e' un errore (`StreamFileKeyError`), sulla sua riga.
+        - `file:` vuole il path di un documento YAML (`InvalidFieldValueError`
+          del motore su un valore che non e' una stringa non vuota).
+        - Regole 2, 3, 8: con il path del master noto, il file importato
+          deve esistere, leggersi, e portare esattamente uno stream senza
+          `file:` dentro.
+        - Regola 7: lo `stream_id` effettivo non si ripete, se almeno una
+          delle voci che lo condividono e' `file:`.
+        """
+        diagnostics: List[Diagnostic] = []
+        consentite = ', '.join(PLACEMENT_KEYS)
+
+        for e in entries:
+            # Regola 4: prima del file, come nel motore — l'errore e' nel
+            # master, e si corregge anche se il file non c'e'.
+            for key in extra_keys([k for k, _, _ in e['keys']]):
+                n = next(n for k, n, _ in e['keys'] if k == key)
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(n),
+                    message=(
+                        f"'{key}' non sta accanto a 'file:': il master tiene "
+                        f"solo il piazzamento dello stream ({consentite}). "
+                        f"Il resto si scrive nel file importato "
+                        f"(StreamFileKeyError, PGE #290)."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+            n = e['file_line']
+            valore = self._file_value(lines, n, e['file_raw'])
+            if valore is None:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(n),
+                    message=(
+                        "'file:' vuole il path di un documento YAML con un "
+                        "solo stream, relativo alla cartella del master."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                continue
+
+            if not document_path:
+                continue
+            target = resolve_import_path(document_path, valore)
+            problema = import_problem(target)
+            if problema is None:
+                continue
+            span = value_span(lines[n])
+            rng = (Range(start=Position(line=n, character=span[0]),
+                         end=Position(line=n, character=span[1]))
+                   if span else self._line_range(n))
+            diagnostics.append(Diagnostic(
+                range=rng,
+                message=f"File importato '{valore}': {problema}.",
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+
+        diagnostics.extend(self._check_effective_ids(lines, streams, entries))
+        return diagnostics
+
+    def _file_value(self, lines: List[str], n: int,
+                    raw: str) -> Optional[str]:
+        """Il path scritto in `file:`, o None se non e' una stringa non vuota.
+
+        Mirror di `isinstance(voce['file'], str) and voce['file']`: un numero,
+        una lista, un mapping o il valore vuoto non sono un path. Un valore a
+        blocchi sotto la chiave (una lista, un mapping) non e' una stringa.
+        """
+        testo = raw.strip()
+        if not testo or testo.startswith('#'):
+            return None
+        try:
+            letto = yaml.safe_load(testo)
+        except yaml.YAMLError:
+            letto = scalar_text(raw)
+        if not isinstance(letto, str) or not letto:
+            return None
+        return letto
+
+    def _check_effective_ids(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+        entries: List[dict],
+    ) -> List[Diagnostic]:
+        """Regola 7: uno `stream_id` effettivo condiviso con una voce `file:`.
+
+        L'id effettivo di una voce `file:` e' il suo `stream_id`, o il nome
+        del file senza estensione; quello di uno stream scritto e' il suo
+        `stream_id`. Le voci senza id non partecipano, come nel motore.
+        Limite: l'id si confronta com'e' scritto, senza le espressioni
+        matematiche che il motore valuta prima (`01` e `1` non collidono).
+        """
+        if not entries:
+            return []
+        per_start = {e['start']: e for e in entries}
+        per_id: Dict[str, List[Tuple[int, Optional[str]]]] = {}
+        for start, _end, _keys in streams:
+            e = per_start.get(start)
+            if e is not None:
+                sid = next((scalar_text(raw) for k, _, raw in e['keys']
+                            if k == 'stream_id'), '')
+                valore = self._file_value(lines, e['file_line'], e['file_raw'])
+                if not sid and valore:
+                    sid = default_stream_id(valore)
+                file_scritto = valore or ''
+            else:
+                sid = self._direct_stream_id(lines, start)
+                file_scritto = None
+            if sid:
+                per_id.setdefault(sid, []).append((start, file_scritto))
+
+        diagnostics = []
+        for sid, voci in per_id.items():
+            if len(voci) < 2 or all(f is None for _, f in voci):
+                continue
+            for start, file_scritto in voci:
+                altre = [s for s, _ in voci if s != start]
+                origine = (f"importato da '{file_scritto}'"
+                           if file_scritto is not None else 'scritto nel master')
+                dove = (f"alla riga {altre[0] + 1}" if len(altre) == 1 else
+                        "alle righe " + ', '.join(str(s + 1) for s in altre))
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(start),
+                    message=(
+                        f"stream_id effettivo '{sid}' ({origine}) ripetuto "
+                        f"{dove}: "
+                        f"i due stem avrebbero lo stesso nome. Una voce "
+                        f"'file:' senza stream_id prende il nome del file "
+                        f"(StreamFileDuplicateIdError, PGE #290)."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+        return diagnostics
+
+    def _direct_stream_id(self, lines: List[str], start: int) -> str:
+        """Lo `stream_id` diretto di uno stream scritto nel master, o ''."""
+        dash = lines[start]
+        content_indent = len(dash) - len(dash.lstrip()) + 2
+        for n in range(start, len(lines)):
+            raw = lines[n]
+            stripped = raw.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            if n == start:
+                stripped = stripped[2:].lstrip() if stripped.startswith('- ') else ''
+            elif indent < content_indent:
+                break
+            elif indent != content_indent:
+                continue
+            m = self._KEY_RE.match(stripped)
+            if m and m.group(1) == 'stream_id':
+                return scalar_text(m.group(2))
+        return ''
 
     def _check_muted_streams(
         self, lines: List[str],

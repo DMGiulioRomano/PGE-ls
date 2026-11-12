@@ -12,7 +12,10 @@ Fornisce autocompletamento intelligente, documentazione hover e diagnostica in t
 - **Snippet dinamici** — `stream_id` con counter automatico, `end_time` dalla `duration` dello stream, valori Y dai bounds del parametro
 - **Hover** — documentazione su ogni parametro: range, variation mode, exclusive group
 - **Diagnostica** — bounds scalari e envelope, exclusive group per stream, campi obbligatori mancanti, chiavi duplicate, distribuzione temporale dei cicli compatti (nome, parametri, coppia `(parametro, n_reps)` che trabocca)
-- **Go to file** — `Cmd+Click` su `sample:` apre il file audio da `refs/`
+- **Go to file** — `Cmd+Click` su `sample:` apre il file audio da `refs/`; su `- file: streams/x.yml` apre il documento importato
+- **Stream come file** (PGE #290) — una voce `- file: <path>` in `streams:` importa uno stream scritto in un altro documento. Il path è relativo alla cartella del master; accanto a `file:` stanno solo `stream_id`, `onset`, `mute`, `solo` (ogni altra chiave è un errore, come `StreamFileKeyError` nel motore); la diagnostica segnala il file che non esiste, non si legge, non porta esattamente uno stream o ne importa un altro, e lo `stream_id` effettivo ripetuto. L'hover su `seed`, `duration`, `bpm` top-level dice che, se il file è importato, il motore li ignora.
+
+  **Attivazione:** resta sui nomi `PGE_*.yaml` / `PGE_*.yml`, anche per master e file importati. Un master o un documento del laboratorio con un altro nome (`mare-nostrum.yml`, `streams/risacca.yml`) non è servito: il go-to-file lo apre, ma senza language server. Il perché sta nella issue #65 e nella PR che la chiude.
 
 ---
 

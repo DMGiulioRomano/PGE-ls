@@ -62,6 +62,9 @@ TRIGGER_SUGGEST = Command(
     command='editor.action.triggerSuggest',
 )
 
+from granular_ls.stream_files import (
+    FILE_KEY, FILE_KEY_DETAIL, FILE_KEY_DOC, PLACEMENT_KEYS,
+)
 from granular_ls.schema_bridge import SchemaBridge, ParameterInfo, domain_label
 from granular_ls.envelope_snippets import EnvelopeSnippetProvider, draw_bounds
 from granular_ls.loop_unit import LOOP_UNITS, LOOP_UNIT_VALUE_DOCS
@@ -631,6 +634,12 @@ class CompletionProvider:
                 command=TRIGGER_SUGGEST,
             ))
 
+        # Una voce `- file:` (PGE #290) tiene solo il piazzamento: il resto
+        # dello stream sta nel file importato, e scriverlo qui e' un errore
+        # del motore (StreamFileKeyError).
+        if FILE_KEY in already_present:
+            items = [item for item in items if item.label in PLACEMENT_KEYS]
+
         return items
 
     # -------------------------------------------------------------------------
@@ -728,6 +737,22 @@ class CompletionProvider:
             ),
             command=TRIGGER_SUGGEST,
         ))
+
+        # La voce che importa lo stream da un altro documento (PGE #290):
+        # il path e' relativo alla cartella del master.
+        prefix_file = current_text.lower()
+        if not prefix_file or FILE_KEY.startswith(prefix_file):
+            items.append(CompletionItem(
+                label=FILE_KEY,
+                insert_text=f'{FILE_KEY}: "${{1:streams/nome.yml}}"\n$0',
+                insert_text_format=InsertTextFormat.Snippet,
+                kind=CompletionItemKind.Module,
+                detail=FILE_KEY_DETAIL,
+                documentation=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=FILE_KEY_DOC,
+                ),
+            ))
 
         # Items singoli: utili quando lo stream esiste gia' e si vuole
         # aggiungere una chiave specifica.

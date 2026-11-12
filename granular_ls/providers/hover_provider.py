@@ -27,6 +27,10 @@ from typing import Dict, Optional, Tuple
 
 from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
+from granular_ls.stream_files import (
+    FILE_KEY, FILE_KEY_DOC, PLACEMENT_KEYS, PLACEMENT_NOTE,
+    entry_imports_file, top_level_doc,
+)
 from granular_ls.envelope_shapes import (
     VALID_INTERP_TYPES,
     is_bp_group,
@@ -456,6 +460,14 @@ class HoverProvider:
         if not context.current_text:
             return None
 
+        # Lo stream come file (PGE #290): la chiave `file:` di una voce, i
+        # top-level che un file importato scrive per rendersi da solo e che
+        # il motore ignora, e il piazzamento che accanto a `file:` decide il
+        # master.
+        file_hover = self._build_stream_file_hover(context, document_text)
+        if file_hover is not None:
+            return file_hover
+
         # Contesto deviation_probability: hover sulla deviation_probability key
         if context.parent_path == ['deviation_probability']:
             return self._build_deviation_probability_key_hover(context.current_text)
@@ -595,6 +607,49 @@ class HoverProvider:
 
         return None
 
+
+    def _build_stream_file_hover(self, context: YamlContext,
+                                 document_text: str) -> 'Optional[Hover]':
+        """Hover della superficie `file:` (PGE #290), o None.
+
+        Solo su una chiave scritta come tale sulla riga del cursore: la
+        parola `file` o `seed` dentro un valore non e' la chiave.
+        """
+        if context.parent_path:
+            return None
+        word = context.current_text
+        lines = document_text.split('\n') if document_text else []
+        if context.cursor_line >= len(lines):
+            return None
+        line = lines[context.cursor_line]
+        testo = line.lstrip()
+        if testo.startswith('- '):
+            testo = testo[2:].lstrip()
+        if not re.match(rf'^{re.escape(word)}\s*:', testo):
+            return None
+
+        if not context.in_stream_element:
+            if line[:1].isspace():
+                return None
+            doc = top_level_doc(word)
+            return self._markdown(doc) if doc else None
+
+        if word == FILE_KEY:
+            return self._markdown(FILE_KEY_DOC)
+
+        if (word in PLACEMENT_KEYS
+                and entry_imports_file(lines, context.cursor_line)):
+            hover = self._build_stream_context_hover(word)
+            if hover is None:
+                return self._markdown(f'**{word}**\n\n{PLACEMENT_NOTE}')
+            return self._markdown(
+                f'{hover.contents.value}\n\n{PLACEMENT_NOTE}')
+        return None
+
+    @staticmethod
+    def _markdown(value: str) -> Hover:
+        return Hover(contents=MarkupContent(kind=MarkupKind.Markdown,
+                                            value=value))
 
     def _build_stream_context_hover(self,
                                      key_name: str) -> 'Optional[Hover]':
