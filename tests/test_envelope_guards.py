@@ -321,3 +321,8 @@ def test_is_envelope_like():
     assert not is_envelope_like([])
     assert not is_envelope_like([1, 2, 3])
     assert not is_envelope_like({'a': 1})
+
+
+def test_un_espressione_a_piu_argomenti_tace():
+    """PGE #309: la classe del regex ha la virgola, `(max(1, 2))` si valuta."""
+    assert check_envelope_shape([[0, '(max(1, 2))'], [1, 2], 'x']) is None
