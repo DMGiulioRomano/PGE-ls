@@ -48,14 +48,6 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import yaml
 
-from granular_ls.envelope_shapes import (
-    is_3tuple_breakpoint,
-    is_bp_group,
-    is_loop_block,
-    is_math_expression,
-    normalize_engine_values,
-)
-
 # La chiave nello YAML: identita' del campo in ogni diagnostica.
 LOOP_UNIT_PATH = 'pointer.loop_unit'
 
@@ -118,54 +110,6 @@ def loop_unit_mode(value: Any) -> str:
     if not isinstance(value, str) or value not in LOOP_UNITS:
         return MODE_INVALID
     return MODE_NORMALIZED if value == 'normalized' else MODE_ABSOLUTE
-
-
-def _is_envelope_like(value: Any) -> bool:
-    """Mirror di `Envelope.is_envelope_like`: le forme che il motore scala."""
-    if isinstance(value, dict):
-        return 'points' in value
-    if not isinstance(value, list) or not value:
-        return False
-    if is_loop_block(value) or is_bp_group(value):
-        return True
-    for item in value:
-        if isinstance(item, list) and len(item) == 2:
-            return True
-        if is_loop_block(item) or is_bp_group(item):
-            return True
-        if is_3tuple_breakpoint(item):
-            return True
-        if isinstance(item, dict) and 't' in item and 'v' in item:
-            return True
-    return False
-
-
-# ponytail: va via con l'avviso di migrazione del motore
-# (`PointerController._warn_loop_unit_migration`), dopo una release. Il conto
-# lo tiene PGE #242.
-def rescaling_would_change(value: Any) -> bool:
-    """True se la vecchia conversione a frazione del file muoveva `value`.
-
-    Mirror di `_rescaling_would_change` (PointerController, PGE #222), che
-    decide chi riceve l'avviso `[LOOP_UNIT]`. Uno zero e' zero sotto qualunque
-    fattore di scala — ed e' la forma piu' comune del corpus, `start: 0` — e
-    quel che la conversione lascia passare, una stringa, non si muoveva
-    nemmeno prima.
-
-    Le stringhe numeriche arrivano al controller gia' convertite dal
-    `Generator`, quindi si convertono come lui. Uno scalare scritto come
-    espressione fra parentesi no: il suo valore lo calcola il motore, e qui
-    non si decide. Dentro un envelope l'espressione non conta — la forma e'
-    envelope-like comunque, e il motore la scala.
-    """
-    if is_math_expression(value):
-        return False
-    value = normalize_engine_values(value)
-    if value is None or isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return value != 0
-    return _is_envelope_like(value)
 
 
 # =============================================================================

@@ -215,37 +215,6 @@ class TestRegistry:
         assert loop_unit_label(value) == label
 
 
-class TestRescalingWouldChange:
-    """Mirror di `_rescaling_would_change` (PointerController, PGE #222).
-
-    Decide chi riceve l'avviso di migrazione: solo i valori che la vecchia
-    conversione muoveva davvero. Uno zero resta zero sotto qualunque fattore
-    di scala, e `start: 0` e' la forma piu' comune del corpus.
-    """
-
-    @pytest.mark.parametrize('value', [
-        None, True, False, 0, 0.0, '0', [], 'abc', {'type': 'linear'},
-        # Espressione: la valuta il Generator, qui non si decide.
-        '(1/2)',
-    ])
-    def test_non_si_muove(self, value):
-        from granular_ls.loop_unit import rescaling_would_change
-        assert rescaling_would_change(value) is False
-
-    @pytest.mark.parametrize('value', [
-        2.0, 1, -0.5, '0.5',
-        [[0, 0.1], [10, 0.5]],
-        [[0, 0.1, 'step'], [10, 0.5]],
-        [{'t': 0, 'v': 0.1}],
-        {'points': [[0, 0.1], [10, 0.5]]},
-        [[[0, 0.1], [50, 0.5]], 10, 4],          # formato compatto
-        [[[0, 0.1], [10, 0.5]], 'cubic'],        # BP group diretto
-    ])
-    def test_si_muove(self, value):
-        from granular_ls.loop_unit import rescaling_would_change
-        assert rescaling_would_change(value) is True
-
-
 class TestStreamSample:
     """`stream_sample`: il file la cui durata limita le posizioni in secondi.
 
@@ -567,13 +536,19 @@ class TestLoopUnitValue:
 
 
 # =============================================================================
-# 5. Diagnostica: l'avviso di migrazione (ponytail, PGE #242)
+# 5. Diagnostica: nessun avviso di migrazione (PGE #242, PGE-ls #60)
 # =============================================================================
 
-class TestLoopUnitMigrationWarning:
-    """Lo stesso avviso `[LOOP_UNIT]` che il motore stampa a render time,
-    detto mentre il file si scrive: `time_mode: normalized`, nessun
-    `loop_unit`, almeno una posizione che la vecchia conversione muoveva."""
+class TestNessunAvvisoDiMigrazione:
+    """L'avviso `[LOOP_UNIT]` era transitorio per costruzione (ponytail): il
+    motore l'ha tolto passata la release (PGE #282, chiude PGE #242), e lo
+    specchio del LS se n'e' andato con lui.
+
+    La lettura resta quella di #222 -- `time_mode: normalized` senza
+    `loop_unit` legge le posizioni in secondi -- ed e' gia' detta dall'hover e
+    misurata dai bounds; quel che non c'e' piu' e' il richiamo alla lettura di
+    prima, su YAML validi.
+    """
 
     def _warnings(self, bridge, text):
         provider = DiagnosticProvider(bridge)
@@ -581,90 +556,14 @@ class TestLoopUnitMigrationWarning:
                 if d.severity == DiagnosticSeverity.Warning
                 and 'loop_unit' in d.message]
 
-    def test_avvisa_chi_cambia_lettura(self, bridge):
-        text = _pointer("      loop_start: 0.2\n", time_mode='normalized')
-        warns = self._warnings(bridge, text)
-        assert len(warns) == 1
-        w = warns[0]
-        assert 'loop_start' in w.message
-        assert 'loop_unit: normalized' in w.message
-        assert 'time_mode' in w.message
-        assert w.range.start.line == _line_of(text, 'pointer:')
-
-    def test_nomina_le_chiavi_nell_ordine_del_motore(self, bridge):
-        text = _pointer("      loop_end: 0.8\n"
+    def test_time_mode_normalized_senza_loop_unit_tace(self, bridge):
+        text = _pointer("      loop_start: 0.2\n"
                         "      start: 0.1\n", time_mode='normalized')
-        warns = self._warnings(bridge, text)
-        assert len(warns) == 1
-        assert 'start, loop_end' in warns[0].message
-
-    def test_uno_zero_non_si_muove(self, bridge):
-        text = _pointer("      start: 0\n"
-                        "      speed_ratio: 1.0\n", time_mode='normalized')
         assert self._warnings(bridge, text) == []
 
-    def test_envelope_si_muove(self, bridge):
-        text = _pointer("      loop_start: [[0, 0.1], [1, 0.5]]\n"
-                        "      loop_dur: 0.1\n", time_mode='normalized')
-        warns = self._warnings(bridge, text)
-        assert len(warns) == 1
-        assert 'loop_start, loop_dur' in warns[0].message
-
-    def test_envelope_block_style_si_muove(self, bridge):
-        text = _pointer("      loop_start:\n"
-                        "        - [0, 0.1]\n"
-                        "        - [1, 0.5]\n", time_mode='normalized')
-        assert len(self._warnings(bridge, text)) == 1
-
-    @pytest.mark.parametrize('unit', ['normalized', 'seconds', 'absolute',
-                                      'normalised'])
-    def test_loop_unit_dichiarata_zittisce_l_avviso(self, bridge, unit):
-        """Dichiarata, valida o no: se e' sbagliata lo dice la sua riga."""
-        text = _pointer(f"      loop_unit: {unit}\n"
-                        "      loop_start: 0.2\n", time_mode='normalized')
-        assert self._warnings(bridge, text) == []
-
-    def test_time_mode_absolute_non_avvisa(self, bridge):
-        text = _pointer("      loop_start: 0.2\n", time_mode='absolute')
-        assert self._warnings(bridge, text) == []
-
-    def test_senza_time_mode_non_avvisa(self, bridge):
-        text = _pointer("      loop_start: 0.2\n")
-        assert self._warnings(bridge, text) == []
-
-    def test_time_mode_fra_virgolette_e_con_commento(self, bridge):
-        text = _pointer("      loop_start: 0.2\n",
-                        time_mode='"normalized"  # asse X')
-        assert len(self._warnings(bridge, text)) == 1
-
-    def test_time_mode_sulla_riga_del_trattino(self, bridge):
-        text = (
-            "streams:\n"
-            "  - time_mode: normalized\n"
-            "    stream_id: s1\n"
-            "    sample: f.wav\n"
-            "    pointer:\n"
-            "      loop_start: 0.2\n"
-        )
-        assert len(self._warnings(bridge, text)) == 1
-
-    def test_espressione_non_si_valuta(self, bridge):
-        text = _pointer('      loop_start: "(1/2)"\n', time_mode='normalized')
-        assert self._warnings(bridge, text) == []
-
-    def test_un_avviso_per_stream(self, bridge):
-        text = (
-            _pointer("      loop_start: 0.2\n", time_mode='normalized')
-            + "  - stream_id: s2\n"
-              "    sample: f.wav\n"
-              "    time_mode: normalized\n"
-              "    pointer:\n"
-              "      start: 0.5\n"
-        )
-        warns = self._warnings(bridge, text)
-        assert len(warns) == 2
-        assert {w.range.start.line for w in warns} == {
-            n for n, l in enumerate(text.split('\n')) if l == '    pointer:'}
+    def test_il_mirror_del_filtro_non_c_e_piu(self):
+        import granular_ls.loop_unit as lu
+        assert not hasattr(lu, 'rescaling_would_change')
 
 
 # =============================================================================

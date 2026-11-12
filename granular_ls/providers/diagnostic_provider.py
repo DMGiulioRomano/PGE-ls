@@ -82,8 +82,6 @@ from granular_ls.loop_unit import (
     find_loop_unit,
     loop_unit_label,
     loop_unit_mode,
-    pointer_span,
-    rescaling_would_change,
     stream_sample,
 )
 from granular_ls.range_unit import (
@@ -456,10 +454,6 @@ class DiagnosticProvider:
 
         # Fase 17: pointer.loop_unit fuori vocabolario (PGE #222).
         diagnostics.extend(self._check_loop_unit(lines, streams))
-
-        # Fase 18: posizioni che #222 ha spostato in silenzio (ponytail,
-        # PGE #242: se ne va con l'avviso [LOOP_UNIT] del motore).
-        diagnostics.extend(self._check_loop_unit_migration(lines, streams))
 
         # Fase 20: il quinto elemento del formato compatto sotto le chiavi
         # senza un controllo dedicato — nome, parametri, e la coppia
@@ -2900,73 +2894,6 @@ class DiagnosticProvider:
                     f"Unità disponibili: {', '.join(LOOP_UNITS)}. {hint}."
                 ),
                 severity=DiagnosticSeverity.Error,
-                source=SOURCE,
-            ))
-        return diagnostics
-
-    # ponytail: si toglie insieme a `_warn_loop_unit_migration` del motore,
-    # dopo una release. Il conto lo tiene PGE #242.
-    def _check_loop_unit_migration(
-        self, lines: List[str],
-        streams: List[Tuple[int, int, dict]],
-    ) -> List[Diagnostic]:
-        """
-        Le posizioni nel sample che PGE #222 ha cambiato di lettura in silenzio.
-
-        Prima di #222 una `loop_unit` assente ereditava da `time_mode`: su uno
-        stream `time_mode: normalized` `start` e i parametri di loop erano
-        frazioni del file. Ora sono secondi. Lo YAML resta valido — il motore
-        non ferma niente — ma con ogni probabilita' dice un numero diverso da
-        quello che chi l'ha scritto intendeva.
-
-        E' l'avviso `[LOOP_UNIT]` che il motore stampa a render time
-        (`_warn_loop_unit_migration`), detto mentre il file si scrive, con la
-        sua stessa condizione: `time_mode: normalized`, nessuna `loop_unit`,
-        almeno una posizione che la vecchia conversione muoveva — uno zero
-        resta zero, e `start: 0` e' la forma piu' comune del corpus. Nomina le
-        chiavi nel suo ordine e sta sulla riga di `pointer:`, uno per stream,
-        come il motore ne stampa uno per stream.
-
-        Una `loop_unit` dichiarata lo zittisce anche se e' sbagliata: la
-        scelta e' stata fatta, e se non e' nel vocabolario lo dice la fase 17.
-
-        Warning, come il motore e come gl-ls per la stessa regola sugli study.
-        """
-        diagnostics = []
-        for stream_start, stream_end_incl, _keys in streams:
-            stream_end = stream_end_incl + 1
-            tm_line = self._find_key_line_at_indent(
-                lines, stream_start, stream_end, 'time_mode', 4)
-            if tm_line is None:
-                continue
-            found, time_mode = self._read_key_value(lines, tm_line, stream_end)
-            if not found or time_mode != 'normalized':
-                continue
-            pointer = pointer_span(lines, stream_start, stream_end)
-            if pointer is None or find_loop_unit(lines, stream_start) is not None:
-                continue
-            p_start, p_end = pointer
-            moved = []
-            for key in LOOP_UNIT_SCOPE:
-                key_line = self._find_key_line_at_indent(
-                    lines, p_start + 1, p_end, key, 6)
-                if key_line is None:
-                    continue
-                found, value = self._read_key_value(lines, key_line, p_end)
-                if found and rescaling_would_change(value):
-                    moved.append(key)
-            if not moved:
-                continue
-            diagnostics.append(Diagnostic(
-                range=self._line_range(p_start),
-                message=(
-                    f"`pointer`: {', '.join(moved)} ora in secondi. "
-                    "`loop_unit` non eredita più da `time_mode` (PGE #222): "
-                    "prima questi valori erano frazioni della durata del "
-                    "sample. Aggiungi `loop_unit: normalized` per la lettura "
-                    "di prima, `loop_unit: seconds` per confermare i secondi."
-                ),
-                severity=DiagnosticSeverity.Warning,
                 source=SOURCE,
             ))
         return diagnostics
