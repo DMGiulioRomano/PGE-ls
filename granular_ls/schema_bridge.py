@@ -524,7 +524,8 @@ class SchemaBridge:
 
         Utile per parametri come 'scatter' e 'num_voices' che vivono in
         GRANULAR_PARAMETERS ma vengono parsati fuori da ALL_SCHEMAS
-        (es. direttamente in _init_voice_manager di stream.py).
+        (es. direttamente in `VoicesController`, dalla PGE #284; prima in
+        `Stream._init_voice_manager`).
 
         Returns:
             Dict con min_val, max_val, variation_mode, ecc. oppure None.
@@ -536,8 +537,8 @@ class SchemaBridge:
     ) -> Optional[Tuple[Optional[float], Optional[float]]]:
         """Il dominio di un parametro che ha i bound e nessuno `ParameterSpec`.
 
-        `num_voices` e `scatter` vivono in `GRANULAR_PARAMETERS` e `Stream` li
-        passa a `parse_parameter` come tutti gli altri — in `strict` un
+        `num_voices` e `scatter` vivono in `GRANULAR_PARAMETERS` e il motore li
+        passa (`VoicesController` dalla PGE #284) a `parse_parameter` come tutti gli altri — in `strict` un
         breakpoint fuori bound alza `ParameterBoundError` — ma fuori da
         `ALL_SCHEMAS` non diventano un `ParameterInfo`, quindi
         `get_value_domain` non ha niente da leggere: si vedevano solo da

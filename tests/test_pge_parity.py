@@ -2570,7 +2570,7 @@ def test_envelope_bounds_tace_dove_il_motore_non_arriva_ai_bound(
 #
 # Le due chiavi hanno i bound in `GRANULAR_PARAMETERS` e nessuno
 # `ParameterSpec`, quindi `ALL_SCHEMAS` non le nomina e la domanda non si puo'
-# fare attraverso uno spec come per gli altri envelope: `Stream` le passa a
+# fare attraverso uno spec come per gli altri envelope: il motore le passa a
 # `parse_parameter` per nome, e la parita' fa la stessa cosa. Si confrontano
 # gli insiemi di Y, come per #58: «segnala esattamente quelle che il motore
 # rifiuta» vuol dire anche non una di piu'.
@@ -2684,38 +2684,45 @@ def test_voices_envelope_bounds_mirror_matches_engine(
 
 
 def test_il_motore_passa_ancora_le_due_chiavi_al_parser(pge):
-    """La premessa del controllo: `Stream` le parsa come ogni altro parametro.
+    """La premessa del controllo: il motore le parsa come ogni altro parametro.
 
     Senza quella chiamata i bound non li applicherebbe nessuno al parse, e
     l'Error del language server diventerebbe un falso positivo su YAML che
-    rende. Si legge il sorgente, non si importa: `pge.core.stream` tira
+    rende. Si legge il sorgente, non si importa: il modulo che le parsa tira
     dentro numpy, che la CI del language server non installa.
+
+    Si cerca in tutto il sorgente del motore e non in un file fisso: la
+    chiamata stava in `Stream._init_voice_manager` (`core/stream.py`) e con
+    PGE #284 e' passata a `VoicesController` (`controllers/voices_controller.py`).
+    Il patto e' «qualcuno le passa a `parse_parameter` con quel
+    `value_field`», non «le passa quel file»: un trasloco del genere non deve
+    far diventare rossa la parita', e la scomparsa della chiamata si'.
     """
     import ast
 
     from granular_ls.voice_strategies import VOICE_ENVELOPE_KEYS
 
-    root = Path(PGE_SRC)
-    for cand in (root / 'pge' / 'core' / 'stream.py',
-                 root / 'core' / 'stream.py'):
-        if cand.exists():
-            sorgente = cand
-            break
-    else:
-        pytest.skip("stream.py non trovato in questo checkout del motore")
+    sorgenti = sorted(p for p in Path(PGE_SRC).rglob('*.py')
+                      if '__pycache__' not in p.parts)
+    assert sorgenti, f"nessun sorgente Python sotto {PGE_SRC}"
 
     chiamate = set()
-    for node in ast.walk(ast.parse(sorgente.read_text(encoding='utf-8'))):
-        if (not isinstance(node, ast.Call)
-                or not isinstance(node.func, ast.Attribute)
-                or node.func.attr != 'parse_parameter'
-                or not node.args
-                or not isinstance(node.args[0], ast.Constant)):
+    for sorgente in sorgenti:
+        try:
+            albero = ast.parse(sorgente.read_text(encoding='utf-8'))
+        except (SyntaxError, UnicodeDecodeError):
             continue
-        campo = next((kw.value.value for kw in node.keywords
-                      if kw.arg == 'value_field'
-                      and isinstance(kw.value, ast.Constant)), None)
-        chiamate.add((node.args[0].value, campo))
+        for node in ast.walk(albero):
+            if (not isinstance(node, ast.Call)
+                    or not isinstance(node.func, ast.Attribute)
+                    or node.func.attr != 'parse_parameter'
+                    or not node.args
+                    or not isinstance(node.args[0], ast.Constant)):
+                continue
+            campo = next((kw.value.value for kw in node.keywords
+                          if kw.arg == 'value_field'
+                          and isinstance(kw.value, ast.Constant)), None)
+            chiamate.add((node.args[0].value, campo))
 
     for key in VOICE_ENVELOPE_KEYS:
         assert (key, f'voices.{key}') in chiamate, (

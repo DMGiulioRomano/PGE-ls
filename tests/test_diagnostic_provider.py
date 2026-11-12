@@ -5225,8 +5225,8 @@ class TestVoicesRawBoundsSenzaTetto:
 # Le due chiavi hanno i bound in `GRANULAR_PARAMETERS` e nessuno
 # `ParameterSpec`, quindi non diventano un `ParameterInfo`: prima di #59 il
 # loro dominio lo leggeva solo un ramo di `_check_voice_strategies` che faceva
-# `float(val_str)` e su un envelope passava oltre in silenzio. `Stream` le
-# passa a `parse_parameter` come ogni altro parametro, e in `strict` un
+# `float(val_str)` e su un envelope passava oltre in silenzio. Il motore le
+# passa (`VoicesController`, dalla PGE #284) a `parse_parameter` come ogni altro parametro, e in `strict` un
 # breakpoint fuori bound alza `ParameterBoundError`: lo stesso valore dava un
 # Error da scalare, niente da envelope, e un render che non partiva.
 #
