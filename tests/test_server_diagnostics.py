@@ -44,11 +44,13 @@ class CountingProvider:
     def __init__(self):
         self.calls = 0
         self.last_text = None
+        self.last_path = None
         self.result = []
 
-    def get_diagnostics(self, text):
+    def get_diagnostics(self, text, document_path=None):
         self.calls += 1
         self.last_text = text
+        self.last_path = document_path
         return self.result
 
 

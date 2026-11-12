@@ -49,8 +49,8 @@ il motore.
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
+from granular_ls.envelope_guards import check_envelope_shape
 from granular_ls.envelope_shapes import (
-    compact_blocks,
     compact_end_time_ok,
     compact_n_reps_ok,
     contains_math_expression,
@@ -451,7 +451,9 @@ def _check_time_dist(spec: Any) -> Optional[ReadDirectionIssue]:
     ))
 
 
-def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
+def check_read_direction(raw: Any,
+                         time_mode: str = 'absolute',
+                         ) -> Optional[ReadDirectionIssue]:
     """
     Valida il valore grezzo di `grain.read_direction`.
 
@@ -461,6 +463,8 @@ def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
     Args:
         raw: il valore letto dallo YAML — scalare, envelope in una delle forme
             note, o `None` per la chiave scritta e lasciata vuota.
+        time_mode: il `time_mode` dello stream, con cui il parser scala
+            l'envelope: vedi `envelope_guards`.
 
     Returns:
         `None` se il motore lo accetterebbe; il primo `ReadDirectionIssue`
@@ -476,7 +480,7 @@ def check_read_direction(raw: Any) -> Optional[ReadDirectionIssue]:
     # un verso, e `[[0, "1"], [10, "-1"]]` è una lista di breakpoint.
     raw = normalize_engine_values(raw)
 
-    return _check_value(raw) or _check_overflow(raw)
+    return _check_value(raw) or _check_shape(raw, time_mode)
 
 
 def _check_value(raw: Any) -> Optional[ReadDirectionIssue]:
@@ -500,22 +504,32 @@ def _check_value(raw: Any) -> Optional[ReadDirectionIssue]:
     return _issue(raw, FORM_HINT)
 
 
-def _check_overflow(raw: Any) -> Optional[ReadDirectionIssue]:
-    """La coppia `(parametro, n_reps)` che trabocca (PGE #212).
+def _check_shape(raw: Any, time_mode: str) -> Optional[ReadDirectionIssue]:
+    """La forma dell'envelope, come la vede il builder (PGE #211, #288).
 
-    Un passaggio a parte, e per ultimo, perché così fa il motore: valida
-    l'intero corpo in `normalize_read_direction`, dove la distribuzione si
-    crea ma non si calcola, e trabocca solo dopo, quando `create_scaled_envelope`
-    espande i cicli. Con un verso sbagliato più avanti nella lista l'errore che
-    vede per primo è quello, e qui lo stesso.
+    Un passaggio a parte, e per ultimo, perché così fa il motore:
+    `normalize_read_direction` valida il verso sul corpo intero e lo consegna
+    come `{type: step, points: ...}`; i guard di forma che restano — la coppia
+    `(parametro, n_reps)` che trabocca (PGE #212), l'`end_time` di un ciclo
+    che non supera l'istante in cui comincia in una lista mista — li incontra
+    poi il builder, sotto ogni chiave (`envelope_guards`). Con un verso
+    sbagliato più avanti nella lista l'errore che vede per primo è quello, e
+    qui lo stesso.
 
-    La frase è quella del registro: l'overflow nasce nella distribuzione, che
-    non sa di essere sotto il verso di lettura.
+    Il corpo si guarda nella forma in cui il motore lo consegna: un dict col
+    `type` imposto, quindi lo slot interp di un compatto non decide niente.
+    La frase dell'overflow è quella del registro: nasce nella distribuzione,
+    che non sa di essere sotto il verso di lettura.
     """
-    for ciclo in compact_blocks(raw):
-        if len(ciclo) < 5:
-            continue  # distribuzione omessa: `linear`, che non eleva niente
-        issue = check_time_distribution(ciclo[4], ciclo[2])
-        if issue is not None and issue.kind == 'overflow':
-            return _issue(ciclo, overflow_hint(issue))
-    return None
+    if isinstance(raw, dict):
+        corpo = {**raw, 'type': REQUIRED_INTERP}
+    elif isinstance(raw, list):
+        corpo = {'type': REQUIRED_INTERP, 'points': raw}
+    else:
+        return None
+    issue = check_envelope_shape(corpo, time_mode)
+    if issue is None:
+        return None
+    if issue.time_dist is not None and issue.time_dist.kind == 'overflow':
+        return _issue(issue.value, overflow_hint(issue.time_dist))
+    return _issue(issue.value, issue.hint)

@@ -84,6 +84,7 @@ from granular_ls.providers.diagnostic_provider import DiagnosticProvider
 from granular_ls.envelope_snippets import build_envelope_n_points, draw_bounds
 from granular_ls.envelope_shapes import VALID_INTERP_TYPES, is_bp_group
 from granular_ls.loop_unit import LOOP_UNIT_SCOPE
+from granular_ls.stream_files import resolve_import_path, value_span
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('pge-ls')
@@ -136,6 +137,38 @@ def _get_document_text(server: LanguageServer, uri: str) -> str:
         return doc.source or ''
     except Exception:
         return ''
+
+
+def _document_path(uri: str) -> Optional[str]:
+    """Il path su disco di un documento `file://`, o None.
+
+    Serve alle voci `file:` del master (PGE #290), il cui path e' relativo
+    alla cartella del master: diagnostica e go-to-file lo risolvono da qui.
+    """
+    try:
+        from pygls.uris import to_fs_path
+        return to_fs_path(uri)
+    except Exception:
+        return None
+
+
+def _file_import_target(uri: str, line: str):
+    """`(inizio, fine, Path)` del file importato da una riga `file:`, o None.
+
+    None anche quando il file non esiste: il link e il go-to-file portano
+    solo dove c'e' qualcosa da aprire, e il file che manca lo dice la
+    diagnostica.
+    """
+    span = value_span(line)
+    if span is None:
+        return None
+    master = _document_path(uri)
+    if not master:
+        return None
+    target = resolve_import_path(master, span[2])
+    if not target.is_file():
+        return None
+    return span[0], span[1], target.resolve()
 
 
 # =============================================================================
@@ -632,11 +665,13 @@ def handle_document_link(params: DocumentLinkParams):
     """
     Sottolinea il nome del file in 'sample: "file.wav"' quando esiste in refs/.
     Cmd+Click apre il file audio.
+
+    Sottolinea anche il path di '- file: streams/x.yml' (PGE #290) quando il
+    documento importato esiste: e' relativo alla cartella del master, quindi
+    non serve --src.
     """
     uri = params.text_document.uri
     if not is_pge_file(uri):
-        return []
-    if not _src_path:
         return []
 
     text = _get_document_text(server, uri)
@@ -646,6 +681,20 @@ def handle_document_link(params: DocumentLinkParams):
     import re
     from pathlib import Path
     links = []
+
+    for line_n, line in enumerate(text.split('\n')):
+        found = _file_import_target(uri, line)
+        if found is not None:
+            links.append(DocumentLink(
+                range=Range(
+                    start=Position(line=line_n, character=found[0]),
+                    end=Position(line=line_n, character=found[1]),
+                ),
+                target=found[2].as_uri(),
+            ))
+
+    if not _src_path:
+        return links
     refs_dir = (Path(_src_path) / '..' / 'refs').resolve()
 
     for line_n, line in enumerate(text.split('\n')):
@@ -705,11 +754,12 @@ def handle_definition(params: DefinitionParams):
     Percorso ricostruito: {src_path}/../refs/{filename}
 
     Funziona solo se --src e' stato passato al server.
+
+    Cmd+Click su '- file: streams/x.yml' (PGE #290) apre il documento
+    importato, risolto sulla cartella del master: questo non chiede --src.
     """
     uri = params.text_document.uri
     if not is_pge_file(uri):
-        return None
-    if not _src_path:
         return None
 
     text = _get_document_text(server, uri)
@@ -722,6 +772,18 @@ def handle_definition(params: DefinitionParams):
         return None
 
     line = lines[line_n]
+    found = _file_import_target(uri, line)
+    if found is not None:
+        return Location(
+            uri=found[2].as_uri(),
+            range=Range(
+                start=Position(line=0, character=0),
+                end=Position(line=0, character=0),
+            ),
+        )
+
+    if not _src_path:
+        return None
     stripped = line.strip()
 
     # Controlla che la riga sia 'sample: ...' ed estrae il nome file.
@@ -809,7 +871,8 @@ def _compute_and_publish(uri: str, text: str, use_cache: bool) -> None:
             server.publish_diagnostics(uri, cached[1])
             return
 
-    diagnostics = _diagnostic_provider.get_diagnostics(text)
+    diagnostics = _diagnostic_provider.get_diagnostics(
+        text, _document_path(uri))
     with _diag_lock:
         _diag_cache[uri] = (text, diagnostics)
 

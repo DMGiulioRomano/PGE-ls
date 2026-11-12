@@ -38,14 +38,10 @@ from lsprotocol.types import (
 )
 
 from granular_ls.envelope_shapes import (
-    VALID_INTERP_TYPES,
-    compact_block_positions,
     contains_math_expression,
     envelope_y_paths,
     is_bp_group,
-    is_bp_group_candidate,
     is_loop_block,
-    is_valid_point,
     normalize_engine_values,
 )
 from granular_ls.schema_bridge import (
@@ -58,9 +54,9 @@ from granular_ls.voice_strategies import (
     CHORD_INTERVALS,
     get_strategy_spec,
 )
-from granular_ls.time_distributions import (
-    check_time_distribution,
-    describe_issue,
+from granular_ls.envelope_guards import (
+    check_envelope_shape,
+    check_voice_kwarg,
 )
 from granular_ls.read_direction import (
     EXCLUSIVE_HINT,
@@ -89,6 +85,16 @@ from granular_ls.range_unit import (
     fmt_bound,
     is_relative,
     value_label,
+)
+from granular_ls.stream_files import (
+    FILE_KEY,
+    PLACEMENT_KEYS,
+    default_stream_id,
+    extra_keys,
+    import_problem,
+    resolve_import_path,
+    scalar_text,
+    value_span,
 )
 from granular_ls.pitch_units import (
     PITCH_UNIT_KEYS,
@@ -293,6 +299,19 @@ class DiagnosticProvider:
             if domain is not None:
                 self._value_domains[path] = domain
 
+        # `voices.num_voices` e `voices.scatter`, che hanno i bound in
+        # `GRANULAR_PARAMETERS` e nessuno spec: il motore li passa a
+        # `parse_parameter` come gli altri, quindi un breakpoint fuori bound
+        # ferma il render allo stesso modo. Nella stessa mappa, non in un
+        # terzo controllo: il loro dominio era letto solo da un ramo che
+        # faceva `float(val_str)` e su un envelope passava oltre in silenzio
+        # (issue #59). Qui lo leggono insieme la fase 4 sugli scalari e la
+        # fase 5 sulle Y.
+        for param_name in VOICE_ENVELOPE_KEYS:
+            domain = bridge.get_raw_value_domain(param_name)
+            if domain is not None:
+                self._value_domains['voices.' + param_name] = domain
+
         # Le chiavi `<param>_range_unit` (PGE #267), dal campo dello schema.
         # La chiave scritta e lasciata vuota la segnala `_check_missing_values`
         # come ogni altra chiave stringa: il motore non la legge come assente.
@@ -316,19 +335,27 @@ class DiagnosticProvider:
             if p.is_smart and path not in contesto
         )
 
-    def get_diagnostics(self, document_text: str) -> List[Diagnostic]:
+    def get_diagnostics(self, document_text: str,
+                        document_path: Optional[str] = None) -> List[Diagnostic]:
         """
         Analizza il documento e ritorna tutti i diagnostici trovati.
+
+        Args:
+            document_path: il path del documento su disco, se c'e'. Serve
+                solo alle voci `file:` (PGE #290), il cui path e' relativo
+                alla cartella del master: senza, la fase 21 controlla la
+                voce ma non il file che importa.
 
         Returns:
             Lista di Diagnostic LSP. Mai None. Mai eccezioni.
         """
         try:
-            return self._analyze(document_text)
+            return self._analyze(document_text, document_path)
         except Exception:
             return []
 
-    def _analyze(self, document_text: str) -> List[Diagnostic]:
+    def _analyze(self, document_text: str,
+                 document_path: Optional[str] = None) -> List[Diagnostic]:
         if not document_text:
             return []
 
@@ -344,14 +371,27 @@ class DiagnosticProvider:
 
         diagnostics = []
 
+        # Le voci `- file: <path>` (PGE #290): scansione unica riusata dalla
+        # fase 3, dalla 3b e dalla 21. Una voce `file:` non e' uno stream
+        # scritto: `stream_id` ha un default e `sample` sta nel file.
+        file_entries = self._scan_file_entries(lines, streams)
+        file_starts = frozenset(e['start'] for e in file_entries)
+
         # Fase 2: controllo chiavi duplicate nello stesso stream.
         diagnostics.extend(self._check_duplicate_keys(lines, streams))
 
         # Fase 3: controllo campi obbligatori per ogni stream.
-        diagnostics.extend(self._check_mandatory_stream_fields(lines, streams))
+        diagnostics.extend(self._check_mandatory_stream_fields(
+            lines, [s for s in streams if s[0] not in file_starts]))
 
         # Fase 3b: parametri numerici senza valore.
-        diagnostics.extend(self._check_missing_values(document_text))
+        diagnostics.extend(self._check_missing_values(
+            document_text, file_starts))
+
+        # Fase 21: le voci `file:` — piazzamento soltanto, il file importato
+        # che esiste e porta uno stream, gli id effettivi duplicati.
+        diagnostics.extend(self._check_file_entries(
+            lines, streams, file_entries, document_path))
 
         # Fase 3c: sbiadisce stream muted e stream non-solo.
         diagnostics.extend(self._check_muted_streams(lines, streams))
@@ -387,16 +427,6 @@ class DiagnosticProvider:
         diagnostics.extend(
             d for d in self._check_envelope_bounds(lines, streams)
             if d.range.start.line not in scaled_lines
-        )
-
-        # Fase 5d: validazione BP group [points, interp] (PGE #64). Non sul
-        # valore di grain.reverse: il motore lo rifiuta prima di costruirne
-        # l'envelope, e dire che l'interp non va manderebbe a correggere la
-        # cosa sbagliata. Lo dice la fase 14.
-        reverse_lines = self._grain_reverse_lines(lines, grain_blocks)
-        diagnostics.extend(
-            d for d in self._check_bp_groups(lines)
-            if d.range.start.line not in reverse_lines
         )
 
         # Fase 5b: validazione grain.envelope (finestratura del grano).
@@ -455,10 +485,13 @@ class DiagnosticProvider:
         # Fase 17: pointer.loop_unit fuori vocabolario (PGE #222).
         diagnostics.extend(self._check_loop_unit(lines, streams))
 
-        # Fase 20: il quinto elemento del formato compatto sotto le chiavi
-        # senza un controllo dedicato — nome, parametri, e la coppia
-        # (parametro, n_reps) che trabocca (PGE #212).
-        diagnostics.extend(self._check_time_distributions(lines, streams))
+        # Fase 20: la forma dell'envelope sotto ogni chiave che il motore
+        # costruisce come envelope e che non ha un controllo dedicato (PGE
+        # #211, #288) — dict, slot interp, corpo vuoto, BP group (PGE #64),
+        # formato compatto con la sua distribuzione temporale (PGE #212),
+        # elemento sconosciuto, interp per punto, kwarg di voices che non e'
+        # un envelope. Il primo problema per chiave, come il motore.
+        diagnostics.extend(self._check_envelope_shapes(lines, streams))
 
         return diagnostics
 
@@ -672,7 +705,9 @@ class DiagnosticProvider:
                     paths.add(f'voices.{dim}.{kwarg_name}')
         return frozenset(paths)
 
-    def _check_missing_values(self, document_text: str) -> List[Diagnostic]:
+    def _check_missing_values(self, document_text: str,
+                              file_starts: 'frozenset[int]' = frozenset(),
+                              ) -> List[Diagnostic]:
         """
         Segnala chiavi scritte senza valore quando un valore e' obbligatorio.
 
@@ -718,6 +753,10 @@ class DiagnosticProvider:
         # Stack di (yaml_path_prefix, indent_del_blocco)
         block_stack: List[Tuple[str, int]] = []
         in_stream: bool = False
+        # Riga del marcatore dello stream corrente: in una voce `file:`
+        # (PGE #290) `stream_id: null` vale come assente, quindi la chiave
+        # vuota non e' un valore mancante.
+        stream_start: int = -1
 
         i = 0
         while i < len(lines):
@@ -733,6 +772,7 @@ class DiagnosticProvider:
             if leading == 2 and (stripped.startswith('- ') or stripped == '-'):
                 block_stack.clear()
                 in_stream = True
+                stream_start = i
                 if stripped.startswith('- '):
                     stripped = stripped[2:].strip()
                     leading = 4  # contenuto inline trattato come indent 4
@@ -779,6 +819,12 @@ class DiagnosticProvider:
                         severity=DiagnosticSeverity.Error,
                         source=SOURCE,
                     ))
+
+            elif (current_prefix is None and key == 'stream_id'
+                  and stream_start in file_starts):
+                # Voce `file:`: `stream_id:` vuoto e' il default, il nome
+                # del file (PGE #290, regola 4).
+                pass
 
             elif current_prefix is None and key in self._STREAM_VALUE_REQUIRED:
                 # Campo obbligatorio stream senza valore
@@ -872,11 +918,14 @@ class DiagnosticProvider:
         `outside_domain`, quindi gli override dinamici del motore (il minimo
         di `grain.duration` è un campione, non lo `0.001` del registro), il
         pavimento senza tetto di `density` (#51) e l'esclusione delle
-        posizioni che `loop_unit` riscala restano come sono. La chiave si risolve per path, non per nome locale: `duration`
+        posizioni che `loop_unit` riscala restano come sono — e dentro ci sono
+        anche `voices.num_voices` e `voices.scatter`, che nella mappa entrano
+        dai soli bound perche' uno spec non l'hanno (issue #59). La chiave si
+        risolve per path, non per nome locale: `duration`
         dello stream non prende i bound di `grain.duration`. Chi non ha un
-        dominio generico non si misura qui — il blocco pitch, i `loop_*`, le
-        voices, la `curve` della finestra — e `deviation_probability` non ci
-        arriva affatto: le sue Y sono probabilita' in scala 0-100, non valori
+        dominio generico non si misura qui — il blocco pitch, i `loop_*`, i
+        kwarg delle strategy, la `curve` della finestra — e
+        `deviation_probability` non ci arriva affatto: le sue Y sono probabilita' in scala 0-100, non valori
         del parametro omonimo, e il suo corpo lo giudica la fase 15.
 
         Ancoraggio: la riga della Y, una diagnostica per ogni Y fuori. Uno
@@ -1204,6 +1253,225 @@ class DiagnosticProvider:
                         keys[key] = value
             streams.append((start, end, keys))
         return streams
+
+    # -------------------------------------------------------------------------
+    # LO STREAM COME FILE (PGE #290)
+    # -------------------------------------------------------------------------
+
+    _KEY_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:(.*)$')
+
+    def _scan_file_entries(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+    ) -> List[dict]:
+        """Le voci della lista `streams:` che importano con `file:`.
+
+        Per ogni voce le chiavi *dirette* — quella sulla riga del trattino e
+        quelle all'indentazione del suo contenuto — con la loro riga, perche'
+        `_find_stream_blocks` raccoglie anche le chiavi annidate, e qui una
+        `duration` dentro `grain:` non e' una chiave della voce.
+
+        Ritorna dict con: start, end, keys ([(chiave, riga, raw)] nell'ordine
+        scritto), file_line, file_raw.
+        """
+        entries = []
+        for start, end, _keys in streams:
+            dash = lines[start]
+            leading = len(dash) - len(dash.lstrip())
+            content_indent = leading + 2
+            direct = []
+            for n in range(start, end + 1):
+                raw = lines[n]
+                stripped = raw.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                indent = len(raw) - len(raw.lstrip())
+                if n == start:
+                    if not stripped.startswith('- '):
+                        continue
+                    stripped = stripped[2:].lstrip()
+                elif indent != content_indent:
+                    continue
+                m = self._KEY_RE.match(stripped)
+                if m:
+                    direct.append((m.group(1), n, m.group(2)))
+            file_keys = [(k, n, raw) for k, n, raw in direct if k == FILE_KEY]
+            if not file_keys:
+                continue
+            _, file_line, file_raw = file_keys[0]
+            entries.append({
+                'start': start, 'end': end, 'keys': direct,
+                'file_line': file_line, 'file_raw': file_raw,
+            })
+        return entries
+
+    def _check_file_entries(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+        entries: List[dict],
+        document_path: Optional[str],
+    ) -> List[Diagnostic]:
+        """Le regole delle voci `file:` (mirror di `resolve_stream_files`).
+
+        - Regola 4: accanto a `file:` solo il piazzamento; ogni altra chiave
+          e' un errore (`StreamFileKeyError`), sulla sua riga.
+        - `file:` vuole il path di un documento YAML (`InvalidFieldValueError`
+          del motore su un valore che non e' una stringa non vuota).
+        - Regole 2, 3, 8: con il path del master noto, il file importato
+          deve esistere, leggersi, e portare esattamente uno stream senza
+          `file:` dentro.
+        - Regola 7: lo `stream_id` effettivo non si ripete, se almeno una
+          delle voci che lo condividono e' `file:`.
+        """
+        diagnostics: List[Diagnostic] = []
+        consentite = ', '.join(PLACEMENT_KEYS)
+
+        for e in entries:
+            # Regola 4: prima del file, come nel motore — l'errore e' nel
+            # master, e si corregge anche se il file non c'e'.
+            for key in extra_keys([k for k, _, _ in e['keys']]):
+                n = next(n for k, n, _ in e['keys'] if k == key)
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(n),
+                    message=(
+                        f"'{key}' non sta accanto a 'file:': il master tiene "
+                        f"solo il piazzamento dello stream ({consentite}). "
+                        f"Il resto si scrive nel file importato "
+                        f"(StreamFileKeyError, PGE #290)."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+
+            n = e['file_line']
+            valore = self._file_value(lines, n, e['file_raw'])
+            if valore is None:
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(n),
+                    message=(
+                        "'file:' vuole il path di un documento YAML con un "
+                        "solo stream, relativo alla cartella del master."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+                continue
+
+            if not document_path:
+                continue
+            target = resolve_import_path(document_path, valore)
+            problema = import_problem(target)
+            if problema is None:
+                continue
+            span = value_span(lines[n])
+            rng = (Range(start=Position(line=n, character=span[0]),
+                         end=Position(line=n, character=span[1]))
+                   if span else self._line_range(n))
+            diagnostics.append(Diagnostic(
+                range=rng,
+                message=f"File importato '{valore}': {problema}.",
+                severity=DiagnosticSeverity.Error,
+                source=SOURCE,
+            ))
+
+        diagnostics.extend(self._check_effective_ids(lines, streams, entries))
+        return diagnostics
+
+    def _file_value(self, lines: List[str], n: int,
+                    raw: str) -> Optional[str]:
+        """Il path scritto in `file:`, o None se non e' una stringa non vuota.
+
+        Mirror di `isinstance(voce['file'], str) and voce['file']`: un numero,
+        una lista, un mapping o il valore vuoto non sono un path. Un valore a
+        blocchi sotto la chiave (una lista, un mapping) non e' una stringa.
+        """
+        testo = raw.strip()
+        if not testo or testo.startswith('#'):
+            return None
+        try:
+            letto = yaml.safe_load(testo)
+        except yaml.YAMLError:
+            letto = scalar_text(raw)
+        if not isinstance(letto, str) or not letto:
+            return None
+        return letto
+
+    def _check_effective_ids(
+        self, lines: List[str],
+        streams: List[Tuple[int, int, dict]],
+        entries: List[dict],
+    ) -> List[Diagnostic]:
+        """Regola 7: uno `stream_id` effettivo condiviso con una voce `file:`.
+
+        L'id effettivo di una voce `file:` e' il suo `stream_id`, o il nome
+        del file senza estensione; quello di uno stream scritto e' il suo
+        `stream_id`. Le voci senza id non partecipano, come nel motore.
+        Limite: l'id si confronta com'e' scritto, senza le espressioni
+        matematiche che il motore valuta prima (`01` e `1` non collidono).
+        """
+        if not entries:
+            return []
+        per_start = {e['start']: e for e in entries}
+        per_id: Dict[str, List[Tuple[int, Optional[str]]]] = {}
+        for start, _end, _keys in streams:
+            e = per_start.get(start)
+            if e is not None:
+                sid = next((scalar_text(raw) for k, _, raw in e['keys']
+                            if k == 'stream_id'), '')
+                valore = self._file_value(lines, e['file_line'], e['file_raw'])
+                if not sid and valore:
+                    sid = default_stream_id(valore)
+                file_scritto = valore or ''
+            else:
+                sid = self._direct_stream_id(lines, start)
+                file_scritto = None
+            if sid:
+                per_id.setdefault(sid, []).append((start, file_scritto))
+
+        diagnostics = []
+        for sid, voci in per_id.items():
+            if len(voci) < 2 or all(f is None for _, f in voci):
+                continue
+            for start, file_scritto in voci:
+                altre = [s for s, _ in voci if s != start]
+                origine = (f"importato da '{file_scritto}'"
+                           if file_scritto is not None else 'scritto nel master')
+                dove = (f"alla riga {altre[0] + 1}" if len(altre) == 1 else
+                        "alle righe " + ', '.join(str(s + 1) for s in altre))
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(start),
+                    message=(
+                        f"stream_id effettivo '{sid}' ({origine}) ripetuto "
+                        f"{dove}: "
+                        f"i due stem avrebbero lo stesso nome. Una voce "
+                        f"'file:' senza stream_id prende il nome del file "
+                        f"(StreamFileDuplicateIdError, PGE #290)."
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
+        return diagnostics
+
+    def _direct_stream_id(self, lines: List[str], start: int) -> str:
+        """Lo `stream_id` diretto di uno stream scritto nel master, o ''."""
+        dash = lines[start]
+        content_indent = len(dash) - len(dash.lstrip()) + 2
+        for n in range(start, len(lines)):
+            raw = lines[n]
+            stripped = raw.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            if n == start:
+                stripped = stripped[2:].lstrip() if stripped.startswith('- ') else ''
+            elif indent < content_indent:
+                break
+            elif indent != content_indent:
+                continue
+            m = self._KEY_RE.match(stripped)
+            if m and m.group(1) == 'stream_id':
+                return scalar_text(m.group(2))
+        return ''
 
     def _check_muted_streams(
         self, lines: List[str],
@@ -1683,87 +1951,6 @@ class DiagnosticProvider:
             ))
         return diagnostics
 
-    def _check_bp_groups(self, lines: List[str]) -> List[Diagnostic]:
-        """
-        Valida i BP group [points, interp] (PGE issue #64).
-
-        Un BP group avvolge un run di breakpoint dichiarando l'interpolazione
-        dell'intera macrozona: [[[t, v], ...], 'interp']. Regole (identiche
-        a EnvelopeBuilder._expand_bp_group in PGE):
-
-          - interp deve essere in VALID_INTERP_TYPES (linear/cubic/step),
-            altrimenti il motore solleva InvalidFieldValueError;
-          - la zona deve avere almeno 2 punti (n punti -> n-1 segmenti
-            interni), altrimenti ValueError;
-          - i punti devono essere [t, v] o [t, v, type].
-
-        Cerca i gruppi sia nella forma diretta 'key: [points, interp]' sia
-        come item di envelope misti (inline o block-style '- [...]').
-        Parsing tollerante via yaml.safe_load: righe non parseabili
-        (es. flow spezzato su piu' righe) vengono ignorate.
-        """
-        diagnostics: List[Diagnostic] = []
-
-        for n, line in enumerate(lines):
-            stripped = line.strip()
-            if not stripped or stripped.startswith('#'):
-                continue
-            if stripped.startswith('- '):
-                stripped = stripped[2:].strip()
-
-            # Estrae il valore lista: 'key: [...]' oppure item '- [...]'.
-            if stripped.startswith('['):
-                value_str = stripped
-            else:
-                m = re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*:\s*(\[.*)$',
-                             stripped)
-                if not m:
-                    continue
-                value_str = m.group(1)
-
-            try:
-                parsed = yaml.safe_load(value_str)
-            except Exception:
-                continue
-            if not isinstance(parsed, list):
-                continue
-
-            # Candidati: forma diretta o item di una lista mista.
-            if is_bp_group_candidate(parsed):
-                candidates = [parsed]
-            else:
-                candidates = [item for item in parsed
-                              if is_bp_group_candidate(item)]
-
-            for group in candidates:
-                points, interp = group
-                if not all(is_valid_point(p) for p in points):
-                    message = (
-                        "BP group con punti malformati: ogni punto deve "
-                        "essere [t, v] o [t, v, type] con t, v numerici."
-                    )
-                elif interp not in VALID_INTERP_TYPES:
-                    message = (
-                        f"BP group: interp '{interp}' non valido. "
-                        f"Tipi validi: {', '.join(VALID_INTERP_TYPES)}."
-                    )
-                elif len(points) < 2:
-                    message = (
-                        f"BP group richiede almeno 2 punti, trovati: "
-                        f"{len(points)}. Una zona con meno di 2 punti "
-                        "non ha segmenti interni."
-                    )
-                else:
-                    continue
-                diagnostics.append(Diagnostic(
-                    range=self._line_range(n),
-                    message=message,
-                    severity=DiagnosticSeverity.Error,
-                    source=SOURCE,
-                ))
-
-        return diagnostics
-
     @staticmethod
     def _extract_envelope_y_values(value_str: str) -> List[float]:
         """
@@ -1872,41 +2059,13 @@ class DiagnosticProvider:
                 if m:
                     voices_keys[m.group(1)] = n
 
-            # Valida num_voices e scatter (scalari con bounds dal bridge)
-            for param_name in VOICE_ENVELOPE_KEYS:
-                if param_name not in voices_keys:
-                    continue
-                raw_bounds = self._bridge.get_raw_bounds(param_name)
-                if not raw_bounds:
-                    continue
-                param_line = voices_keys[param_name]
-                raw = lines[param_line]
-                stripped = raw.strip()
-                m = re.match(r'^[a-zA-Z_]\w*\s*:\s*(.+)', stripped)
-                if not m:
-                    continue
-                val_str = m.group(1).strip()
-                # Salta envelope (iniziano con '[') — non validiamo i breakpoints qui
-                if val_str.startswith('['):
-                    continue
-                try:
-                    val = float(val_str)
-                except ValueError:
-                    continue
-                # Un estremo None non limita: `val > None` era un TypeError
-                # che spegneva l'intera diagnostica del documento.
-                min_v = raw_bounds.get('min_val')
-                max_v = raw_bounds.get('max_val')
-                if outside_domain(val, min_v, max_v):
-                    diagnostics.append(Diagnostic(
-                        range=self._line_range(param_line),
-                        message=(
-                            f"`voices.{param_name}` = {val} fuori range "
-                            f"{domain_label(min_v, max_v)}."
-                        ),
-                        severity=DiagnosticSeverity.Error,
-                        source=SOURCE,
-                    ))
+            # `num_voices` e `scatter` non si misurano qui: i loro bound
+            # stanno in `self._value_domains` come quelli di ogni altro
+            # parametro (issue #59), quindi li confrontano la fase 4 sullo
+            # scalare e la fase 5 sulle Y dell'envelope. Il ramo che stava
+            # qui leggeva il registro una terza volta, con un `float()` che
+            # su un envelope alzava `ValueError` e passava oltre: lo stesso
+            # valore dava un Error da scalare e niente da envelope.
 
             # Valida ogni dimensione presente
             for dim in VOICE_DIMENSIONS:
@@ -2965,6 +3124,7 @@ class DiagnosticProvider:
 
             info = {
                 'start': grain_start, 'end': grain_end,
+                'stream_start': stream_start, 'stream_end': stream_end,
                 'unit': None, 'unit_present': False, 'unit_line': None,
                 'has_duration': False, 'duration_scalar': None,
                 'duration_line': None, 'range_line': None,
@@ -3104,7 +3264,9 @@ class DiagnosticProvider:
                 # scrivendo. Tolleranza, come altrove nel provider.
                 continue
 
-            issue = check_read_direction(raw)
+            issue = check_read_direction(
+                raw, self._time_mode_at(lines, block['stream_start'],
+                                        block['stream_end']))
             if issue is None:
                 continue
 
@@ -3119,22 +3281,6 @@ class DiagnosticProvider:
             ))
 
         return diagnostics
-
-    def _grain_reverse_lines(self, lines: List[str],
-                             grain_blocks: List[dict]) -> set:
-        """Le righe che portano il valore di `grain.reverse`: la chiave e,
-        sotto di lei, il valore block-style.
-
-        Servono a chi controlla la forma di un envelope riga per riga senza
-        sapere di che chiave è: su queste righe il motore non costruisce mai
-        niente, perché rifiuta la chiave prima (fase 14).
-        """
-        righe: set = set()
-        for block in grain_blocks:
-            n = block['reverse_line']
-            if n is not None:
-                righe.update(range(n, self._block_end(lines, n, block['end'], 6)))
-        return righe
 
     def _check_deviation_probability(
         self, lines: List[str],
@@ -3171,6 +3317,7 @@ class DiagnosticProvider:
             issue = check_global_value(
                 raw_value,
                 known_keys=self._bridge.get_deviation_probability_keys(),
+                time_mode=self._time_mode_at(lines, stream_start, stream_end),
             )
             if issue is None:
                 continue
@@ -3562,37 +3709,44 @@ class DiagnosticProvider:
         return True, data[key]
 
     # -------------------------------------------------------------------------
-    # FASE 20: DISTRIBUZIONE TEMPORALE DEL CICLO (PGE #212)
+    # FASE 20: LA FORMA DELL'ENVELOPE (PGE #211, #288)
     # -------------------------------------------------------------------------
 
-    def _check_time_distributions(
+    def _check_envelope_shapes(
         self, lines: List[str],
         streams: List[Tuple[int, int, dict]],
     ) -> List[Diagnostic]:
         """
-        Il quinto elemento del formato compatto, sotto ogni chiave che il
-        motore costruisce come envelope e che non ha un controllo suo.
+        La forma di ogni envelope, sotto ogni chiave che il motore costruisce
+        come envelope e che non ha un controllo suo.
 
-        La distribuzione non sa sotto quale parametro sta, quindi i suoi errori
-        sono gli stessi ovunque: un nome fuori registro, parametri fuori dai
-        bound del costruttore, e la coppia `(parametro, n_reps)` che non sta in
-        un float (PGE #212) — `ratio: 10` e `n_reps: 400` legittimi da soli,
-        e insieme un render che non parte — o la cui somma dei pesi non è un
-        numero finito (PGE #219). La regola è in `time_distributions.py`, con
-        l'aritmetica del motore.
+        Da PGE #211 i guard di forma stanno in `EnvelopeBuilder` e valgono per
+        ogni chiave: un BP group con meno di due punti, un `n_reps` booleano,
+        un pattern che torna indietro, una distribuzione temporale fuori
+        registro sono lo stesso errore sotto `density` come sotto
+        `voices.pan.step`. PGE #288 ha aggiunto quelli che vengono prima del
+        builder — la forma dict, lo slot interp del compatto, il corpo vuoto —
+        e il kwarg di una voice strategy che non e' un envelope. La regola, e
+        l'ordine in cui il motore la percorre, e' in `envelope_guards.py`;
+        qui si decide solo dove, e con quale modo temporale.
 
-        Restano fuori le due chiavi che il formato compatto lo validano già
-        per intero, `grain.read_direction` e `deviation_probability`: lì la
-        coppia la guardano i loro moduli, nell'ordine in cui il motore la
-        incontra.
+        Il quinto elemento del formato compatto e' uno di quei guard: la sua
+        diagnostica ha la forma che aveva quando era una fase a se' (la coppia
+        `(parametro, n_reps)` che trabocca, PGE #212, ancorata alla riga del
+        ciclo), ma ora arriva nell'ordine del motore — un `n_reps` sbagliato
+        si dice prima della distribuzione dello stesso ciclo.
 
-        Lo stream si legge come struttura, non riga per riga: le chiavi sono
-        annidate fino a tre livelli (`voices.pan.step`) e un ciclo può stare
-        a metà di una lista block-style, dove la sua riga è l'unica ancora
-        utile. `yaml.compose` dà l'una e l'altra. Uno stream a metà scrittura
-        non si legge e tace, senza spegnere gli altri.
+        Restano fuori le due chiavi che hanno un mirror proprio con la loro
+        semantica davanti, `grain.read_direction` e `deviation_probability`, e
+        i perdenti di un gruppo esclusivo, che il motore non costruisce.
 
-        Ancoraggio: la riga del ciclo. Il valore incriminato è nel messaggio.
+        Lo stream si legge come struttura (`_compose_stream`): le chiavi sono
+        annidate fino a tre livelli e un elemento sta a meta' di una lista
+        block-style, dove la sua riga e' l'unica ancora utile. Uno stream a
+        meta' scrittura non si legge e tace, senza spegnere gli altri.
+
+        Ancoraggio: la riga del nodo che il motore riporta — lo slot, il
+        punto, l'elemento — o del valore intero quando e' lui il problema.
         """
         diagnostics: List[Diagnostic] = []
 
@@ -3602,31 +3756,62 @@ class DiagnosticProvider:
                 continue
             stream_node, costruisci = letto
             scartati = self._exclusive_losers(stream_node)
+            time_mode = self._stream_time_mode(stream_node, costruisci)
 
             for path, value_node in self._envelope_value_nodes(stream_node,
                                                                costruisci):
                 if path in scartati:
                     continue  # mai costruito: basta il Warning del gruppo
-                for ciclo, node in self._compact_block_nodes(value_node,
-                                                             costruisci):
-                    if len(ciclo) < 5:
-                        continue  # distribuzione omessa: `linear`, sempre valida
-                    issue = check_time_distribution(ciclo[4], ciclo[2])
-                    if issue is None:
-                        continue
-                    valore = ciclo if issue.kind == 'overflow' else ciclo[4]
-                    diagnostics.append(Diagnostic(
-                        range=self._line_range(
-                            stream_start + node.start_mark.line),
-                        message=(
-                            f"'{path}': {valore!r} non è ammesso. "
-                            f"{describe_issue(issue)}"
-                        ),
-                        severity=DiagnosticSeverity.Error,
-                        source=SOURCE,
-                    ))
+                valore = costruisci(value_node)
+                if self._is_voice_kwarg_path(path):
+                    issue = check_voice_kwarg(valore, time_mode)
+                elif path == 'grain.envelope.curve':
+                    # `_curve_envelope` costruisce la curva senza scala.
+                    issue = check_envelope_shape(valore, 'absolute')
+                else:
+                    issue = check_envelope_shape(valore, time_mode)
+                if issue is None:
+                    continue
+                node = self._node_at(value_node, issue.path) or value_node
+                diagnostics.append(Diagnostic(
+                    range=self._line_range(
+                        stream_start + node.start_mark.line),
+                    message=(
+                        f"'{path}': {issue.value!r} non è ammesso. "
+                        f"{issue.hint}"
+                    ),
+                    severity=DiagnosticSeverity.Error,
+                    source=SOURCE,
+                ))
 
         return diagnostics
+
+    def _time_mode_at(self, lines: List[str], start: int, end: int) -> str:
+        """Il `time_mode` dello stream fra `start` e `end`, letto dal testo
+        (per le fasi che non compongono lo stream); `absolute` se manca."""
+        riga = self._find_key_line_at_indent(lines, start, end, 'time_mode', 4)
+        if riga is None:
+            return 'absolute'
+        found, valore = self._read_key_value(lines, riga, end)
+        if not found:
+            return 'normalized'  # non si legge: il verso in cui si tace
+        return valore if isinstance(valore, str) else 'absolute'
+
+    @staticmethod
+    def _is_voice_kwarg_path(path: str) -> bool:
+        """`voices.<asse>.<kwarg>`: il kwarg di una strategy, che il motore
+        legge con `_parse_strategy_kwarg` invece che con il parser."""
+        parti = path.split('.')
+        return (len(parti) == 3 and parti[0] == 'voices'
+                and parti[1] in VOICE_DIMENSIONS)
+
+    def _stream_time_mode(self, stream_node, costruisci) -> str:
+        """Il `time_mode` dello stream, `absolute` se non e' scritto."""
+        for key, value_node in self._mapping_items(stream_node):
+            if key == 'time_mode':
+                valore = costruisci(value_node)
+                return valore if isinstance(valore, str) else 'absolute'
+        return 'absolute'
 
     @staticmethod
     def _compose_stream(lines: List[str], start: int, end_incl: int):
@@ -3780,40 +3965,6 @@ class DiagnosticProvider:
         if 'states' in chiavi or ('from' in chiavi and 'to' in chiavi):
             if 'curve' in chiavi:
                 yield 'grain.envelope.curve', chiavi['curve']
-
-    @staticmethod
-    def _compact_block_nodes(value_node, costruisci):
-        """
-        `(ciclo, nodo)` per ogni ciclo compatto che il builder espande in
-        questo valore, con il ciclo come lo vede il motore.
-
-        Il valore si guarda dopo la conversione delle stringhe numeriche, come
-        lo consegna il `Generator`: `"10"` arriva `int` e `"10.0"` `float`, e
-        qui la grafia decide dove sta il bordo. Un ciclo con dentro
-        un'espressione fra parentesi invece si salta intero: il suo esito non
-        si prevede, e un `ratio: (5*2)` letto come stringa sarebbe un
-        «parametro non valido» su YAML che rende.
-        """
-        valore = normalize_engine_values(costruisci(value_node))
-        posizioni = compact_block_positions(valore)
-        if not posizioni:
-            return
-
-        lista, lista_node = valore, value_node
-        if isinstance(valore, dict):
-            lista = valore['points']
-            lista_node = next(
-                (n for k, n in DiagnosticProvider._mapping_items(value_node)
-                 if k == 'points'), None)
-        if not isinstance(lista_node, yaml.SequenceNode):
-            return
-
-        for pos in posizioni:
-            ciclo = lista if pos is None else lista[pos]
-            node = lista_node if pos is None else lista_node.value[pos]
-            if contains_math_expression(ciclo):
-                continue
-            yield ciclo, node
 
     def _scaled_unit_suppressed_lines(self, grain_blocks: List[dict]) -> 'frozenset[int]':
         """Righe di duration/duration_range dentro un blocco grain in un'unità

@@ -233,9 +233,14 @@ def check_time_distribution(spec: Any,
     Returns:
         None se il motore lo accetterebbe, altrimenti il `TimeDistIssue`.
     """
-    nome = spec.get('type', DEFAULT_DISTRIBUTION) if isinstance(spec, dict) else spec
-    if nome is None:
+    # Il default vale per lo spec omesso, non per un `type` scritto null:
+    # `{type: null}` il motore lo rifiuta sul nome (PGE #211), come `{type: 5}`.
+    if spec is None:
         nome = DEFAULT_DISTRIBUTION
+    elif isinstance(spec, dict):
+        nome = spec.get('type', DEFAULT_DISTRIBUTION)
+    else:
+        nome = spec
     if not isinstance(nome, str) or nome.lower() not in TIME_DISTRIBUTION_NAMES:
         return TimeDistIssue(kind='name', value=spec)
 
