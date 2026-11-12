@@ -4772,7 +4772,11 @@ class TestDistribuzioneTemporaleDelCiclo:
         yaml = _stream_yaml(f"    density: {{points: {_CICLO_ISSUE}}}\n")
         assert len(self._overflow(provider, yaml)) == 1
 
-    def test_due_cicli_due_diagnostiche(self, bridge):
+    def test_due_cicli_il_primo_che_il_motore_incontra(self, bridge):
+        """Il motore si ferma al primo ciclo che trabocca: il secondo lo dira'
+        quando il primo sara' corretto. Due diagnostiche erano due errori di
+        render promessi dove ne arriva uno, e da PGE #211 la distribuzione e'
+        un guard di forma come gli altri, nello stesso ordine (fase 20)."""
         provider = DiagnosticProvider(bridge)
         yaml = _stream_yaml(
             "    density:\n"
@@ -4781,7 +4785,18 @@ class TestDistribuzioneTemporaleDelCiclo:
             "{type: geometric, ratio: 10}]\n"
         )
         righe = sorted(d.range.start.line for d in self._overflow(provider, yaml))
-        assert righe == [6, 7]
+        assert righe == [6]
+
+    def test_il_secondo_ciclo_quando_il_primo_e_corretto(self, bridge):
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density:\n"
+            f"      - {_ciclo(n_reps=4)}\n"
+            "      - [[[0, 5], [100, 50]], 20.0, 400, 'linear', "
+            "{type: geometric, ratio: 10}]\n"
+        )
+        righe = sorted(d.range.start.line for d in self._overflow(provider, yaml))
+        assert righe == [7]
 
     # --- il quinto elemento sotto le chiavi generiche -----------------------
 
@@ -5216,3 +5231,259 @@ class TestVoicesRawBoundsSenzaTetto:
             "      num_voices: 500\n"))
         assert [d for d in diags if d.severity == DiagnosticSeverity.Error
                 and 'num_voices' in d.message] == []
+
+
+# =============================================================================
+# La forma dell'envelope sotto ogni chiave (PGE #211, #288) — fase 20
+# =============================================================================
+
+@pytest.fixture
+def shape_bridge():
+    """Le chiavi di primo livello e dei blocchi che la tabella del motore
+    percorre; pitch, voices e la curva della finestra non passano dal bridge."""
+    raw = {
+        'specs': [
+            make_raw_spec('density', 'density', default=None),
+            make_raw_spec('volume', 'volume', default=0.0),
+            make_raw_spec('grain_duration', 'grain.duration', default=0.05),
+            make_raw_spec('grain_duration_range', 'grain.duration_range',
+                          default=0.0),
+            make_raw_spec('speed_ratio', 'pointer.speed_ratio', default=1.0),
+        ],
+        'bounds': {
+            'density': make_raw_bounds(0.01, None),
+            'volume': make_raw_bounds(-120.0, 12.0),
+            'grain_duration': make_raw_bounds(0.001, 10.0),
+            'grain_duration_range': make_raw_bounds(0.0, 10.0),
+            'speed_ratio': make_raw_bounds(-100.0, 100.0),
+        },
+    }
+    return SchemaBridge(raw)
+
+
+def _flow(value) -> str:
+    """Il corpo in flow YAML: JSON lo e', `true` compreso."""
+    import json
+    return json.dumps(value)
+
+
+# Ogni riga: come si scrive il corpo sotto la chiave (indent 4), una y legale.
+_CHIAVI_FORMA = {
+    'density': (lambda c: f"    density: {c}\n", 10),
+    'volume': (lambda c: f"    volume: {c}\n", -6),
+    'grain.duration': (
+        lambda c: f"    grain:\n      duration: {c}\n", 0.05),
+    'grain.duration_range': (
+        lambda c: f"    grain:\n      duration_range: {c}\n", 0.01),
+    'pointer.speed_ratio': (
+        lambda c: f"    pointer:\n      speed_ratio: {c}\n", 1),
+    'pitch.semitones': (
+        lambda c: f"    pitch:\n      semitones: {c}\n", 0),
+    'voices.num_voices': (
+        lambda c: f"    voices:\n      num_voices: {c}\n", 2),
+    'voices.scatter': (
+        lambda c: f"    voices:\n      num_voices: 2\n      scatter: {c}\n",
+        0.5),
+    'voices.pan.step': (
+        lambda c: ("    voices:\n      num_voices: 2\n      pan:\n"
+                   f"        strategy: step\n        step: {c}\n"), 10),
+    'grain.envelope.curve': (
+        lambda c: ("    grain:\n      envelope:\n        from: hanning\n"
+                   f"        to: bartlett\n        curve: {c}\n"), 0.5),
+}
+
+
+def _corpi_forma(y):
+    """La tabella di #211 (tests/core/test_stream_guard_di_forma.py nel
+    motore), piu' i corpi che #288 ha portato sotto il builder."""
+    pat = [[0, y], [100, y]]
+    return {
+        'bp_group_un_punto': [[[[0, y]], 'linear'], [1.0, y]],
+        'n_reps_zero': [pat, 1.0, 0],
+        'n_reps_booleano': [pat, 1.0, True],
+        'end_time_booleano': [pat, True, 2],
+        'x_oltre_cento': [[[0, y], [150, y]], 1.0, 2],
+        'x_indietro': [[[100, y], [0, y]], 1.0, 2],
+        'y_non_numerica': [[[0, 'a'], [100, y]], 1.0, 2],
+        'y_booleana': [[[0, True], [100, y]], 1.0, 2],
+        'distribuzione_ignota': [pat, 1.0, 2, 'linear', 'banana'],
+        'interp_per_punto_ignoto': [[0, y, 'banana'], [1.0, y]],
+        'dict_senza_points': {'type': 'linear'},
+        'dict_points_null': {'points': None},
+        'dict_type_ignoto': {'type': 'banana', 'points': [[0, y], [1, y]]},
+        'dict_vuoto': {'points': []},
+        'lista_vuota': [],
+        'slot_interp_ignoto': [pat, 1.0, True, 'cubicc'],
+        'elemento_sconosciuto': [[0, y], [1, y], 'cycle'],
+    }
+
+
+def _shape_errors(provider, yaml, campo):
+    return [d for d in provider.get_diagnostics(yaml)
+            if d.severity == DiagnosticSeverity.Error
+            and d.message.startswith(f"'{campo}':")
+            and 'non è ammesso' in d.message]
+
+
+class TestFormaEnvelopeSottoOgniChiave:
+    """
+    Da PGE #211 i guard di forma valgono sotto ogni chiave che il motore
+    costruisce come envelope, non solo sotto `grain.read_direction`: qui erano
+    un falso verde. La tabella e' quella del motore, chiave per chiave.
+    """
+
+    @pytest.mark.parametrize('difetto', list(_corpi_forma(0)))
+    @pytest.mark.parametrize('campo', list(_CHIAVI_FORMA))
+    def test_un_errore_che_nomina_la_chiave(self, shape_bridge, campo,
+                                            difetto):
+        scrivi, y = _CHIAVI_FORMA[campo]
+        corpo = _corpi_forma(y)[difetto]
+        if campo == 'voices.pan.step' and difetto == 'lista_vuota':
+            pytest.skip("[] sotto un kwarg non e' un envelope: lo dice "
+                        "test_kwarg_che_non_e_un_envelope")
+        yaml = _stream_yaml(scrivi(_flow(corpo)))
+        errs = _shape_errors(DiagnosticProvider(shape_bridge), yaml, campo)
+        assert len(errs) == 1, [d.message for d in errs]
+
+    @pytest.mark.parametrize('campo', list(_CHIAVI_FORMA))
+    def test_il_corpo_ben_formato_resta_valido(self, shape_bridge, campo):
+        """La controprova: la stessa forma, scritta bene, tace."""
+        scrivi, y = _CHIAVI_FORMA[campo]
+        corpo = [[[0, y], [50, y], [100, y]], 1.0, 2, 'linear',
+                 'exponential']
+        yaml = _stream_yaml(scrivi(_flow(corpo)))
+        assert _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             campo) == []
+
+    @pytest.mark.parametrize('corpo', [
+        {'type': 'Step', 'points': [[0, 1], [1, 2]]},
+        {'type': ' cubic ', 'points': [[0, 1], [1, 2]]},
+        [[[0, 1], [100, 2]], 1.0, 2, 'Step'],
+        [[[0, 1], [100, 2]], 1.0, 2, ''],
+    ])
+    def test_la_factory_non_bada_a_maiuscole_e_spazi(self, shape_bridge,
+                                                     corpo):
+        """Uno specchio scritto alla lettera darebbe un falso rosso qui: la
+        factory del motore legge `Step` e ' cubic ' (PGE #299)."""
+        yaml = _stream_yaml(f"    density: {_flow(corpo)}\n")
+        assert _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             'density') == []
+
+    def test_l_ancora_e_la_riga_dell_elemento(self, shape_bridge):
+        yaml = _stream_yaml(
+            "    density:\n"
+            "      - [0, 10]\n"
+            "      - [[[0, 10]], linear]\n"
+            "      - [1.0, 10]\n"
+        )
+        errs = _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             'density')
+        assert [d.range.start.line for d in errs] == [7]
+        assert 'almeno 2 punti' in errs[0].message
+
+    def test_l_ancora_e_la_riga_dello_slot(self, shape_bridge):
+        yaml = _stream_yaml(
+            "    density:\n"
+            "      type: banana\n"
+            "      points: [[0, 10], [1, 10]]\n"
+        )
+        errs = _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             'density')
+        assert [d.range.start.line for d in errs] == [6]
+
+    def test_un_errore_per_chiave_il_primo(self, shape_bridge):
+        """Il motore si ferma al primo guard: un `n_reps` zero prima di una
+        distribuzione ignota nello stesso ciclo."""
+        yaml = _stream_yaml(
+            "    density: [[[0, 10], [100, 10]], 1.0, 0, linear, banana]\n")
+        errs = _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             'density')
+        assert len(errs) == 1
+        assert 'ripetizioni' in errs[0].message
+
+    @pytest.mark.parametrize('corpo', ['[1, 2, 3]', '[]', '{a: 1}'])
+    def test_kwarg_che_non_e_un_envelope(self, shape_bridge, corpo):
+        yaml = _stream_yaml(
+            "    voices:\n      num_voices: 2\n      pan:\n"
+            f"        strategy: step\n        step: {corpo}\n")
+        errs = _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             'voices.pan.step')
+        assert len(errs) == 1
+        assert 'voice strategy' in errs[0].message
+
+    def test_lista_vuota_sotto_un_parametro_e_il_corpo_vuoto(self,
+                                                             shape_bridge):
+        yaml = _stream_yaml("    density: []\n")
+        errs = _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             'density')
+        assert len(errs) == 1
+        assert 'almeno un breakpoint' in errs[0].message
+
+    def test_la_curva_senza_transizione_non_si_costruisce(self, shape_bridge):
+        """Con una finestra sola il motore non legge `curve`."""
+        yaml = _stream_yaml(
+            "    grain:\n      envelope:\n        name: hanning\n"
+            "        curve: []\n")
+        assert _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             'grain.envelope.curve') == []
+
+    def test_un_espressione_tace(self, shape_bridge):
+        yaml = _stream_yaml("    density: [[0, (10/2)], [1, 10], cycle]\n")
+        assert _shape_errors(DiagnosticProvider(shape_bridge), yaml,
+                             'density') == []
+
+    def test_sotto_normalized_il_bordo_tace(self, shape_bridge):
+        """Due compatti `linear` che finiscono allo stesso istante: in tempi
+        assoluti e' un rifiuto certo, sotto la scala il mirror tace."""
+        corpo = ("[[[[0, 10], [100, 10]], 1.0, 4],"
+                 " [[[0, 10], [100, 10]], 1.0, 2]]")
+        assoluto = _stream_yaml(f"    density: {corpo}\n")
+        normalizzato = _stream_yaml(
+            f"    time_mode: normalized\n    density: {corpo}\n")
+        provider = DiagnosticProvider(shape_bridge)
+        assert len(_shape_errors(provider, assoluto, 'density')) == 1
+        assert _shape_errors(provider, normalizzato, 'density') == []
+
+
+class TestLeChiaviDedicatePassanoDalloSpecchioUnico:
+    """`deviation_probability` e `grain.read_direction` tengono la loro
+    semantica davanti, ma la forma dell'envelope e' quella di ogni altra
+    chiave (`envelope_guards`): una copia qui dentro era gia' divergita."""
+
+    def _errs(self, bridge, yaml, campo):
+        return [d for d in DiagnosticProvider(bridge).get_diagnostics(yaml)
+                if d.severity == DiagnosticSeverity.Error
+                and d.message.startswith(f"'{campo}")]
+
+    @pytest.mark.parametrize('corpo', [
+        "[[[0, 10], [100, 20]], 1.0, 2, Step]",
+        "[[[0, 10], [100, 20]], 1.0, 2, '']",
+        "{type: Cubic, points: [[0, 10], [1, 20]]}",
+        "{points: [[[0, 10], [100, 20]], 1.0, 2, banana]}",
+    ])
+    def test_deviation_probability_non_e_piu_severa_del_motore(self, bridge,
+                                                              corpo):
+        yaml = _stream_yaml(f"    deviation_probability:\n"
+                            f"      volume: {corpo}\n")
+        assert self._errs(bridge, yaml, 'deviation_probability') == []
+
+    def test_deviation_probability_vede_l_istante_di_partenza(self, bridge):
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      volume: [[0, 10], [0.5, 20], [[[0, 10], [100, 20]], 0.5, 2]]\n")
+        assert len(self._errs(bridge, yaml, 'deviation_probability')) == 1
+
+    def test_read_direction_vede_l_istante_di_partenza(self, rd_bridge):
+        yaml = _stream_yaml(
+            "    grain:\n"
+            "      read_direction: [[[[0, 1], [100, -1]], 1.0, 4],"
+            " [[[0, 1], [100, -1]], 1.0, 2]]\n")
+        assert len(self._errs(rd_bridge, yaml, 'grain.read_direction')) == 1
+
+    def test_read_direction_sotto_normalized_tace_sul_bordo(self, rd_bridge):
+        yaml = _stream_yaml(
+            "    time_mode: normalized\n"
+            "    grain:\n"
+            "      read_direction: [[[[0, 1], [100, -1]], 1.0, 4],"
+            " [[[0, 1], [100, -1]], 1.0, 2]]\n")
+        assert self._errs(rd_bridge, yaml, 'grain.read_direction') == []

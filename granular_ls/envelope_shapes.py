@@ -214,9 +214,40 @@ def is_loop_block(item) -> bool:
     if len(item) >= 5 and item[4] is not None \
             and not isinstance(item[4], (str, dict)):
         return False
-    if len(item) == 6 and not isinstance(item[5], bool):
+    # `wrap: null` vale il default, come nel motore (`item[5] is not None`):
+    # pretendere il bool anche li' faceva di `[pat, 1, 2, null, null, null]`
+    # un elemento sconosciuto, mentre il motore lo espande.
+    if len(item) == 6 and item[5] is not None \
+            and not isinstance(item[5], bool):
         return False
     return True
+
+
+def is_envelope_like(value) -> bool:
+    """Mirror di `Envelope.is_envelope_like`: le forme che il motore tratta
+    da envelope dove la forma non e' gia' decisa dalla chiave — la scala delle
+    unita' (`scale_raw_param_values`) e i kwarg delle voice strategy
+    (`_parse_strategy_kwarg`, PGE #288).
+
+    Piu' larga del builder: una lista con un qualunque elemento di due voci
+    lo e', e il builder ne giudichera' poi la forma.
+    """
+    if isinstance(value, dict):
+        return 'points' in value
+    if not isinstance(value, list) or not value:
+        return False
+    if is_loop_block(value) or is_bp_group(value):
+        return True
+    for item in value:
+        if isinstance(item, list) and len(item) == 2:
+            return True
+        if is_loop_block(item) or is_bp_group(item):
+            return True
+        if is_3tuple_breakpoint(item):
+            return True
+        if isinstance(item, dict) and 't' in item and 'v' in item:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -316,13 +347,6 @@ def compact_block_positions(body) -> list:
     if is_bp_group(body):
         return []
     return [i for i, item in enumerate(body) if is_loop_block(item)]
-
-
-def compact_blocks(body) -> list:
-    """I cicli compatti che il builder espande in questo corpo, in ordine."""
-    lista = body.get('points') if isinstance(body, dict) else body
-    return [lista if pos is None else lista[pos]
-            for pos in compact_block_positions(body)]
 
 
 def _pattern_y_paths(points, path: tuple) -> list:

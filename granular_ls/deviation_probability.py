@@ -36,34 +36,29 @@ Cosa resta fuori, deliberatamente:
   quelle alza `InvalidParameterError`.
 - **i valori Y fuori da 0-100.** Il motore non li rifiuta: `150` è un
   `AlwaysGate` legittimo, non un errore di scrittura.
-- **i guard specifici di `grain.read_direction`** (percentuali del pattern in
-  `[0, 100]`, `x` monotone, `n_reps` booleano). Verificati: qui il motore li
-  accetta. Sono semantica di quella chiave, non del formato envelope — e
-  replicarli qui segnalerebbe YAML che rende. Se PGE#211 li farà salire nel
-  layer condiviso, questo modulo è il posto dove aggiungerli.
+
+La forma dell'envelope invece non è di questa chiave. Fino a PGE #211 i guard
+sul formato compatto (percentuali del pattern, `n_reps` e `end_time` booleani)
+erano semantica di `grain.read_direction` e qui il motore li accettava; da lì
+vivono in `EnvelopeBuilder` e valgono per ogni chiave, e PGE #288 ha aggiunto
+quelli che vengono prima del builder (la forma dict, lo slot interp del
+compatto, il tipo per punto). Il gate passa il corpo a `create_scaled_envelope`
+come il parser di qualunque altro parametro, quindi qui la forma la giudica lo
+specchio unico, `envelope_guards.check_envelope_shape`, con il `time_mode` dello
+stream. Questo modulo tiene solo cio' che viene prima: l'espressione, la
+stringa, la mappa per-parametro, il corpo vuoto che rifiuta il classificatore
+(PGE #209). Una copia della forma qui dentro e' gia' divergita una volta: era
+alla lettera dove la factory non lo e' (`'Step'`, uno slot interp vuoto,
+`type: Cubic`), e validava lo slot di un compatto che l'envelope non legge.
 """
 
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from granular_ls.envelope_guards import check_envelope_shape
 from granular_ls.envelope_shapes import (
-    VALID_INTERP_TYPES,
-    compact_end_time_ok,
-    compact_n_reps_ok,
     contains_math_expression,
-    is_bp_group,
-    is_breakpoint,
-    is_3tuple_breakpoint,
-    is_loop_block,
-    is_num,
-    is_valid_point,
     normalize_engine_values,
-    pattern_x_goes_forward,
-    pattern_x_in_range,
-)
-from granular_ls.time_distributions import (
-    check_time_distribution,
-    describe_issue,
 )
 
 # La chiave nello YAML: identità del campo in ogni diagnostica.
@@ -85,51 +80,6 @@ EMPTY_HINT = (
 DICT_HINT = (
     "un dict envelope porta i suoi breakpoint sotto `points`. Senza quella "
     "chiave il motore non trova l'envelope e si ferma."
-)
-
-POINTS_HINT = (
-    "i punti di un envelope sono `[t, v]` o `[t, v, type]`, con `t` e `v` "
-    "numerici."
-)
-
-INTERP_HINT = (
-    "interpolazione non riconosciuta: le sole ammesse sono "
-    + ", ".join(f'`{t}`' for t in VALID_INTERP_TYPES) + "."
-)
-
-GROUP_ARITY_HINT = (
-    "un BP group richiede almeno 2 punti: con meno non ha segmenti interni da "
-    "interpolare."
-)
-
-PATTERN_HINT = (
-    "il pattern di un ciclo è una lista non vuota di punti piatti "
-    "(`[x%, y]` o `[x%, y, type]`)."
-)
-
-END_TIME_HINT = (
-    "l'istante di fine del ciclo è un numero positivo e finito: è il tempo "
-    "entro cui le ripetizioni si distribuiscono. `true` non è `1`, e con "
-    "`.inf` o `.nan` non c'è nessun istante in cui finire."
-)
-
-PATTERN_X_HINT = (
-    "la prima coordinata di un punto del pattern è una percentuale del ciclo "
-    "e sta in [0, 100]. Fuori da lì il ciclo sfonda i propri confini: sopra "
-    "100 il ciclo successivo comincia prima che questo sia finito, sotto 0 "
-    "esce un breakpoint a tempo negativo."
-)
-
-PATTERN_ORDER_HINT = (
-    "le percentuali del pattern non possono tornare indietro: il ciclo si "
-    "percorre in avanti una volta sola. Una percentuale ripetuta invece va "
-    "bene, è la discontinuità."
-)
-
-N_REPS_HINT = (
-    "il numero di ripetizioni del formato compatto è un intero >= 1 "
-    "(`true` non è `1`): con zero o meno cicli non c'è nessun breakpoint da "
-    "generare."
 )
 
 @dataclass(frozen=True)
@@ -159,141 +109,8 @@ def _issue(value: Any, hint: str) -> DeviationProbabilityIssue:
     return DeviationProbabilityIssue(value=value, hint=hint)
 
 
-def _check_interp(interp: Any) -> Optional[DeviationProbabilityIssue]:
-    """Un interp dichiarato vale una delle tre interpolazioni note.
-
-    `None` è l'interp omesso, che è valido: nel formato compatto il quarto
-    elemento si può lasciare vuoto.
-    """
-    if interp is None:
-        return None
-    if not isinstance(interp, str) or interp not in VALID_INTERP_TYPES:
-        return _issue(interp, INTERP_HINT)
-    return None
-
-
-def _check_time_dist(compact: list) -> Optional[DeviationProbabilityIssue]:
-    """Il quinto elemento, con le regole e le frasi del registro condiviso.
-
-    Sotto questa chiave il motore costruisce l'envelope direttamente
-    (`create_scaled_envelope` nel gate), quindi la coppia `(parametro,
-    n_reps)` trabocca nel punto in cui il builder espande il ciclo: dopo nome
-    e parametri, prima dell'elemento successivo della lista. Si guarda qui,
-    nello stesso ordine.
-
-    Il valore riportato è lo spec per nome e parametri, che sono suoi, e il
-    ciclo intero per l'overflow, che non è di nessuno dei due valori da solo.
-    """
-    issue = check_time_distribution(compact[4], compact[2])
-    if issue is None:
-        return None
-    valore = compact if issue.kind == 'overflow' else compact[4]
-    return _issue(valore, describe_issue(issue))
-
-
-def _check_points(points: Any, hint: str = POINTS_HINT
-                  ) -> Optional[DeviationProbabilityIssue]:
-    """Una lista di punti piatti, non vuota."""
-    if not isinstance(points, list) or not points:
-        return _issue(points, hint)
-    for p in points:
-        if not is_valid_point(p):
-            return _issue(p, POINTS_HINT)
-        if len(p) == 3:
-            issue = _check_interp(p[2])
-            if issue is not None:
-                return issue
-    return None
-
-
-def _check_bp_group(group: list) -> Optional[DeviationProbabilityIssue]:
-    """BP group `[points, interp]`: interp della macrozona, almeno 2 punti."""
-    points, interp = group
-    issue = _check_interp(interp)
-    if issue is not None:
-        return issue
-    if len(points) < 2:
-        return _issue(points, GROUP_ARITY_HINT)
-    return _check_points(points)
-
-
-def _check_compact(compact: list) -> Optional[DeviationProbabilityIssue]:
-    """Formato compatto `[pattern, end_time, n_reps, interp?, dist?, wrap?]`.
-
-    I guard su `end_time`, su `n_reps` e sulle percentuali del pattern sono
-    quelli **universali** di `envelope_shapes`, non una copia: dalla PGE #211
-    vivono in `EnvelopeBuilder._parse_compact_format`, che ogni chiave
-    attraversa, e questo modulo e' una delle chiavi.
-
-    Fino a quella issue stavano solo in `parameters/read_direction.py`, e la
-    prosa di questa funzione li dichiarava «guard sul verso (PGE #208), non sul
-    formato envelope». Era vero, e ha smesso di esserlo: il motore rifiuta
-    anche qui un `end_time` booleano o infinito, un `n_reps` booleano e un
-    pattern con percentuali fuori da [0, 100] o che tornano indietro. Il mirror
-    taceva su tutti e sei — un silenzio su YAML che non rende, cioe' il verso
-    peggiore in cui sbagliare, perche' nessuno lo vede.
-
-    Resta fuori `end_time <= time_offset`, che dipende dall'offset accumulato
-    dagli elementi che precedono il ciclo in una lista mista: verificarlo
-    vorrebbe dire rifare la passata di `EnvelopeBuilder.parse`. Il segno
-    invece e' decidibile, perche' quell'offset non e' mai negativo.
-    """
-    pattern, end_time, n_reps = compact[0], compact[1], compact[2]
-
-    issue = _check_points(pattern, PATTERN_HINT)
-    if issue is not None:
-        return issue
-
-    precedente = None
-    for point in pattern:
-        if not pattern_x_in_range(point[0]):
-            return _issue(point[0], PATTERN_X_HINT)
-        if not pattern_x_goes_forward(point[0], precedente):
-            return _issue(point[0], PATTERN_ORDER_HINT)
-        precedente = point[0]
-
-    if not compact_end_time_ok(end_time):
-        return _issue(end_time, END_TIME_HINT)
-
-    if not compact_n_reps_ok(n_reps):
-        return _issue(n_reps, N_REPS_HINT)
-
-    if len(compact) >= 4:
-        issue = _check_interp(compact[3])
-        if issue is not None:
-            return issue
-
-    if len(compact) >= 5:
-        issue = _check_time_dist(compact)
-        if issue is not None:
-            return issue
-
-    return None
-
-
-def _check_item(item: Any) -> Optional[DeviationProbabilityIssue]:
-    """Un elemento della lista: breakpoint, gruppo, ciclo compatto o dict."""
-    if is_loop_block(item):
-        return _check_compact(item)
-
-    if is_bp_group(item):
-        return _check_bp_group(item)
-
-    if is_3tuple_breakpoint(item):
-        return _check_interp(item[2])
-
-    if is_breakpoint(item):
-        return None
-
-    if isinstance(item, dict) and 't' in item and 'v' in item:
-        if not is_num(item['t']) or not is_num(item['v']):
-            return _issue(item, POINTS_HINT)
-        return _check_interp(item.get('type'))
-
-    return _issue(item, FORM_HINT)
-
-
-def check_envelope_body(body: Any, param_key: Optional[str] = None
+def check_envelope_body(body: Any, param_key: Optional[str] = None,
+                        time_mode: str = 'absolute',
                         ) -> Optional[DeviationProbabilityIssue]:
     """
     Dice se il motore costruirebbe un envelope da questo corpo.
@@ -306,19 +123,23 @@ def check_envelope_body(body: Any, param_key: Optional[str] = None
     Args:
         body: il valore letto dallo YAML.
         param_key: la chiave del dict per-parametro, per nominare il campo.
+        time_mode: il `time_mode` dello stream, con cui il gate scala il
+            corpo (`create_scaled_envelope`): vedi `envelope_guards`.
 
     Returns:
         None se il motore lo accetterebbe o se non c'è niente da decidere
         (numeri, stringhe, `None`); il primo problema altrimenti.
     """
-    issue = _check_body(body)
+    issue = _check_body(body, time_mode)
     if issue is None or param_key is None:
         return issue
     return DeviationProbabilityIssue(value=issue.value, hint=issue.hint,
                                      param_key=param_key)
 
 
-def _check_body(body: Any) -> Optional[DeviationProbabilityIssue]:
+def _check_body(body: Any,
+                time_mode: str = 'absolute',
+                ) -> Optional[DeviationProbabilityIssue]:
     # Un'espressione ovunque nel corpo rende il corpo indecidibile: il gate
     # non vede quel che c'è scritto, vede quel che ne esce. Vale per l'intero
     # corpo e non solo per il valore che la porta, perché una `(50/2)` nella
@@ -336,33 +157,29 @@ def _check_body(body: Any) -> Optional[DeviationProbabilityIssue]:
         # come è scritto e lo rifiuta (`InvalidParameterError`).
         return _issue(body, FORM_HINT)
 
-    if isinstance(body, dict):
-        if 'points' not in body:
-            return _issue(body, DICT_HINT)
-        issue = _check_points(body['points'])
-        if issue is not None:
-            return issue
-        return _check_interp(body.get('type'))
+    if isinstance(body, dict) and 'points' not in body:
+        return _issue(body, DICT_HINT)
 
-    if isinstance(body, list):
-        if not body:
-            return _issue(body, EMPTY_HINT)
-        if is_loop_block(body):
-            return _check_compact(body)
-        if is_bp_group(body):
-            return _check_bp_group(body)
-        for item in body:
-            issue = _check_item(item)
-            if issue is not None:
-                return issue
-        return None
+    if isinstance(body, list) and not body:
+        # La rifiuta il classificatore (PGE #209), prima del gate.
+        return _issue(body, EMPTY_HINT)
 
-    # Numeri, bool, None, stringhe: nulla da costruire, nulla da dire.
+    if isinstance(body, (list, dict)):
+        # Il resto e' la forma dell'envelope, la stessa sotto ogni chiave
+        # (PGE #211, #288): il gate passa il corpo a `create_scaled_envelope`
+        # come il parser di qualunque altro parametro.
+        issue = check_envelope_shape(body, time_mode)
+        if issue is None:
+            return None
+        return _issue(issue.value, issue.hint)
+
+    # Numeri, bool, None: nulla da costruire, nulla da dire.
     return None
 
 
 def check_global_value(
     raw: Any, known_keys: Optional[Iterable[str]] = None,
+    time_mode: str = 'absolute',
 ) -> Optional[DeviationProbabilityIssue]:
     """
     Valida il valore globale di `deviation_probability`.
@@ -397,8 +214,9 @@ def check_global_value(
                 continue  # chiave a null: range-only, non un errore
             if allowed is not None and key not in allowed:
                 continue  # chiave che il motore non consulta mai
-            issue = check_envelope_body(value, param_key=key)
+            issue = check_envelope_body(value, param_key=key,
+                                        time_mode=time_mode)
             if issue is not None:
                 return issue
         return None
-    return check_envelope_body(raw)
+    return check_envelope_body(raw, time_mode=time_mode)
