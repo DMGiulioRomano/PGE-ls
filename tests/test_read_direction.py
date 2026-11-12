@@ -388,6 +388,10 @@ class TestEspressioniMatematiche:
     def test_espressione_nella_x_di_un_breakpoint(self):
         assert accetta([['(5*2)', 1], [20, -1]])
 
+    def test_funzione_a_piu_argomenti_nella_y(self):
+        # PGE #309: `(max(-1, 1))` il Generator la valuta, e vale +1.
+        assert accetta([[0, '(max(-1, 1))'], [10, -1]])
+
     def test_espressione_dentro_points(self):
         assert accetta({'points': [[0, '(0-1)'], [10, 1]]})
 

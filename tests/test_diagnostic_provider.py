@@ -4239,6 +4239,17 @@ class TestDeviationProbabilityEnvelopeBody:
         )
         assert self._errors(provider, yaml) == []
 
+    def test_funzione_a_piu_argomenti_nella_y(self, bridge):
+        """PGE #309: la virgola fra gli argomenti non spegne l'espressione.
+        Fra virgolette, perche' in una flow sequence YAML la virgola nuda
+        separerebbe gli elementi."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    deviation_probability:\n"
+            "      pan: [[0, \"(max(0, 10))\"], [10, 100]]\n"
+        )
+        assert self._errors(provider, yaml) == []
+
     def test_espressione_dentro_points(self, bridge):
         provider = DiagnosticProvider(bridge)
         yaml = _stream_yaml(
@@ -4721,6 +4732,14 @@ class TestDistribuzioneTemporaleDelCiclo:
         yaml = _stream_yaml(
             "    density: "
             + _ciclo(dist="{type: geometric, ratio: (5*2)}") + "\n")
+        assert self._dist_errors(provider, yaml) == []
+
+    def test_funzione_a_piu_argomenti_nel_ciclo_tace(self, bridge):
+        """PGE #309: `(max(2, 3))` il motore la valuta come `(5*2)`."""
+        provider = DiagnosticProvider(bridge)
+        yaml = _stream_yaml(
+            "    density: "
+            + _ciclo(dist='{type: geometric, ratio: "(max(2, 3))"}') + "\n")
         assert self._dist_errors(provider, yaml) == []
 
     def test_la_somma_che_trabocca_e_errore(self, bridge):
