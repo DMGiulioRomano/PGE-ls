@@ -543,7 +543,8 @@ class SchemaBridge:
 
         Utile per parametri come 'scatter' e 'num_voices' che vivono in
         GRANULAR_PARAMETERS ma vengono parsati fuori da ALL_SCHEMAS
-        (es. direttamente in `VoicesController`, dalla PGE #284; prima in
+        (es. direttamente in `VoicesController.__init__` di
+        `pge.controllers.voices_controller`, dalla PGE #284; prima in
         `Stream._init_voice_manager`).
 
         Returns:
