@@ -105,6 +105,20 @@ def _import_pge_module(name: str):
         return importlib.import_module(name)
 
 
+def _note_fallback(fallbacks: list, lettura: str, exc: BaseException,
+                   ripiego: str = 'uso la copia statica') -> None:
+    """Dichiara una lettura del motore che non e' riuscita (#70).
+
+    Una riga su stderr — il canale che il client LSP mostra nel log del
+    server, e che non tocca lo stdout del protocollo — piu' la voce in
+    `fallbacks`, che diventa `SchemaBridge.read_fallbacks`.
+    """
+    errore = f'{type(exc).__name__}: {exc}'
+    fallbacks.append((lettura, errore))
+    print(f"[pge-ls] schema dal motore: lettura di {lettura} non riuscita "
+          f"({errore}); {ripiego}", file=sys.stderr)
+
+
 # =============================================================================
 # VALUE OBJECT
 # =============================================================================
@@ -173,6 +187,11 @@ class SchemaBridge:
             'bounds': { 'nome_param': { 'min_val': ..., 'max_val': ..., ... } }
         }
     """
+
+    # Le letture del motore che `from_python_path` non e' riuscita a fare,
+    # come coppie (lettura, eccezione) (#70). Vuoto per un bridge costruito
+    # da snapshot o da raw_data: li' non c'e' un motore da leggere.
+    read_fallbacks: Tuple[Tuple[str, str], ...] = ()
 
     def __init__(self, raw_data: dict):
         # KeyError deliberato se mancano le chiavi obbligatorie.
@@ -745,6 +764,12 @@ class SchemaBridge:
                     'variation_mode': b.variation_mode,
                 }
 
+            # Le letture che ripiegano (#70): ognuna scrive una riga su stderr
+            # e finisce in `read_fallbacks`, che la parita' pretende vuoto
+            # contro il motore vero. Prima ripiegavano in silenzio, e un nome
+            # rinominato nel motore lasciava l'enum alla copia statica.
+            fallbacks = []
+
             # Carica stream_context_keys dai dataclass reali
             stream_context_keys = []
             try:
@@ -766,10 +791,12 @@ class SchemaBridge:
                 # Flag speciali del Generator
                 stream_context_keys.extend(['solo', 'mute'])
 
-            except ImportError:
+            except ImportError as exc:
                 # StreamContext/StreamConfig non disponibili: usa lista vuota
                 # Il costruttore usera' la lista statica di fallback
                 stream_context_keys = []
+                _note_fallback(fallbacks,
+                               'core.stream_config (chiavi di stream)', exc)
 
             # Aggiungi parametri range_path.
             # Ogni ParameterSpec con range_path non-None definisce un parametro
@@ -828,20 +855,34 @@ class SchemaBridge:
             if stream_context_keys:
                 raw_data['stream_context_keys'] = stream_context_keys
 
-            # Carica le modalita' di distribuzione da DistributionFactory
+            # Carica le modalita' di distribuzione da DistributionFactory.
+            # `modes()` e' il punto pubblico pensato per i consumer esterni;
+            # `_registry` resta per i motori che lo precedono, e quel ripiego
+            # e' dichiarato come gli altri: e' un nome privato.
             try:
                 DistributionFactory = _import_pge_module(
                     'shared.distribution_strategy').DistributionFactory
-                raw_data['distribution_modes'] = list(DistributionFactory._registry.keys())
-            except Exception:
-                pass  # Usa il fallback statico nel costruttore
+                modes = getattr(DistributionFactory, 'modes', None)
+                if callable(modes):
+                    raw_data['distribution_modes'] = list(modes())
+                else:
+                    raw_data['distribution_modes'] = list(
+                        DistributionFactory._registry.keys())
+                    _note_fallback(
+                        fallbacks, 'DistributionFactory.modes()',
+                        AttributeError('assente: letto _registry'),
+                        'uso DistributionFactory._registry')
+            except Exception as exc:
+                # Usa il fallback statico nel costruttore
+                _note_fallback(fallbacks, 'DistributionFactory.modes()', exc)
 
             # Carica le ancore del range da RANGE_ANCHORS
             try:
                 raw_data['range_anchors'] = list(_import_pge_module(
                     'shared.distribution_strategy').RANGE_ANCHORS)
-            except Exception:
-                pass  # Usa il fallback statico nel costruttore
+            except Exception as exc:
+                # Usa il fallback statico nel costruttore
+                _note_fallback(fallbacks, 'RANGE_ANCHORS', exc)
 
             # Unita' del `_range` (PGE #267): il registry esiste perche' il
             # language server lo legga dal vivo invece di tenerne una copia.
@@ -852,8 +893,10 @@ class SchemaBridge:
                     parameter_definitions.RANGE_UNITS)
                 raw_data['relative_range_bounds'] = list(
                     parameter_definitions.RELATIVE_RANGE_BOUNDS)
-            except AttributeError:
-                pass  # Usa il fallback statico nel costruttore
+            except AttributeError as exc:
+                # Usa il fallback statico nel costruttore
+                _note_fallback(
+                    fallbacks, 'RANGE_UNITS / RELATIVE_RANGE_BOUNDS', exc)
 
             # Bounds che avvolgono (PGE #312). Un motore che lo precede non ha
             # `pointer.position`, quindi niente da avvolgere.
@@ -867,10 +910,13 @@ class SchemaBridge:
                 # all_names() include gli alias (es. 'triangle' -> 'bartlett'),
                 # che il motore accetta ma WINDOWS.keys() escluderebbe.
                 raw_data['grain_envelope_names'] = list(WindowRegistry.all_names())
-            except Exception:
-                pass  # Usa il fallback statico nel costruttore
+            except Exception as exc:
+                # Usa il fallback statico nel costruttore
+                _note_fallback(fallbacks, 'WindowRegistry.all_names()', exc)
 
-            return cls(raw_data)
+            bridge = cls(raw_data)
+            bridge.read_fallbacks = tuple(fallbacks)
+            return bridge
 
         finally:
             # Puliamo sys.path dopo l'import per non inquinare l'ambiente
