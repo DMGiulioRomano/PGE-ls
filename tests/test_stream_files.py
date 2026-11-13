@@ -13,7 +13,6 @@ Lo stream come file (PGE #290, PGE-ls #65): `- file: <path>` nella lista
   3. Completion e hover.
   4. Il server: path del documento alla diagnostica, link e go-to-file.
 """
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -202,20 +201,19 @@ class TestImportProblem:
 # -----------------------------------------------------------------------------
 
 def _pge_src():
-    env = os.environ.get('PGE_SRC')
-    if env and Path(env).exists():
-        return str(Path(env).resolve())
-    sibling = (Path(__file__).resolve().parent.parent.parent
-               / 'PythonGranularEngine' / 'src')
-    return str(sibling) if sibling.exists() else None
+    # Una sola risoluzione del motore per tutta la suite (#70).
+    from tests.pge_engine import PGE_SRC
+    return PGE_SRC
 
 
 @pytest.fixture(scope='module')
 def motore():
     src = _pge_src()
     if src is None:
-        pytest.skip('PGE src non trovato: imposta PGE_SRC o clona '
-                    'PythonGranularEngine come sibling di PGE-ls.')
+        # Che l'assenza sia un rosso quando la parita' e' pretesa lo dice
+        # test_pge_engine.py, una volta sola.
+        from tests.pge_engine import ABSENT_REASON
+        pytest.skip(ABSENT_REASON)
     aggiunto = src not in sys.path
     if aggiunto:
         sys.path.insert(0, src)
@@ -224,7 +222,10 @@ def motore():
         import importlib
         modulo = importlib.import_module('pge.engine.stream_files')
     except ImportError:
-        pytest.skip('il motore non ha pge.engine.stream_files (PGE #290)')
+        # Salta contro un motore che precede PGE #290, fallisce contro uno
+        # che contiene il commit dei patti (#70).
+        from tests.pge_engine import engine_lacks
+        engine_lacks('il motore non ha pge.engine.stream_files (PGE #290)')
     yield modulo
     for nome in set(sys.modules) - prima:
         if nome == 'pge' or nome.startswith('pge.'):
