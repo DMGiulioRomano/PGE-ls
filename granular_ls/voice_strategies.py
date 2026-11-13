@@ -602,8 +602,9 @@ VOICE_DIMENSIONS: List[str] = ['pitch', 'onset_offset', 'pointer', 'pan']
 
 # Chiavi envelope-capable di primo livello dentro voices:.
 # Hanno bounds in GRANULAR_PARAMETERS del motore ma nessun ParameterSpec in
-# ALL_SCHEMAS (vengono parsati direttamente in VoicesController, dalla PGE #284;
-# prima in Stream._init_voice_manager).
+# ALL_SCHEMAS (vengono parsati direttamente in `VoicesController.__init__` di
+# `pge.controllers.voices_controller`, dalla PGE #284; prima in
+# Stream._init_voice_manager).
 # Il loro dominio lo legge il bridge per nome, via get_raw_value_domain():
 # la diagnostica ci misura lo scalare E le Y dell'envelope, perche' il
 # motore le passa a parse_parameter come ogni altro parametro (issue #59).

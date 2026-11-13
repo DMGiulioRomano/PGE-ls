@@ -142,7 +142,9 @@ _GRAIN_DIRECTION_OWNED = frozenset({READ_DIRECTION_PATH, REVERSE_PATH})
 _PITCH_ENVELOPE_KEYS = PITCH_BLOCK_KEYS - frozenset({'edo'})
 
 # I kwarg di una dimensione voices che il motore estrae prima di convertire gli
-# altri in envelope (`Stream._init_voices`, `_parse_strategy_kwarg`): tutto il
+# altri in envelope (`pge.controllers.voices_controller`:
+# `VoicesController._build_voice_strategy`, i due `_take_voice_*_keys`,
+# `_parse_strategy_kwarg`; prima della PGE #284 stavano in `stream.py`): tutto il
 # resto, se ha forma di envelope, diventa un `Envelope` prima ancora che la
 # strategy sia costruita — anche un kwarg che la strategy poi rifiuta.
 _VOICE_STRUCTURAL_KWARGS = {
