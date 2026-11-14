@@ -27,6 +27,7 @@ from typing import Dict, Optional, Tuple
 
 from lsprotocol.types import Hover, MarkupContent, MarkupKind
 
+from granular_ls import maps as maps_rules
 from granular_ls.stream_files import (
     FILE_KEY, FILE_KEY_DOC, PLACEMENT_KEYS, PLACEMENT_NOTE,
     entry_imports_file, top_level_doc,
@@ -468,6 +469,13 @@ class HoverProvider:
         if file_hover is not None:
             return file_hover
 
+        # `maps:` (PGE #308): il blocco, il nome di una mappa (col suo tipo e
+        # l'intervallo del valore, che chi scrive `min + (max - min)*m1`
+        # deve conoscere) e le chiavi di una mappa.
+        maps_hover = self._build_maps_hover(context, document_text)
+        if maps_hover is not None:
+            return maps_hover
+
         # Contesto deviation_probability: hover sulla deviation_probability key
         if context.parent_path == ['deviation_probability']:
             return self._build_deviation_probability_key_hover(context.current_text)
@@ -577,6 +585,44 @@ class HoverProvider:
             hover = self._append_unit_note(hover, document_text,
                                            context.cursor_line)
         return hover
+
+    def _build_maps_hover(self, context: YamlContext,
+                          document_text: str) -> 'Optional[Hover]':
+        word = context.current_text
+        parent = context.parent_path or []
+        if not parent and word == 'maps':
+            return self._markdown(maps_rules.MAPS_DOC)
+        if parent == ['maps']:
+            tipo = self._map_type_near(document_text, context.cursor_line)
+            two = tipo == 'henon'
+            value = (f"**mappa `{word}`** — in un'espressione si legge come "
+                     f"`{word}`" + (f" (e `{word}.y`)" if two else "") + ".")
+            doc = maps_rules.map_kind_doc(tipo) if tipo else None
+            return self._markdown(value + ("\n\n" + doc if doc else ""))
+        if len(parent) == 2 and parent[0] == 'maps' and word in maps_rules.MAP_KEY_DOCS:
+            return self._markdown(f"**{word}**\n\n{maps_rules.MAP_KEY_DOCS[word]}")
+        return None
+
+    @staticmethod
+    def _map_type_near(document_text: str, line: int) -> 'Optional[str]':
+        """Il `type:` della mappa la cui chiave sta su `line`: nella forma
+        inline (`m1: {type: henon, ...}`) o nelle righe sotto."""
+        lines = document_text.split('\n') if document_text else []
+        if not 0 <= line < len(lines):
+            return None
+        m = re.search(r'\btype\s*:\s*([A-Za-z_]+)', lines[line])
+        if m:
+            return m.group(1)
+        indent = len(lines[line]) - len(lines[line].lstrip())
+        for riga in lines[line + 1:]:
+            if not riga.strip():
+                continue
+            if len(riga) - len(riga.lstrip()) <= indent:
+                break
+            m = re.match(r'^\s*type\s*:\s*([A-Za-z_]+)', riga)
+            if m:
+                return m.group(1)
+        return None
 
     # -------------------------------------------------------------------------
     # RISOLUZIONE PARAMETRO
