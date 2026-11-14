@@ -96,6 +96,13 @@ POSITION_EXCLUSIVE_KEYS = ('speed_ratio', 'start')
 STREAM_TEXT_KEYS = ('stream_id', 'sample')
 ENGINE_TOP_LEVEL_KEYS = ('seed',)
 
+#: I campi a espressione con un'unita' di misura
+#: (`pge.core.stream._UNIT_SCALED_EXPRESSION_FIELDS`): `_wrap_grain_expressions`
+#: fa un'espressione di **ogni** loro stringa, non solo di quelle scritte come
+#: tali (`_written_as_expression`), quindi `grain.duration: forte` e' un
+#: errore dell'interprete, non una stringa dove ci vuole un numero.
+UNIT_SCALED_EXPRESSION_FIELDS = ('grain.duration', 'grain.iot')
+
 
 # ---------------------------------------------------------------------------
 # Documentazione condivisa da hover e completion
@@ -216,13 +223,36 @@ def _ys(v) -> Optional[List[float]]:
             if isinstance(p, (list, tuple)) and len(p) in (2, 3) and _num(p[1])]
 
 
-def _check_map(name: str, spec, out: List[MapIssue]) -> None:
+#: Le chiavi di una mappa che vanno al riparo (`_EQUAZIONE` del riparo):
+#: le equazioni di una `custom`, testo nel linguaggio delle espressioni.
+_EQUATION_KEYS = ('x', 'y')
+
+
+def _after_load_time(spec: dict, declared: frozenset) -> dict:
+    """La mappa come la vede `parse_maps`: prima di lei la valutazione al
+    caricamento ha gia' fatto delle sue stringhe dei numeri (`r: (7/2)` e'
+    3.5). Restano testo le equazioni, che vanno al riparo, e le stringhe fra
+    parentesi che nominano una mappa dichiarata o `t`, che ci vanno anche
+    loro."""
+    out = {}
+    for key, value in spec.items():
+        if (isinstance(value, str) and key not in _EQUATION_KEYS
+                and not (EX.outer_parenthesized(value)
+                         and EX.names_in(value) & declared)):
+            value = EX.load_time_value(value)
+        out[key] = value
+    return out
+
+
+def _check_map(name: str, spec, out: List[MapIssue],
+               declared: frozenset = frozenset()) -> None:
     base = ('maps', name)
     campo = f'maps.{name}'
     if not isinstance(spec, dict):
         out.append(MapIssue(base, f"`{campo}`: una mappa e' un dizionario "
                                   "(type, r, ...)."))
         return
+    spec = _after_load_time(spec, declared)
     for key in spec:
         if key not in MAP_KEYS:
             out.append(MapIssue(base + (key,), f"`{campo}.{key}`: chiave "
@@ -366,6 +396,7 @@ def _check_maps(stream: dict, out: List[MapIssue]) -> None:
                                        "non servono, togli la chiave."))
         return
     reserved = reserved_map_names()
+    declared = frozenset(n for n in stream_variables(stream) if '.' not in n)
     for name, spec in raw.items():
         if not isinstance(name, str) or not _NOME.match(name):
             out.append(MapIssue(('maps', name), f"`maps.{name}`: il nome di una "
@@ -377,7 +408,7 @@ def _check_maps(stream: dict, out: List[MapIssue]) -> None:
                                 "— in un'espressione vuol dire gia' un'altra "
                                 f"cosa (riservati: {', '.join(sorted(reserved))})."))
             continue
-        _check_map(name, spec, out)
+        _check_map(name, spec, out, declared)
 
 
 def _strings(node, prefix=()):
@@ -403,7 +434,11 @@ def _check_expressions(stream: dict, out: List[MapIssue]) -> None:
     for dotted, path, text in _strings(stream):
         if dotted in EX.EXPRESSION_FIELDS:
             if EX.outer_parenthesized(text):
-                if EX.load_time_constant(text):
+                # Una costante del caricamento, se non nomina una mappa: con
+                # una mappa `int` dichiarata `(int(2))` va al riparo, e la
+                # compila l'interprete.
+                if (not (EX.names_in(text) & declared)
+                        and EX.load_time_constant(text)):
                     continue
                 c = EX.compile_expression(text, variables)
                 if not c.ok:
@@ -418,10 +453,18 @@ def _check_expressions(stream: dict, out: List[MapIssue]) -> None:
             if (_num(EX.load_time_value(text))
                     or EX.half_evaluated_proposal(text) is not None):
                 continue
-            if EX.compile_expression(text, variables).ok:
+            c = EX.compile_expression(text, variables)
+            if c.ok:
                 out.append(MapIssue(path, f"`{dotted}`: un'espressione si "
                                           f"scrive fra parentesi — es. "
                                           f"`({text.strip()})`."))
+            elif dotted in UNIT_SCALED_EXPRESSION_FIELDS:
+                # Qui ogni stringa e' un'espressione (`forte` compreso): il
+                # motore le porta tutte l'unita', e l'interprete le compila.
+                hint = f" {c.problem.hint}." if c.problem.hint else ""
+                out.append(MapIssue(path, f"Espressione non valida per "
+                                          f"`{dotted}`: {c.problem.reason}."
+                                          f"{hint}"))
             continue
         if not EX.outer_parenthesized(text):
             continue
@@ -469,7 +512,11 @@ def _check_modes(stream: dict, out: List[MapIssue]) -> None:
 def _check_half_evaluated(node, path, out) -> None:
     if isinstance(node, dict):
         for k, v in node.items():
-            if not path and k in ('maps',) + STREAM_TEXT_KEYS:
+            if not path and k in STREAM_TEXT_KEYS:
+                continue
+            # Le equazioni di una `custom` vanno al riparo: il resto di
+            # `maps:` passa dalla valutazione come ogni altra stringa.
+            if len(path) == 2 and path[0] == 'maps' and k in _EQUATION_KEYS:
                 continue
             _check_half_evaluated(v, path + (k,), out)
     elif isinstance(node, list):

@@ -732,6 +732,34 @@ class TestRipieghiDichiarati:
         _, err = capsys.readouterr()
         assert '_registry' in err
 
+    def test_wrapping_parameters_mancante_con_position_e_dichiarato(
+            self, granular_project_path, capsys):
+        """`pointer_position` nel registro e niente `WRAPPING_PARAMETERS`: la
+        costante e' stata spostata o rinominata, e senza una riga i falsi
+        rossi di `position: 1.25` tornerebbero in silenzio (PGE #312)."""
+        defs = Path(granular_project_path) / 'parameters' / 'parameter_definitions.py'
+        defs.write_text(defs.read_text().replace(
+            "    'grain_duration':",
+            "    'pointer_position': ParameterBounds(min_val=0.0, max_val=1.0),\n"
+            "    'grain_duration':"))
+        bridge = SchemaBridge.from_python_path(granular_project_path)
+        ripieghi = dict(bridge.read_fallbacks)
+        assert 'AttributeError' in ripieghi['WRAPPING_PARAMETERS']
+        assert bridge.get_wrapping_parameters() == frozenset()
+        _, err = capsys.readouterr()
+        assert 'WRAPPING_PARAMETERS' in err
+
+    def test_wrapping_parameters_letto_dal_motore(self, granular_project_path):
+        defs = Path(granular_project_path) / 'parameters' / 'parameter_definitions.py'
+        defs.write_text(defs.read_text().replace(
+            "    'grain_duration':",
+            "    'pointer_position': ParameterBounds(min_val=0.0, max_val=1.0),\n"
+            "    'grain_duration':")
+            + "\nWRAPPING_PARAMETERS = ('pointer_position',)\n")
+        bridge = SchemaBridge.from_python_path(granular_project_path)
+        assert 'WRAPPING_PARAMETERS' not in dict(bridge.read_fallbacks)
+        assert bridge.get_wrapping_parameters() == frozenset({'pointer_position'})
+
     def test_un_bridge_senza_motore_non_ha_ripieghi(self, tmp_path):
         bridge = SchemaBridge({'specs': [], 'bounds': {}})
         assert bridge.read_fallbacks == ()

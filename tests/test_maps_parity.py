@@ -119,6 +119,8 @@ def test_i_modi_esclusivi():
                     'STREAM_TEXT_KEYS') == M.STREAM_TEXT_KEYS
     assert _literal('pge/engine/half_evaluated.py',
                     'ENGINE_TOP_LEVEL_KEYS') == M.ENGINE_TOP_LEVEL_KEYS
+    assert _literal('pge/core/stream.py', '_UNIT_SCALED_EXPRESSION_FIELDS'
+                    ) == M.UNIT_SCALED_EXPRESSION_FIELDS
 
 
 def test_i_parametri_che_avvolgono(engine):

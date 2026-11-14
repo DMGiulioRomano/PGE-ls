@@ -335,3 +335,69 @@ def test_hover_del_nome_di_una_mappa(bridge):
 def test_hover_di_una_chiave_di_mappa(bridge):
     h = HoverProvider(bridge).get_hover(_ctx('key', 'iterate', ['maps', 'm1']), '')
     assert str(M.MAP_ITERATE_MAX) in h.contents.value
+
+
+# =============================================================================
+# Review della PR #80: cio' che il motore fa e il mirror non faceva
+# =============================================================================
+
+# Le chiavi di una mappa passano dalla valutazione al caricamento come ogni
+# altra stringa dello stream (solo le equazioni `x:`/`y:` vanno al riparo):
+# `r: (7/2)` arriva a `parse_maps` come 3.5. Il motore le rende tutte.
+COSTANTI_DEL_CARICAMENTO = {
+    'r': "    maps: {m1: {type: logistic, r: (7/2)}}\n",
+    'clock': "    maps: {m1: {type: logistic, r: 3.5, clock: (10/2)}}\n",
+    'iterate': "    maps: {m1: {type: logistic, r: 3.5, iterate: (2*2)}}\n",
+    'transient': "    maps: {m1: {type: logistic, r: 3.5, transient: (100*3)}}\n",
+    'x0': "    maps: {m1: {type: logistic, r: 3.5, x0: (1/4)}}\n",
+    'y0': "    maps: {m1: {type: henon, r: 1.4, y0: (1/10)}}\n",
+}
+
+
+@pytest.mark.parametrize('name', sorted(COSTANTI_DEL_CARICAMENTO))
+def test_una_costante_del_caricamento_in_una_mappa_e_un_numero(bridge, name):
+    assert diags(bridge, COSTANTI_DEL_CARICAMENTO[name]) == []
+
+
+def test_una_chiave_di_mappa_che_nomina_una_mappa_non_e_una_costante(bridge):
+    # `(m2)` va al riparo (nomina una mappa dichiarata): resta un testo, e
+    # `parse_maps` lo rifiuta.
+    body = ("    maps:\n      m2: {type: logistic, r: 3.5}\n"
+            "      m1: {type: logistic, r: (m2)}\n")
+    assert any('maps.m1.r' in d.message for d in errors(bridge, body))
+
+
+def test_una_mappa_che_si_chiama_come_una_funzione_del_caricamento(bridge):
+    # `int` non e' un nome riservato: con una mappa `int` dichiarata,
+    # `(int(2))` va al riparo, e l'interprete non conosce la funzione `int`.
+    body = "    maps: {int: {type: logistic, r: 3.5}}\n    volume: (int(2))\n"
+    msgs = [d.message for d in errors(bridge, body)]
+    assert any('funzione sconosciuta' in m for m in msgs), msgs
+    ok = "    maps: {float: {type: logistic, r: 3.5}}\n    volume: (-20 + float)\n"
+    assert diags(bridge, ok) == []
+
+
+@pytest.mark.parametrize('campo', ['duration', 'iot'])
+def test_una_parola_nei_campi_del_grano_e_un_espressione(bridge, campo):
+    # `_wrap_grain_expressions` porta l'unita' a ogni stringa di
+    # grain.duration e grain.iot, non solo a quelle scritte come
+    # un'espressione: `forte` lo compila l'interprete, e lo rifiuta.
+    body = f"    grain:\n      {campo}: forte\n"
+    msgs = [d.message for d in errors(bridge, body)]
+    assert any('nome sconosciuto «forte»' in m for m in msgs), msgs
+
+
+def test_una_parola_negli_altri_campi_non_e_un_espressione(bridge):
+    # `_wrap_block_expressions` invece guarda `_written_as_expression`.
+    assert not any('Espressione' in d.message
+                   for d in diags(bridge, "    density: not_a_number\n"))
+
+
+def test_la_meta_valutata_dentro_una_mappa(bridge):
+    # `find_half_evaluated` scende anche in `maps:`; al riparo ci sono solo
+    # le equazioni di una `custom`.
+    body = "    maps: {m1: {type: logistic, r: (7/2)*1}}\n"
+    msgs = [d.message for d in errors(bridge, body)]
+    assert any('((7/2)*1)' in m for m in msgs), msgs
+    eq = "    maps: {m1: {type: custom, x: (1+2)*x*(1-x)/3}}\n    volume: (-20 + m1)\n"
+    assert diags(bridge, eq) == []

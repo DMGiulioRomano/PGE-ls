@@ -9,7 +9,7 @@ Mirror di `pge/expressions/expression.py` (l'interprete, senza `eval`),
 `pge/expressions/fields.py` (dove un'espressione vale e dove no) e
 `pge/engine/expression_shelter.py` (`LOAD_TIME_NAMES`). Qui serve solo a dire
 *se* un testo compila e che cosa legge: le chiusure non servono. La parita'
-(`tests/test_pge_parity.py`) confronta i letterali e compila un corpus dai due
+(`tests/test_maps_parity.py`) confronta i letterali e compila un corpus dai due
 lati.
 
 In fondo, `load_time_value`: il mirror di `Generator._eval_math_expressions`

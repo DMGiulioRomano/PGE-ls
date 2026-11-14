@@ -899,9 +899,19 @@ class SchemaBridge:
                     fallbacks, 'RANGE_UNITS / RELATIVE_RANGE_BOUNDS', exc)
 
             # Bounds che avvolgono (PGE #312). Un motore che lo precede non ha
-            # `pointer.position`, quindi niente da avvolgere.
-            raw_data['wrapping_parameters'] = list(
-                getattr(parameter_definitions, 'WRAPPING_PARAMETERS', ()))
+            # `pointer.position`, quindi niente da avvolgere: li' l'assenza e'
+            # la risposta. Con `pointer_position` nel registro invece la
+            # costante deve esserci, o i suoi falsi rossi tornerebbero in
+            # silenzio (#70).
+            try:
+                raw_data['wrapping_parameters'] = list(
+                    parameter_definitions.WRAPPING_PARAMETERS)
+            except AttributeError as exc:
+                raw_data['wrapping_parameters'] = []
+                if 'pointer_position' in getattr(
+                        parameter_definitions, 'GRANULAR_PARAMETERS', {}):
+                    _note_fallback(fallbacks, 'WRAPPING_PARAMETERS', exc,
+                                   ripiego='nessun parametro avvolge')
 
             # Carica i nomi delle finestrature del grano da WindowRegistry
             try:
